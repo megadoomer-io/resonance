@@ -20,6 +20,8 @@ import resonance.types as types_module
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+_PAGE_SIZE = 50
+
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent.parent / "templates"
 templates = fastapi.templating.Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
@@ -108,6 +110,43 @@ async def dashboard(
             "latest_sync": latest_sync,
         },
     )
+
+
+@router.get("/artists", response_model=None)
+async def artists_page(
+    request: fastapi.Request,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render paginated artists list, or redirect to login."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(music_models.Artist)
+            .order_by(music_models.Artist.name)
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        artists = list(result.scalars().all())
+
+    has_next = len(artists) > _PAGE_SIZE
+    artists = artists[:_PAGE_SIZE]
+
+    context = {
+        "user_id": user_id,
+        "artists": artists,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/artist_list.html", context)
+    return templates.TemplateResponse(request, "artists.html", context)
 
 
 @router.get("/partials/sync-status", response_model=None)
