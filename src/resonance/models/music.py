@@ -73,3 +73,5 @@ class ListeningEvent(base_module.TimestampMixin, base_module.Base):
     listened_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=False
     )
+
+    track: orm.Mapped[Track] = orm.relationship()

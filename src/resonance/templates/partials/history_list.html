@@ -1,0 +1,43 @@
+{% if events %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Track</th>
+                <th>Artist</th>
+                <th>Played</th>
+                <th>Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for event in events %}
+            <tr>
+                <td>{{ event.track.title }}</td>
+                <td>{{ event.track.artist.name }}</td>
+                <td>{{ event.listened_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ event.source_service.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if has_prev %}
+    <a href="/history?page={{ page - 1 }}"
+       hx-get="/history?page={{ page - 1 }}"
+       hx-target="#history-list"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/history?page={{ page + 1 }}"
+       hx-get="/history?page={{ page + 1 }}"
+       hx-target="#history-list"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No listening history yet.</p>
+{% endif %}

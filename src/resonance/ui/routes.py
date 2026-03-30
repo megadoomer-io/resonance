@@ -189,6 +189,52 @@ async def tracks_page(
     return templates.TemplateResponse(request, "tracks.html", context)
 
 
+@router.get("/history", response_model=None)
+async def history_page(
+    request: fastapi.Request,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render paginated listening history, or redirect to login."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(music_models.ListeningEvent)
+            .where(music_models.ListeningEvent.user_id == user_uuid)
+            .order_by(music_models.ListeningEvent.listened_at.desc())
+            .options(
+                sa_orm.joinedload(music_models.ListeningEvent.track).joinedload(
+                    music_models.Track.artist
+                )
+            )
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        events = list(result.scalars().unique().all())
+
+    has_next = len(events) > _PAGE_SIZE
+    events = events[:_PAGE_SIZE]
+
+    context = {
+        "user_id": user_id,
+        "events": events,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/history_list.html", context
+        )
+    return templates.TemplateResponse(request, "history.html", context)
+
+
 @router.get("/partials/sync-status", response_model=None)
 async def sync_status_partial(
     request: fastapi.Request,
