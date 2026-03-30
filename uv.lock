@@ -791,6 +791,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "itsdangerous" },
+    { name = "psycopg2-binary" },
     { name = "pydantic-settings" },
     { name = "redis", extra = ["hiredis"] },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -800,7 +801,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
-    { name = "psycopg2-binary" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -815,7 +815,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "itsdangerous", specifier = ">=2.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15" },
-    { name = "psycopg2-binary", marker = "extra == 'dev'", specifier = ">=2.9" },
+    { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25" },
