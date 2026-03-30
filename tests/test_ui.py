@@ -36,3 +36,12 @@ async def test_unauthenticated_root_redirects_to_login(
     response = await client.get("/")
     assert response.status_code == 307
     assert response.headers["location"] == "/login"
+
+
+class TestDashboard:
+    """Tests for the dashboard page."""
+
+    async def test_dashboard_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
