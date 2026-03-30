@@ -13,6 +13,7 @@ import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
 import resonance.middleware.session as session_middleware
+import resonance.ui.routes as ui_routes_module
 
 
 @asynccontextmanager
@@ -53,6 +54,9 @@ def create_app() -> fastapi.FastAPI:
 
     # Register API routes
     application.include_router(api_v1_module.router)
+
+    # Register UI routes
+    application.include_router(ui_routes_module.router)
 
     # Set up connector registry
     connector_registry = registry_module.ConnectorRegistry()
