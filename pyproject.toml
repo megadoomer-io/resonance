@@ -40,6 +40,7 @@ asyncio_mode = "auto"
 [tool.ruff]
 target-version = "py314"
 src = ["src", "tests"]
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = [
