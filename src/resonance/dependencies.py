@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Annotated
 
 import fastapi
 
+import resonance.middleware.session as session_module  # noqa: TC001 - runtime import required for FastAPI dependency resolution
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     import sqlalchemy.ext.asyncio as sa_async
-
-    import resonance.middleware.session as session_module
 
 
 def get_session(request: fastapi.Request) -> session_module.SessionData:
