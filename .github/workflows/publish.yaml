@@ -10,8 +10,16 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image-tag: ${{ steps.image-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Generate image tag
+        id: image-tag
+        run: |
+          TAG="$(date -u '+%Y%m%dT%H%M%S')-$(git rev-parse --short HEAD)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v3
         with:
@@ -25,7 +33,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
-            type=raw,value={{commit_date 'YYYYMMDDTHHmmss' tz='UTC'}}-{{sha}}
+            type=raw,value=${{ steps.image-tag.outputs.tag }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -37,3 +45,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  update-config:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: megadoomer-io/megadoomer-config
+          token: ${{ secrets.GH_TOKEN_MEGADOOMER_CONFIG_WRITE }}
+
+      - name: Update image tag
+        run: |
+          cd applications/resonance/resonance/do
+          docker run --rm \
+            -v "$(pwd)":/work \
+            --workdir /work \
+            registry.k8s.io/kustomize/kustomize:v5.8.1 \
+            edit set image app=ghcr.io/megadoomer-io/resonance:${{ needs.build-and-push.outputs.image-tag }}
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add applications/resonance/resonance/do/kustomization.yaml
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git pull --rebase --autostash
+          git commit -m "chore: update resonance image to ${{ needs.build-and-push.outputs.image-tag }}"
+          git push
