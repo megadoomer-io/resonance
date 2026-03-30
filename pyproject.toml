@@ -53,6 +53,11 @@ select = [
     "RUF", # ruff-specific
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# SQLAlchemy resolves Mapped[] annotations at runtime, so datetime/uuid
+# must remain as runtime imports even with `from __future__ import annotations`.
+"src/resonance/models/*.py" = ["TC003"]
+
 [tool.mypy]
 strict = true
 warn_return_any = true
