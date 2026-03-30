@@ -4,7 +4,10 @@ from contextlib import asynccontextmanager
 import fastapi
 import redis.asyncio as aioredis
 
+import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
+import resonance.connectors.registry as registry_module
+import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
 import resonance.middleware.session as session_middleware
 
@@ -44,6 +47,14 @@ def create_app() -> fastapi.FastAPI:
         redis=session_redis,
         secret_key=settings.session_secret_key,
     )
+
+    # Register API routes
+    application.include_router(api_v1_module.router)
+
+    # Set up connector registry
+    connector_registry = registry_module.ConnectorRegistry()
+    connector_registry.register(spotify_module.SpotifyConnector(settings=settings))
+    application.state.connector_registry = connector_registry
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
