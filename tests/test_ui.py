@@ -72,3 +72,12 @@ class TestHistoryPage:
         response = await client.get("/history", follow_redirects=False)
         assert response.status_code == 307
         assert response.headers["location"] == "/login"
+
+
+class TestAccountPage:
+    """Tests for the account page."""
+
+    async def test_account_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/account", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"

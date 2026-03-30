@@ -235,6 +235,39 @@ async def history_page(
     return templates.TemplateResponse(request, "history.html", context)
 
 
+@router.get("/account", response_model=None)
+async def account_page(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render account page with profile and connection management."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+
+    async with _get_db(request) as db:
+        user_result = await db.execute(
+            sa.select(user_models.User).where(user_models.User.id == user_uuid)
+        )
+        user = user_result.scalar_one_or_none()
+
+        connections_result = await db.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == user_uuid
+            )
+        )
+        connections: Sequence[user_models.ServiceConnection] = (
+            connections_result.scalars().all()
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "account.html",
+        {"user_id": user_id, "user": user, "connections": connections},
+    )
+
+
 @router.get("/partials/sync-status", response_model=None)
 async def sync_status_partial(
     request: fastapi.Request,

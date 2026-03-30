@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Account - Resonance{% endblock %}
+
+{% block content %}
+<h1>Account</h1>
+
+<article>
+    <header>Profile</header>
+    <p><strong>Display Name:</strong> {{ user.display_name }}</p>
+    {% if user.email %}
+    <p><strong>Email:</strong> {{ user.email }}</p>
+    {% endif %}
+    <p><strong>Member Since:</strong> {{ user.created_at.strftime('%Y-%m-%d') }}</p>
+</article>
+
+<h2>Connected Services</h2>
+{% if connections %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>Account ID</th>
+                <th>Connected</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for conn in connections %}
+            <tr id="connection-{{ conn.id }}">
+                <td>{{ conn.service_type.value | capitalize }}</td>
+                <td>{{ conn.external_user_id }}</td>
+                <td>{{ conn.connected_at.strftime('%Y-%m-%d') }}</td>
+                <td>
+                    {% if connections | length > 1 %}
+                    <button
+                        hx-delete="/api/v1/account/connections/{{ conn.id }}"
+                        hx-confirm="Disconnect this service? You will need to re-authenticate to use it again."
+                        hx-on::after-request="location.reload()"
+                    >Disconnect</button>
+                    {% else %}
+                    <small>Last connection</small>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No services connected.</p>
+{% endif %}
+
+<h2>Connect Another Service</h2>
+<p><a href="/api/v1/auth/spotify" role="button">Connect Spotify</a></p>
+
+<h2>Log Out</h2>
+<form method="post" action="/api/v1/auth/logout">
+    <button type="submit" class="secondary">Log Out</button>
+</form>
+{% endblock %}
