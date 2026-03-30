@@ -12,6 +12,11 @@ Personal media discovery platform — aggregates music data from external servic
 ## Development Commands
 
 ```bash
+# Install all dependencies (including dev tools: pytest, ruff, mypy)
+# IMPORTANT: Dev tools (pytest, ruff, mypy) are in [project.optional-dependencies] dev.
+# Plain `uv sync` does NOT install them. Always use --all-extras.
+uv sync --all-extras
+
 # Run the app locally
 uv run uvicorn resonance.app:create_app --factory --reload
 
