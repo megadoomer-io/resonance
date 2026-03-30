@@ -7,13 +7,17 @@ class Settings(pydantic_settings.BaseSettings):
     app_name: str = "resonance"
     debug: bool = False
 
-    # Database
-    database_url: str = (
-        "postgresql+asyncpg://resonance:resonance@localhost:5432/resonance"
-    )
+    # Database (standard PG env vars)
+    pghost: str = "localhost"
+    pgport: int = 5432
+    pguser: str = "resonance"
+    pgpassword: str = "resonance"
+    pgdatabase: str = "resonance"
 
     # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
 
     # Session
     session_secret_key: str = "change-me-in-production"
@@ -26,3 +30,19 @@ class Settings(pydantic_settings.BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
     spotify_redirect_uri: str = "http://localhost:8000/api/v1/auth/spotify/callback"
+
+    @property
+    def database_url(self) -> str:
+        """Async PostgreSQL URL for SQLAlchemy."""
+        return f"postgresql+asyncpg://{self.pguser}:{self.pgpassword}@{self.pghost}:{self.pgport}/{self.pgdatabase}"
+
+    @property
+    def sync_database_url(self) -> str:
+        """Sync PostgreSQL URL for Alembic."""
+        return f"postgresql://{self.pguser}:{self.pgpassword}@{self.pghost}:{self.pgport}/{self.pgdatabase}"
+
+    @property
+    def redis_url(self) -> str:
+        """Redis connection URL."""
+        auth = f":{self.redis_password}@" if self.redis_password else ""
+        return f"redis://{auth}{self.redis_host}:{self.redis_port}/0"
