@@ -6,6 +6,7 @@ import redis.asyncio as aioredis
 
 import resonance.config as config_module
 import resonance.database as database_module
+import resonance.middleware.session as session_middleware
 
 
 @asynccontextmanager
@@ -36,6 +37,13 @@ def create_app() -> fastapi.FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = settings
+
+    session_redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    application.add_middleware(
+        session_middleware.SessionMiddleware,
+        redis=session_redis,
+        secret_key=settings.session_secret_key,
+    )
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
