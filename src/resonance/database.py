@@ -1,6 +1,9 @@
+from typing import TYPE_CHECKING
+
 import sqlalchemy.ext.asyncio as sa_async
 
-import resonance.config as config_module
+if TYPE_CHECKING:
+    import resonance.config as config_module
 
 
 def create_async_engine(settings: config_module.Settings) -> sa_async.AsyncEngine:

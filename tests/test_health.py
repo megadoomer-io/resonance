@@ -1,7 +1,10 @@
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 import resonance.app as app_module
 

@@ -98,7 +98,7 @@ class SessionMiddleware(base_middleware.BaseHTTPMiddleware):
                 if raw is not None:
                     data: dict[str, Any] = json.loads(raw)
                     return SessionData(session_id=session_id, data=data)
-            except (itsdangerous.BadSignature, itsdangerous.SignatureExpired):
+            except itsdangerous.BadSignature, itsdangerous.SignatureExpired:
                 pass
 
         # No valid session found — create a new one.

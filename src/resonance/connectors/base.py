@@ -5,7 +5,7 @@ import enum
 
 import pydantic
 
-import resonance.types as types_module
+import resonance.types as types_module  # noqa: TC001 — Pydantic models need this at runtime
 
 
 class ConnectorCapability(enum.StrEnum):

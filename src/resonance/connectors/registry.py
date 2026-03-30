@@ -1,7 +1,10 @@
 """Registry for managing connector instances by service type."""
 
-import resonance.connectors.base as base_module
-import resonance.types as types_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import resonance.connectors.base as base_module
+    import resonance.types as types_module
 
 
 class ConnectorRegistry:
