@@ -11,6 +11,7 @@ import fastapi.responses
 import fastapi.templating
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import sqlalchemy.orm as sa_orm
 
 import resonance.models.music as music_models
 import resonance.models.sync as sync_models
@@ -147,6 +148,45 @@ async def artists_page(
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(request, "partials/artist_list.html", context)
     return templates.TemplateResponse(request, "artists.html", context)
+
+
+@router.get("/tracks", response_model=None)
+async def tracks_page(
+    request: fastapi.Request,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render paginated tracks list with artist names, or redirect to login."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(music_models.Track)
+            .join(music_models.Artist)
+            .order_by(music_models.Track.title)
+            .options(sa_orm.joinedload(music_models.Track.artist))
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        tracks = list(result.scalars().unique().all())
+
+    has_next = len(tracks) > _PAGE_SIZE
+    tracks = tracks[:_PAGE_SIZE]
+
+    context = {
+        "user_id": user_id,
+        "tracks": tracks,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/track_list.html", context)
+    return templates.TemplateResponse(request, "tracks.html", context)
 
 
 @router.get("/partials/sync-status", response_model=None)

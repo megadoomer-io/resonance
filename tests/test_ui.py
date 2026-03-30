@@ -54,3 +54,12 @@ class TestArtistsPage:
         response = await client.get("/artists", follow_redirects=False)
         assert response.status_code == 307
         assert response.headers["location"] == "/login"
+
+
+class TestTracksPage:
+    """Tests for the tracks page."""
+
+    async def test_tracks_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/tracks", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
