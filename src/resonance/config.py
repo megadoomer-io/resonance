@@ -31,6 +31,13 @@ class Settings(pydantic_settings.BaseSettings):
     spotify_client_secret: str = ""
     spotify_redirect_uri: str = "http://localhost:8000/api/v1/auth/spotify/callback"
 
+    # MusicBrainz OAuth (for ListenBrainz auth)
+    musicbrainz_client_id: str = ""
+    musicbrainz_client_secret: str = ""
+    musicbrainz_redirect_uri: str = (
+        "http://localhost:8000/api/v1/auth/listenbrainz/callback"
+    )
+
     @property
     def database_url(self) -> str:
         """Async PostgreSQL URL for SQLAlchemy."""

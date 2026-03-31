@@ -48,3 +48,10 @@ def test_settings_has_spotify_credentials() -> None:
     assert hasattr(settings, "spotify_client_id")
     assert hasattr(settings, "spotify_client_secret")
     assert hasattr(settings, "spotify_redirect_uri")
+
+
+def test_settings_has_musicbrainz_credentials() -> None:
+    settings = config_module.Settings()
+    assert hasattr(settings, "musicbrainz_client_id")
+    assert hasattr(settings, "musicbrainz_client_secret")
+    assert hasattr(settings, "musicbrainz_redirect_uri")
