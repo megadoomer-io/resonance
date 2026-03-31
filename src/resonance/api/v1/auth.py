@@ -171,6 +171,26 @@ async def auth_callback(
             raise fastapi.HTTPException(status_code=503, detail=detail)
 
     if existing_connection is not None:
+        current_user_id = session.get("user_id")
+
+        # CONFLICT: connection belongs to a different user than the logged-in user
+        if current_user_id is not None and existing_connection.user_id != uuid.UUID(
+            current_user_id
+        ):
+            # Store merge details for the merge page
+            session["merge_source_user_id"] = str(existing_connection.user_id)
+            session["merge_service_type"] = service_type.value
+            session["merge_connection_id"] = str(existing_connection.id)
+            # Update tokens (they're fresh from the OAuth flow)
+            existing_connection.encrypted_access_token = encrypted_access
+            existing_connection.encrypted_refresh_token = encrypted_refresh
+            existing_connection.token_expires_at = token_expires_at
+            existing_connection.scopes = tokens.scope
+            await db.commit()
+            session["oauth_state"] = None
+            session["oauth_service"] = None
+            return fastapi_responses.RedirectResponse(url="/merge", status_code=307)
+
         # Returning user — update tokens
         existing_connection.encrypted_access_token = encrypted_access
         existing_connection.encrypted_refresh_token = encrypted_refresh

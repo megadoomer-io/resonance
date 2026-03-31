@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
+import fastapi
 import httpx
 import pytest
 
@@ -13,6 +15,7 @@ import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.middleware.session as session_middleware
+import resonance.models.user as user_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -24,7 +27,7 @@ def _make_settings() -> config_module.Settings:
     return config_module.Settings(
         spotify_client_id="test-client-id",
         spotify_client_secret="test-client-secret",
-        token_encryption_key="dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODk=",
+        token_encryption_key="y4s2fMagCz79NWhqQfaAPbTBl9vnamqcvlGM6GRH2cQ=",
     )
 
 
@@ -103,8 +106,6 @@ class FakeSessionFactory:
 
 def _create_test_app(connector: base_module.BaseConnector | None = None) -> Any:
     """Create a test app with fake Redis and an optional mock connector."""
-    import fastapi
-
     import resonance.api.v1 as api_v1_module
 
     settings = _make_settings()
@@ -224,6 +225,93 @@ class TestAuthCallback:
             "/api/v1/auth/unknown_service/callback?code=test&state=test"
         )
         assert response.status_code == 404
+
+    async def test_callback_cross_user_conflict_redirects_to_merge(self) -> None:
+        """When logged-in user A hits callback for a connection owned by user B,
+        redirect to /merge with merge session data."""
+        user_a_id = uuid.uuid4()
+        user_b_id = uuid.uuid4()
+        connection_id = uuid.uuid4()
+
+        # Create a mock existing connection belonging to User B
+        existing_connection = MagicMock(spec=user_models.ServiceConnection)
+        existing_connection.user_id = user_b_id
+        existing_connection.id = connection_id
+
+        # FakeAsyncSession that returns the existing connection
+        class ConflictFakeAsyncSession(FakeAsyncSession):
+            async def execute(self, *args: Any, **kwargs: Any) -> Any:
+                return MagicMock(
+                    scalar_one_or_none=MagicMock(return_value=existing_connection)
+                )
+
+        class ConflictSessionFactory:
+            def __call__(self) -> ConflictFakeAsyncSession:
+                return ConflictFakeAsyncSession()
+
+        connector = _make_mock_spotify_connector()
+        # Make get_auth_url pass through the state so we can extract it
+        connector.get_auth_url = MagicMock(
+            side_effect=lambda state: (
+                f"https://accounts.spotify.com/authorize?state={state}"
+            )
+        )
+        application = _create_test_app(connector=connector)
+        application.state.session_factory = ConflictSessionFactory()
+
+        # Add helper endpoints before creating the transport
+        @application.get("/_test_set_user")
+        async def set_user(request: fastapi.Request) -> dict[str, str]:
+            request.state.session["user_id"] = str(user_a_id)
+            return {"ok": "true"}
+
+        @application.get("/_test_read_session")
+        async def read_session(request: fastapi.Request) -> dict[str, str | None]:
+            sess = request.state.session
+            return {
+                "user_id": sess.get("user_id"),
+                "merge_source_user_id": sess.get("merge_source_user_id"),
+                "merge_service_type": sess.get("merge_service_type"),
+                "merge_connection_id": sess.get("merge_connection_id"),
+            }
+
+        transport = httpx.ASGITransport(app=application)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            # Step 1: Initiate OAuth to get a valid session with oauth_state
+            init_resp = await c.get("/api/v1/auth/spotify", follow_redirects=False)
+            assert init_resp.status_code == 307
+
+            # Step 2: Set user_id in session (simulates logged-in User A)
+            await c.get("/_test_set_user")
+
+            # Step 3: Re-initiate OAuth to get a fresh state token in session
+            init_resp2 = await c.get("/api/v1/auth/spotify", follow_redirects=False)
+            assert init_resp2.status_code == 307
+            # Extract state from redirect URL
+            location = init_resp2.headers["location"]
+            state_param = location.split("state=")[1]
+
+            # Step 4: Hit the callback
+            callback_resp = await c.get(
+                f"/api/v1/auth/spotify/callback?code=testcode&state={state_param}",
+                follow_redirects=False,
+            )
+
+            # Should redirect to /merge with 307
+            assert callback_resp.status_code == 307
+            assert callback_resp.headers["location"] == "/merge"
+
+            # Verify session state via helper endpoint
+            session_resp = await c.get("/_test_read_session")
+            merge_data = session_resp.json()
+
+            # User stays logged in as user A
+            assert merge_data["user_id"] == str(user_a_id)
+            # Merge session data is present
+            assert merge_data["merge_source_user_id"] == str(user_b_id)
+            assert merge_data["merge_service_type"] == "spotify"
+            assert merge_data["merge_connection_id"] == str(connection_id)
 
 
 class TestAuthLogout:
