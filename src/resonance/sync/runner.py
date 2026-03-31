@@ -124,6 +124,7 @@ async def _sync_spotify(
     saved_tracks = await connector.get_saved_tracks(access_token)
     for track_data in saved_tracks:
         await _upsert_artist_from_track(session, track_data)
+        await session.flush()  # ensure artist is persisted before track FK
         created = await _upsert_track(session, track_data)
         if created:
             items_created += 1
@@ -175,6 +176,7 @@ async def _sync_listenbrainz(
 
         for listen in listens:
             await _upsert_artist_from_track(session, listen.track)
+            await session.flush()  # ensure artist is persisted before track FK
             created = await _upsert_track(session, listen.track)
             if created:
                 items_created += 1
