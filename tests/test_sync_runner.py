@@ -6,17 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import resonance.connectors.base as base_module
+import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.sync.runner as runner_module
 import resonance.types as types_module
 
 
 def _make_artist_data(
-    external_id: str = "art1", name: str = "Artist One"
+    external_id: str = "art1",
+    name: str = "Artist One",
+    service: types_module.ServiceType = types_module.ServiceType.SPOTIFY,
 ) -> base_module.ArtistData:
     return base_module.ArtistData(
         external_id=external_id,
         name=name,
-        service=types_module.ServiceType.SPOTIFY,
+        service=service,
     )
 
 
@@ -25,13 +28,33 @@ def _make_track_data(
     title: str = "Song One",
     artist_external_id: str = "art1",
     artist_name: str = "Artist One",
+    service: types_module.ServiceType = types_module.ServiceType.SPOTIFY,
 ) -> base_module.TrackData:
     return base_module.TrackData(
         external_id=external_id,
         title=title,
         artist_external_id=artist_external_id,
         artist_name=artist_name,
-        service=types_module.ServiceType.SPOTIFY,
+        service=service,
+    )
+
+
+def _make_lb_listen(
+    recording_mbid: str = "rec-mbid-1",
+    title: str = "LB Song",
+    artist_mbid: str = "artist-mbid-1",
+    artist_name: str = "LB Artist",
+    listened_at: int = 1700000000,
+) -> listenbrainz_module.ListenBrainzListenItem:
+    return listenbrainz_module.ListenBrainzListenItem(
+        track=base_module.TrackData(
+            external_id=recording_mbid,
+            title=title,
+            artist_external_id=artist_mbid,
+            artist_name=artist_name,
+            service=types_module.ServiceType.LISTENBRAINZ,
+        ),
+        listened_at=listened_at,
     )
 
 
@@ -346,3 +369,247 @@ class TestRunSyncWithData:
 
         assert mock_job.status == types_module.SyncStatus.COMPLETED
         assert mock_session.add.call_count > 0
+
+
+def _mock_session_with_connection(
+    external_user_id: str = "testuser",
+) -> AsyncMock:
+    """Create a mock session that returns a ServiceConnection on first query."""
+    session = AsyncMock()
+    # The first execute() call fetches the ServiceConnection; subsequent ones
+    # return None (for upsert lookups).
+    connection = MagicMock()
+    connection.external_user_id = external_user_id
+
+    conn_result = MagicMock()
+    conn_result.scalar_one.return_value = connection
+
+    default_result = MagicMock()
+    default_result.scalar_one_or_none.return_value = None
+
+    session.execute.side_effect = [conn_result] + [default_result] * 200
+    session.add = MagicMock()
+    return session
+
+
+def _mock_lb_connector(
+    get_listens_pages: list[list[listenbrainz_module.ListenBrainzListenItem]],
+) -> MagicMock:
+    """Create a mock ListenBrainzConnector that returns pages then empty list."""
+    connector = MagicMock(spec=listenbrainz_module.ListenBrainzConnector)
+    connector.service_type = types_module.ServiceType.LISTENBRAINZ
+    connector.get_listens = AsyncMock(side_effect=[*get_listens_pages, []])
+    return connector
+
+
+class TestListenBrainzSync:
+    """Tests for ListenBrainz sync path."""
+
+    @pytest.mark.anyio()
+    async def test_listenbrainz_sync_creates_events(
+        self,
+        mock_job: MagicMock,
+    ) -> None:
+        """ListenBrainz sync creates listening events from listen items."""
+        listens = [
+            _make_lb_listen(
+                recording_mbid="rec1",
+                title="Song A",
+                artist_mbid="art1",
+                artist_name="Artist A",
+                listened_at=1700000100,
+            ),
+            _make_lb_listen(
+                recording_mbid="rec2",
+                title="Song B",
+                artist_mbid="art2",
+                artist_name="Artist B",
+                listened_at=1700000000,
+            ),
+        ]
+        connector = _mock_lb_connector([listens])
+        session = _mock_session_with_connection("testuser")
+
+        await runner_module.run_sync(mock_job, connector, session, "")
+
+        assert mock_job.status == types_module.SyncStatus.COMPLETED
+        assert mock_job.items_created == 2
+        # get_listens called twice: once with data, once returning empty
+        assert connector.get_listens.await_count == 2
+        connector.get_listens.assert_any_await("testuser", max_ts=None, count=100)
+
+    @pytest.mark.anyio()
+    async def test_listenbrainz_sync_paginates(
+        self,
+        mock_job: MagicMock,
+    ) -> None:
+        """ListenBrainz sync walks backward through pages using max_ts."""
+        page1 = [
+            _make_lb_listen(listened_at=1700000200),
+            _make_lb_listen(
+                recording_mbid="rec2",
+                listened_at=1700000100,
+            ),
+        ]
+        page2 = [
+            _make_lb_listen(
+                recording_mbid="rec3",
+                listened_at=1700000050,
+            ),
+        ]
+        connector = _mock_lb_connector([page1, page2])
+        session = _mock_session_with_connection("paginateuser")
+
+        await runner_module.run_sync(mock_job, connector, session, "")
+
+        assert mock_job.status == types_module.SyncStatus.COMPLETED
+        # 3 calls: page1, page2, empty
+        assert connector.get_listens.await_count == 3
+        # Second call should use the oldest listen's timestamp from page1
+        connector.get_listens.assert_any_await(
+            "paginateuser", max_ts=1700000100, count=100
+        )
+        # Third call uses oldest from page2
+        connector.get_listens.assert_any_await(
+            "paginateuser", max_ts=1700000050, count=100
+        )
+        # Commits per page (2 pages + start + final)
+        assert session.commit.await_count >= 4
+
+    @pytest.mark.anyio()
+    async def test_listenbrainz_sync_empty_listens(
+        self,
+        mock_job: MagicMock,
+    ) -> None:
+        """ListenBrainz sync with no listens completes with zero items."""
+        connector = _mock_lb_connector([])
+        session = _mock_session_with_connection("emptyuser")
+
+        await runner_module.run_sync(mock_job, connector, session, "")
+
+        assert mock_job.status == types_module.SyncStatus.COMPLETED
+        assert mock_job.items_created == 0
+        assert mock_job.items_updated == 0
+
+
+class TestMBIDArtistMatching:
+    """Tests for MBID-based cross-service entity resolution."""
+
+    @pytest.mark.anyio()
+    async def test_mbid_artist_matching_merges_service_links(self) -> None:
+        """Artist with MBID matches existing record and merges service_links."""
+        session = AsyncMock()
+        existing_artist = MagicMock()
+        existing_artist.name = "Existing Artist"
+        existing_artist.service_links = {"musicbrainz": "mbid-123"}
+
+        # 1. service_links["listenbrainz"] -> None (step 1)
+        # 2. service_links["musicbrainz"] -> existing (step 2, skips "listenbrainz")
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = existing_artist
+
+        session.execute.side_effect = [no_result, match_result]
+        session.add = MagicMock()
+
+        artist_data = _make_artist_data(
+            external_id="mbid-123",
+            name="Existing Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        created = await runner_module._upsert_artist(session, artist_data)
+
+        assert created is False
+        assert existing_artist.service_links["listenbrainz"] == "mbid-123"
+
+    @pytest.mark.anyio()
+    async def test_mbid_artist_matching_falls_back_to_name(self) -> None:
+        """Artist with MBID falls back to name match when no MBID match."""
+        session = AsyncMock()
+        existing_artist = MagicMock()
+        existing_artist.name = "Same Name"
+        existing_artist.service_links = {"spotify": "sp-123"}
+
+        # Queries:
+        # 1. service_links["listenbrainz"] -> None (step 1)
+        # 2. service_links["musicbrainz"] -> None (step 2, skips LB key)
+        # 3. name match -> existing (step 3)
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = existing_artist
+
+        session.execute.side_effect = [
+            no_result,
+            no_result,
+            match_result,
+        ]
+        session.add = MagicMock()
+
+        artist_data = _make_artist_data(
+            external_id="mbid-456",
+            name="Same Name",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        created = await runner_module._upsert_artist(session, artist_data)
+
+        assert created is False
+        assert existing_artist.service_links["listenbrainz"] == "mbid-456"
+
+    @pytest.mark.anyio()
+    async def test_empty_external_id_skips_service_links_lookup(self) -> None:
+        """Artist with empty external_id skips service_links and uses name."""
+        session = AsyncMock()
+        existing_artist = MagicMock()
+        existing_artist.name = "Name Only"
+        existing_artist.service_links = {}
+
+        # Only name match query (skips service_links and MBID checks)
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = existing_artist
+
+        session.execute.side_effect = [match_result]
+        session.add = MagicMock()
+
+        artist_data = _make_artist_data(
+            external_id="",
+            name="Name Only",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        created = await runner_module._upsert_artist(session, artist_data)
+
+        assert created is False
+        # Should NOT have added empty string to service_links
+        assert "listenbrainz" not in existing_artist.service_links
+
+    @pytest.mark.anyio()
+    async def test_creates_new_artist_when_no_match(self) -> None:
+        """Artist with no existing match is created."""
+        session = AsyncMock()
+
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+
+        # All lookups return None: service_links, MBID checks, name
+        session.execute.side_effect = [
+            no_result,
+            no_result,
+            no_result,
+            no_result,
+        ]
+        session.add = MagicMock()
+
+        artist_data = _make_artist_data(
+            external_id="new-mbid",
+            name="Brand New Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        created = await runner_module._upsert_artist(session, artist_data)
+
+        assert created is True
+        session.add.assert_called_once()

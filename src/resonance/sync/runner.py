@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol
 import sqlalchemy as sa
 
 import resonance.connectors.base as base_module
+import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.spotify as spotify_module
 import resonance.models as models_module
 import resonance.types as types_module
@@ -41,7 +42,7 @@ class SyncableConnector(Protocol):
 
 async def run_sync(
     job: models_module.SyncJob,
-    connector: SyncableConnector,
+    connector: SyncableConnector | listenbrainz_module.ListenBrainzConnector,
     session: AsyncSession,
     access_token: str,
 ) -> None:
@@ -58,41 +59,21 @@ async def run_sync(
         job.started_at = datetime.datetime.now(datetime.UTC)
         await session.commit()
 
-        items_created = 0
-        items_updated = 0
-
-        artists = await connector.get_followed_artists(access_token)
-        for artist_data in artists:
-            created = await _upsert_artist(session, artist_data)
-            if created:
-                items_created += 1
-            else:
-                items_updated += 1
-            await _upsert_user_artist_relation(
-                session, job.user_id, artist_data, job.service_connection_id
+        # Look up the connection for username (needed by ListenBrainz)
+        conn_result = await session.execute(
+            sa.select(models_module.ServiceConnection).where(
+                models_module.ServiceConnection.id == job.service_connection_id
             )
+        )
+        connection = conn_result.scalar_one()
 
-        saved_tracks = await connector.get_saved_tracks(access_token)
-        for track_data in saved_tracks:
-            await _upsert_artist_from_track(session, track_data)
-            created = await _upsert_track(session, track_data)
-            if created:
-                items_created += 1
-            else:
-                items_updated += 1
-            await _upsert_user_track_relation(
-                session, job.user_id, track_data, job.service_connection_id
+        if isinstance(connector, listenbrainz_module.ListenBrainzConnector):
+            items_created, items_updated = await _sync_listenbrainz(
+                job, connector, session, connection.external_user_id
             )
-
-        recently_played = await connector.get_recently_played(access_token)
-        for played_item in recently_played:
-            await _upsert_artist_from_track(session, played_item.track)
-            await _upsert_track(session, played_item.track)
-            await _upsert_listening_event(
-                session,
-                job.user_id,
-                played_item.track,
-                played_item.played_at,
+        else:
+            items_created, items_updated = await _sync_spotify(
+                job, connector, session, access_token
             )
 
         job.items_created = items_created
@@ -109,10 +90,117 @@ async def run_sync(
         await session.commit()
 
 
+async def _sync_spotify(
+    job: models_module.SyncJob,
+    connector: SyncableConnector,
+    session: AsyncSession,
+    access_token: str,
+) -> tuple[int, int]:
+    """Sync data from Spotify.
+
+    Args:
+        job: The sync job being executed.
+        connector: The Spotify connector.
+        session: The async database session.
+        access_token: OAuth access token.
+
+    Returns:
+        Tuple of (items_created, items_updated).
+    """
+    items_created = 0
+    items_updated = 0
+
+    artists = await connector.get_followed_artists(access_token)
+    for artist_data in artists:
+        created = await _upsert_artist(session, artist_data)
+        if created:
+            items_created += 1
+        else:
+            items_updated += 1
+        await _upsert_user_artist_relation(
+            session, job.user_id, artist_data, job.service_connection_id
+        )
+
+    saved_tracks = await connector.get_saved_tracks(access_token)
+    for track_data in saved_tracks:
+        await _upsert_artist_from_track(session, track_data)
+        created = await _upsert_track(session, track_data)
+        if created:
+            items_created += 1
+        else:
+            items_updated += 1
+        await _upsert_user_track_relation(
+            session, job.user_id, track_data, job.service_connection_id
+        )
+
+    recently_played = await connector.get_recently_played(access_token)
+    for played_item in recently_played:
+        await _upsert_artist_from_track(session, played_item.track)
+        await _upsert_track(session, played_item.track)
+        await _upsert_listening_event(
+            session,
+            job.user_id,
+            played_item.track,
+            played_item.played_at,
+        )
+
+    return items_created, items_updated
+
+
+async def _sync_listenbrainz(
+    job: models_module.SyncJob,
+    connector: listenbrainz_module.ListenBrainzConnector,
+    session: AsyncSession,
+    username: str,
+) -> tuple[int, int]:
+    """Sync listening history from ListenBrainz.
+
+    Args:
+        job: The sync job being executed.
+        connector: The ListenBrainz connector.
+        session: The async database session.
+        username: The ListenBrainz username.
+
+    Returns:
+        Tuple of (items_created, items_updated).
+    """
+    items_created = 0
+    items_updated = 0
+    max_ts: int | None = None
+
+    while True:
+        listens = await connector.get_listens(username, max_ts=max_ts, count=100)
+        if not listens:
+            break
+
+        for listen in listens:
+            await _upsert_artist_from_track(session, listen.track)
+            created = await _upsert_track(session, listen.track)
+            if created:
+                items_created += 1
+            else:
+                items_updated += 1
+
+            played_at = datetime.datetime.fromtimestamp(
+                listen.listened_at, tz=datetime.UTC
+            ).isoformat()
+            await _upsert_listening_event(session, job.user_id, listen.track, played_at)
+
+        # Use the oldest listen's timestamp for next page
+        max_ts = listens[-1].listened_at
+        await session.commit()  # commit per page
+
+    return items_created, items_updated
+
+
 async def _upsert_artist(
     session: AsyncSession, artist_data: base_module.ArtistData
 ) -> bool:
     """Find artist by service_links JSON lookup, create if not found.
+
+    Supports MBID-based cross-service matching for ListenBrainz artists:
+    if the artist has an MBID, checks both listenbrainz and musicbrainz
+    service_links keys before falling back to name matching.
 
     Args:
         session: The async database session.
@@ -121,21 +209,64 @@ async def _upsert_artist(
     Returns:
         True if created, False if existing artist was found/updated.
     """
+    service_key = artist_data.service.value
+
+    # 1. Check service-specific ID in service_links (existing behavior)
+    if artist_data.external_id:
+        stmt = sa.select(models_module.Artist).where(
+            models_module.Artist.service_links[service_key].as_string()
+            == artist_data.external_id
+        )
+        result = await session.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            existing.name = artist_data.name
+            return False
+
+    # 2. If this is a ListenBrainz artist with an MBID, check if any
+    #    existing artist already has this MBID stored under another key
+    if (
+        artist_data.service == types_module.ServiceType.LISTENBRAINZ
+        and artist_data.external_id
+    ):
+        for check_key in ["listenbrainz", "musicbrainz"]:
+            if check_key == service_key:
+                continue  # already checked above
+            stmt = sa.select(models_module.Artist).where(
+                models_module.Artist.service_links[check_key].as_string()
+                == artist_data.external_id
+            )
+            result = await session.execute(stmt)
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                # Merge service_links
+                links = dict(existing.service_links or {})
+                links[service_key] = artist_data.external_id
+                existing.service_links = links
+                existing.name = artist_data.name
+                return False
+
+    # 3. Fall back to exact name match
     stmt = sa.select(models_module.Artist).where(
-        models_module.Artist.service_links[artist_data.service.value].as_string()
-        == artist_data.external_id
+        models_module.Artist.name == artist_data.name
     )
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
-
     if existing is not None:
-        existing.name = artist_data.name
+        # Merge service_links
+        links = dict(existing.service_links or {})
+        if artist_data.external_id:
+            links[service_key] = artist_data.external_id
+        existing.service_links = links
         return False
 
+    # 4. Create new
     artist = models_module.Artist(
         id=uuid.uuid4(),
         name=artist_data.name,
-        service_links={artist_data.service.value: artist_data.external_id},
+        service_links=(
+            {service_key: artist_data.external_id} if artist_data.external_id else {}
+        ),
     )
     session.add(artist)
     return True
@@ -163,6 +294,9 @@ async def _upsert_track(
 ) -> bool:
     """Find track by service_links, create if not found.
 
+    Supports MBID-based cross-service matching for ListenBrainz tracks,
+    using the same pattern as _upsert_artist.
+
     Args:
         session: The async database session.
         track_data: Track data from the connector.
@@ -170,30 +304,71 @@ async def _upsert_track(
     Returns:
         True if created, False if existing track was found.
     """
+    service_key = track_data.service.value
+
+    # 1. Check service-specific ID in service_links
+    if track_data.external_id:
+        stmt = sa.select(models_module.Track).where(
+            models_module.Track.service_links[service_key].as_string()
+            == track_data.external_id
+        )
+        result = await session.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            return False
+
+    # 2. MBID cross-service check for ListenBrainz
+    if (
+        track_data.service == types_module.ServiceType.LISTENBRAINZ
+        and track_data.external_id
+    ):
+        for check_key in ["listenbrainz", "musicbrainz"]:
+            if check_key == service_key:
+                continue
+            stmt = sa.select(models_module.Track).where(
+                models_module.Track.service_links[check_key].as_string()
+                == track_data.external_id
+            )
+            result = await session.execute(stmt)
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                links = dict(existing.service_links or {})
+                links[service_key] = track_data.external_id
+                existing.service_links = links
+                return False
+
+    # 3. Fall back to title + artist name match
     stmt = sa.select(models_module.Track).where(
-        models_module.Track.service_links[track_data.service.value].as_string()
-        == track_data.external_id
+        models_module.Track.title == track_data.title,
     )
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
-
     if existing is not None:
+        links = dict(existing.service_links or {})
+        if track_data.external_id:
+            links[service_key] = track_data.external_id
+        existing.service_links = links
         return False
 
-    artist_stmt = sa.select(models_module.Artist).where(
-        models_module.Artist.service_links[track_data.service.value].as_string()
-        == track_data.artist_external_id
-    )
-    artist_result = await session.execute(artist_stmt)
-    artist = artist_result.scalar_one_or_none()
-
-    artist_id = artist.id if artist is not None else uuid.uuid4()
+    # 4. Look up artist for the new track
+    artist_id = uuid.uuid4()
+    if track_data.artist_external_id:
+        artist_stmt = sa.select(models_module.Artist).where(
+            models_module.Artist.service_links[service_key].as_string()
+            == track_data.artist_external_id
+        )
+        artist_result = await session.execute(artist_stmt)
+        artist = artist_result.scalar_one_or_none()
+        if artist is not None:
+            artist_id = artist.id
 
     track = models_module.Track(
         id=uuid.uuid4(),
         title=track_data.title,
         artist_id=artist_id,
-        service_links={track_data.service.value: track_data.external_id},
+        service_links=(
+            {service_key: track_data.external_id} if track_data.external_id else {}
+        ),
     )
     session.add(track)
     return True
@@ -213,6 +388,9 @@ async def _upsert_user_artist_relation(
         artist_data: Artist data from the connector.
         connection_id: The service connection ID.
     """
+    if not artist_data.external_id:
+        return
+
     artist_stmt = sa.select(models_module.Artist).where(
         models_module.Artist.service_links[artist_data.service.value].as_string()
         == artist_data.external_id
@@ -259,6 +437,9 @@ async def _upsert_user_track_relation(
         track_data: Track data from the connector.
         connection_id: The service connection ID.
     """
+    if not track_data.external_id:
+        return
+
     track_stmt = sa.select(models_module.Track).where(
         models_module.Track.service_links[track_data.service.value].as_string()
         == track_data.external_id
@@ -305,8 +486,14 @@ async def _upsert_listening_event(
         track_data: Track data from the connector.
         played_at: ISO 8601 timestamp of when the track was played.
     """
+    service_key = track_data.service.value
+
+    # For tracks without an external_id, we can't reliably look up the track
+    if not track_data.external_id:
+        return
+
     track_stmt = sa.select(models_module.Track).where(
-        models_module.Track.service_links[track_data.service.value].as_string()
+        models_module.Track.service_links[service_key].as_string()
         == track_data.external_id
     )
     track_result = await session.execute(track_stmt)
