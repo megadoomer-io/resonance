@@ -13,6 +13,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.merge as merge_module
 import resonance.models.music as music_models
 import resonance.models.sync as sync_models
 import resonance.models.user as user_models
@@ -298,3 +299,61 @@ async def sync_status_partial(
         "partials/sync_status.html",
         {"sync_jobs": sync_jobs, "has_active_sync": has_active_sync},
     )
+
+
+@router.get("/merge", response_model=None)
+async def merge_page(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render merge confirmation page with source account data summary."""
+    session = request.state.session
+    user_id = session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    source_user_id = session.get("merge_source_user_id")
+    if not source_user_id:
+        return fastapi.responses.RedirectResponse(url="/account", status_code=307)
+
+    async with _get_db(request) as db:
+        source_summary = await merge_module.get_account_summary(
+            db, uuid.UUID(source_user_id)
+        )
+
+    service_type = session.get("merge_service_type", "unknown")
+    return templates.TemplateResponse(
+        request,
+        "merge.html",
+        {
+            "user_id": user_id,
+            "source_summary": source_summary,
+            "service_type": service_type,
+        },
+    )
+
+
+@router.post("/merge", response_model=None)
+async def merge_confirm(
+    request: fastapi.Request,
+) -> fastapi.responses.RedirectResponse:
+    """Execute account merge and redirect to account page."""
+    session = request.state.session
+    user_id = session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    source_user_id = session.get("merge_source_user_id")
+    if not source_user_id:
+        return fastapi.responses.RedirectResponse(url="/account", status_code=307)
+
+    async with _get_db(request) as db:
+        await merge_module.merge_accounts(
+            db, uuid.UUID(user_id), uuid.UUID(source_user_id)
+        )
+        await db.commit()
+
+    session["merge_source_user_id"] = None
+    session["merge_service_type"] = None
+    session["merge_connection_id"] = None
+
+    return fastapi.responses.RedirectResponse(url="/account", status_code=307)

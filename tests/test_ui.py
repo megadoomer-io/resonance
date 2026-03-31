@@ -81,3 +81,17 @@ class TestAccountPage:
         response = await client.get("/account", follow_redirects=False)
         assert response.status_code == 307
         assert response.headers["location"] == "/login"
+
+
+class TestMergePage:
+    """Tests for the merge confirmation page."""
+
+    async def test_merge_get_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/merge", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
+
+    async def test_merge_post_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.post("/merge", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"

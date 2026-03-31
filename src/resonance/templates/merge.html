@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Merge Accounts — Resonance{% endblock %}
+{% block content %}
+<h1>Merge Accounts</h1>
+<article>
+    <header>Account Conflict Detected</header>
+    <p>The <strong>{{ service_type | capitalize }}</strong> account you connected
+       is already linked to a different Resonance account.</p>
+    <p>You can merge that account's data into your current account.
+       The other account will be deleted after the merge.</p>
+</article>
+<h2>Data to be merged</h2>
+<table>
+    <tbody>
+        <tr><td>Service connections</td><td>{{ source_summary.connections }}</td></tr>
+        <tr><td>Listening events</td><td>{{ source_summary.listening_events }}</td></tr>
+        <tr><td>Artist relations</td><td>{{ source_summary.artist_relations }}</td></tr>
+        <tr><td>Track relations</td><td>{{ source_summary.track_relations }}</td></tr>
+        <tr><td>Sync jobs</td><td>{{ source_summary.sync_jobs }}</td></tr>
+    </tbody>
+</table>
+<form method="post" action="/merge">
+    <div class="grid">
+        <button type="submit">Merge into my account</button>
+        <a href="/account" role="button" class="secondary outline">Cancel</a>
+    </div>
+</form>
+{% endblock %}
