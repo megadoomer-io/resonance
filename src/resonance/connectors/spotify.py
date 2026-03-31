@@ -10,6 +10,7 @@ import pydantic
 
 import resonance.config as config_module
 import resonance.connectors.base as base_module
+import resonance.connectors.ratelimit as ratelimit_module
 import resonance.types as types_module
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class SpotifyConnector(base_module.BaseConnector):
         self._client_secret = settings.spotify_client_secret
         self._redirect_uri = settings.spotify_redirect_uri
         self._http_client: httpx.AsyncClient | None = None
+        self._budget = ratelimit_module.RateLimitBudget(default_interval=0.2)
 
     @property
     def http_client(self) -> httpx.AsyncClient:
@@ -67,41 +69,59 @@ class SpotifyConnector(base_module.BaseConnector):
         self,
         method: str,
         url: str,
+        *,
+        high_priority: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Make an HTTP request with retry on 429 (rate limit).
+        """Make an HTTP request with budget-aware pacing and retry on 429.
 
-        Spotify returns a Retry-After header with the number of seconds to wait.
+        Args:
+            method: HTTP method (GET, POST, etc.).
+            url: Request URL.
+            high_priority: If True, skip pacing when budget is available.
+            **kwargs: Additional arguments passed to httpx request.
+
+        Returns:
+            The HTTP response.
+
+        Raises:
+            httpx.HTTPStatusError: On non-429 HTTP errors or when the rate
+                limit wait exceeds the maximum retry delay.
         """
         for attempt in range(_MAX_RETRIES + 1):
+            interval = self._budget.paced_interval(high_priority=high_priority)
+            if interval > _MAX_RETRY_DELAY:
+                logger.error(
+                    "Rate limit wait %.0fs exceeds max %ds",
+                    interval,
+                    _MAX_RETRY_DELAY,
+                )
+                raise httpx.HTTPStatusError(
+                    "Rate limit exceeded",
+                    request=httpx.Request(method, url),
+                    response=httpx.Response(429),
+                )
+            if interval > 0:
+                logger.debug(
+                    "Pacing: waiting %.1fs before %s %s", interval, method, url
+                )
+                await asyncio.sleep(interval)
+
             response = await self.http_client.request(method, url, **kwargs)
+            self._budget.update_from_headers(dict(response.headers))
+
             if response.status_code != 429:
                 response.raise_for_status()
                 return response
 
-            retry_after = int(response.headers.get("Retry-After", "1"))
-            if retry_after > _MAX_RETRY_DELAY:
-                logger.error(
-                    "Spotify rate limited (429) on %s %s with Retry-After=%ds "
-                    "(exceeds max %ds) — failing immediately",
-                    method,
-                    url,
-                    retry_after,
-                    _MAX_RETRY_DELAY,
-                )
-                response.raise_for_status()
-
             logger.warning(
-                "Spotify rate limited (429) on %s %s, attempt %d/%d, retrying in %ds",
+                "429 on %s %s, attempt %d/%d",
                 method,
                 url,
                 attempt + 1,
                 _MAX_RETRIES + 1,
-                retry_after,
             )
-            await asyncio.sleep(retry_after)
 
-        # Final attempt failed
         response.raise_for_status()
         return response  # unreachable, raise_for_status throws
 
@@ -124,6 +144,7 @@ class SpotifyConnector(base_module.BaseConnector):
         response = await self._request(
             "POST",
             SPOTIFY_TOKEN_URL,
+            high_priority=True,
             data={
                 "grant_type": "authorization_code",
                 "code": code,
@@ -143,6 +164,7 @@ class SpotifyConnector(base_module.BaseConnector):
         response = await self._request(
             "POST",
             SPOTIFY_TOKEN_URL,
+            high_priority=True,
             data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
@@ -159,6 +181,7 @@ class SpotifyConnector(base_module.BaseConnector):
         response = await self._request(
             "GET",
             f"{SPOTIFY_API_BASE}/me",
+            high_priority=True,
             headers={"Authorization": f"Bearer {access_token}"},
         )
         data: dict[str, str] = response.json()

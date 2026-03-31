@@ -7,6 +7,7 @@ import pytest
 
 import resonance.config as config_module
 import resonance.connectors.base as base_module
+import resonance.connectors.ratelimit as ratelimit_module
 import resonance.connectors.spotify as spotify_module
 import resonance.types as types_module
 
@@ -100,6 +101,7 @@ class TestExchangeCode:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.exchange_code(code="auth-code-123")
 
@@ -131,6 +133,7 @@ class TestRefreshAccessToken:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.refresh_access_token(refresh_token="old-refresh")
 
@@ -158,6 +161,7 @@ class TestGetCurrentUser:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_current_user(access_token="my-token")
 
@@ -188,6 +192,7 @@ class TestGetFollowedArtists:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_followed_artists(access_token="token")
 
@@ -228,6 +233,7 @@ class TestGetFollowedArtists:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_followed_artists(access_token="token")
 
@@ -271,6 +277,7 @@ class TestGetSavedTracks:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_saved_tracks(access_token="token")
 
@@ -319,6 +326,7 @@ class TestGetRecentlyPlayed:
         settings = _make_settings()
         connector = spotify_module.SpotifyConnector(settings=settings)
         connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_recently_played(access_token="token")
 
