@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import secrets
 import uuid
 from typing import Annotated
 
 import fastapi
 import fastapi.responses as fastapi_responses
+import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
@@ -19,6 +21,8 @@ import resonance.dependencies as deps_module
 import resonance.middleware.session as session_module
 import resonance.models.user as user_models
 import resonance.types as types_module
+
+logger = logging.getLogger(__name__)
 
 router = fastapi.APIRouter(prefix="/auth", tags=["auth"])
 
@@ -97,14 +101,15 @@ async def auth_callback(
         )
 
     # Exchange code for tokens
-    tokens: base_module.TokenResponse = await connector.exchange_code(code=code)  # type: ignore[attr-defined]
-
-    # Get user profile from service
-    user_profile: dict[str, str] = await connector.get_current_user(  # type: ignore[attr-defined]
-        access_token=tokens.access_token
-    )
-    external_user_id = user_profile["id"]
-    display_name = user_profile.get("display_name", external_user_id)
+    try:
+        tokens: base_module.TokenResponse = await connector.exchange_code(code=code)  # type: ignore[attr-defined]
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Token exchange failed for %s", service)
+        detail = (
+            f"Failed to exchange authorization code with "
+            f"{service}: {exc.response.status_code}"
+        )
+        raise fastapi.HTTPException(status_code=502, detail=detail) from exc
 
     # Encrypt tokens
     settings = request.app.state.settings
@@ -123,13 +128,47 @@ async def auth_callback(
             seconds=tokens.expires_in
         )
 
-    # Look for existing connection by (service_type, external_user_id)
-    stmt = sa.select(user_models.ServiceConnection).where(
-        user_models.ServiceConnection.service_type == service_type,
-        user_models.ServiceConnection.external_user_id == external_user_id,
-    )
-    result = await db.execute(stmt)
-    existing_connection = result.scalar_one_or_none()
+    # Try to get user profile from service
+    external_user_id: str | None = None
+    display_name: str = ""
+    try:
+        user_profile: dict[str, str] = await connector.get_current_user(  # type: ignore[attr-defined]
+            access_token=tokens.access_token
+        )
+        external_user_id = user_profile["id"]
+        display_name = user_profile.get("display_name", external_user_id)
+    except httpx.HTTPStatusError:
+        logger.warning(
+            "Could not fetch %s user profile (rate limited?), "
+            "falling back to session lookup",
+            service,
+        )
+
+    if external_user_id is not None:
+        # Normal path: look up by external user ID
+        stmt = sa.select(user_models.ServiceConnection).where(
+            user_models.ServiceConnection.service_type == service_type,
+            user_models.ServiceConnection.external_user_id == external_user_id,
+        )
+        result = await db.execute(stmt)
+        existing_connection = result.scalar_one_or_none()
+    else:
+        # Fallback: look up by session user ID (returning user, rate limited)
+        session_user_id = session.get("user_id")
+        if session_user_id is not None:
+            stmt = sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == uuid.UUID(session_user_id),
+                user_models.ServiceConnection.service_type == service_type,
+            )
+            result = await db.execute(stmt)
+            existing_connection = result.scalar_one_or_none()
+        else:
+            # New user but can't get profile — can't proceed
+            detail = (
+                f"{service.capitalize()} is rate limiting "
+                f"requests. Please try again later."
+            )
+            raise fastapi.HTTPException(status_code=503, detail=detail)
 
     if existing_connection is not None:
         # Returning user — update tokens
@@ -139,6 +178,14 @@ async def auth_callback(
         existing_connection.scopes = tokens.scope
         user_id = existing_connection.user_id
     else:
+        if external_user_id is None:
+            # Can't create a new connection without the external ID
+            detail = (
+                f"{service.capitalize()} is rate limiting "
+                f"requests. Please try again later."
+            )
+            raise fastapi.HTTPException(status_code=503, detail=detail)
+
         # Check if the user is already logged in (connecting a new service)
         session_user_id = session.get("user_id")
         if session_user_id is not None:
