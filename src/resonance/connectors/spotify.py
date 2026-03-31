@@ -15,6 +15,7 @@ import resonance.types as types_module
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+_MAX_RETRY_DELAY = 30  # seconds — don't wait longer than this per retry
 
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -79,6 +80,17 @@ class SpotifyConnector(base_module.BaseConnector):
                 return response
 
             retry_after = int(response.headers.get("Retry-After", "1"))
+            if retry_after > _MAX_RETRY_DELAY:
+                logger.error(
+                    "Spotify rate limited (429) on %s %s with Retry-After=%ds "
+                    "(exceeds max %ds) — failing immediately",
+                    method,
+                    url,
+                    retry_after,
+                    _MAX_RETRY_DELAY,
+                )
+                response.raise_for_status()
+
             logger.warning(
                 "Spotify rate limited (429) on %s %s, attempt %d/%d, retrying in %ds",
                 method,
