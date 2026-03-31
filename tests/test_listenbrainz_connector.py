@@ -17,7 +17,7 @@ def _make_settings() -> config_module.Settings:
     return config_module.Settings(
         musicbrainz_client_id="test-mb-client-id",
         musicbrainz_client_secret="test-mb-client-secret",
-        musicbrainz_redirect_uri="http://localhost:8000/callback",
+        musicbrainz_redirect_path="/callback",
     )
 
 
@@ -258,10 +258,7 @@ class TestGetListens:
         connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
 
         result = await connector.get_listens(
-            username="user1",
-            max_ts=1700000000,
-            min_ts=1699000000,
-            count=50,
+            username="user1", max_ts=1700000000, min_ts=1699000000, count=50
         )
 
         assert result == []

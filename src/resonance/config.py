@@ -26,17 +26,28 @@ class Settings(pydantic_settings.BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; ..."
     token_encryption_key: str = "change-me-in-production"
 
+    # Base URL for constructing OAuth redirect URIs
+    base_url: str = "http://localhost:8000"
+
     # Spotify OAuth
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
-    spotify_redirect_uri: str = "http://localhost:8000/api/v1/auth/spotify/callback"
+    spotify_redirect_path: str = "/api/v1/auth/spotify/callback"
 
     # MusicBrainz OAuth (for ListenBrainz auth)
     musicbrainz_client_id: str = ""
     musicbrainz_client_secret: str = ""
-    musicbrainz_redirect_uri: str = (
-        "http://localhost:8000/api/v1/auth/listenbrainz/callback"
-    )
+    musicbrainz_redirect_path: str = "/api/v1/auth/listenbrainz/callback"
+
+    @property
+    def spotify_redirect_uri(self) -> str:
+        """Full Spotify OAuth redirect URI."""
+        return f"{self.base_url}{self.spotify_redirect_path}"
+
+    @property
+    def musicbrainz_redirect_uri(self) -> str:
+        """Full MusicBrainz OAuth redirect URI."""
+        return f"{self.base_url}{self.musicbrainz_redirect_path}"
 
     @property
     def database_url(self) -> str:

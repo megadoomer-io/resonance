@@ -26,7 +26,6 @@ def _make_settings() -> config_module.Settings:
     return config_module.Settings(
         spotify_client_id="test-client-id",
         spotify_client_secret="test-client-secret",
-        spotify_redirect_uri="http://localhost:8000/api/v1/auth/spotify/callback",
         token_encryption_key="dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODk=",
     )
 
@@ -120,9 +119,7 @@ class FakeSessionFactory:
         return self._session
 
 
-def _create_test_app(
-    db_session: FakeAsyncSession | None = None,
-) -> Any:
+def _create_test_app(db_session: FakeAsyncSession | None = None) -> Any:
     """Create a test app with fake Redis and optional DB session."""
     import fastapi
 
@@ -150,8 +147,7 @@ def _create_test_app(
 
 
 def _create_authenticated_app(
-    user_id: uuid.UUID,
-    db_session: FakeAsyncSession | None = None,
+    user_id: uuid.UUID, db_session: FakeAsyncSession | None = None
 ) -> tuple[Any, FakeRedis]:
     """Create a test app with a pre-authenticated session."""
     import fastapi
@@ -213,9 +209,7 @@ class TestSyncTrigger:
         cookie = _make_session_cookie(settings.session_secret_key)
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            cookies={"session_id": cookie},
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
             response = await c.post("/api/v1/sync/nonexistent")
 
@@ -232,9 +226,7 @@ class TestSyncTrigger:
         cookie = _make_session_cookie(settings.session_secret_key)
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            cookies={"session_id": cookie},
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
             response = await c.post("/api/v1/sync/spotify")
 
@@ -269,9 +261,7 @@ class TestSyncTrigger:
         cookie = _make_session_cookie(settings.session_secret_key)
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            cookies={"session_id": cookie},
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
             response = await c.post("/api/v1/sync/spotify")
 
@@ -317,9 +307,7 @@ class TestSyncStatus:
         cookie = _make_session_cookie(settings.session_secret_key)
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            cookies={"session_id": cookie},
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
             response = await c.get("/api/v1/sync/status")
 
@@ -346,9 +334,7 @@ class TestSyncStatus:
         cookie = _make_session_cookie(settings.session_secret_key)
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            cookies={"session_id": cookie},
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
             response = await c.get("/api/v1/sync/status")
 

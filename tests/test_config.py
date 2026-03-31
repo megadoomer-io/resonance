@@ -55,3 +55,21 @@ def test_settings_has_musicbrainz_credentials() -> None:
     assert hasattr(settings, "musicbrainz_client_id")
     assert hasattr(settings, "musicbrainz_client_secret")
     assert hasattr(settings, "musicbrainz_redirect_uri")
+
+
+def test_redirect_uris_constructed_from_base_url() -> None:
+    settings = config_module.Settings(base_url="https://example.com")
+    assert (
+        settings.spotify_redirect_uri
+        == "https://example.com/api/v1/auth/spotify/callback"
+    )
+    assert (
+        settings.musicbrainz_redirect_uri
+        == "https://example.com/api/v1/auth/listenbrainz/callback"
+    )
+
+
+def test_redirect_uris_default_to_localhost() -> None:
+    settings = config_module.Settings()
+    assert settings.spotify_redirect_uri.startswith("http://localhost:8000")
+    assert settings.musicbrainz_redirect_uri.startswith("http://localhost:8000")

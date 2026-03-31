@@ -24,7 +24,6 @@ def _make_settings() -> config_module.Settings:
     return config_module.Settings(
         spotify_client_id="test-client-id",
         spotify_client_secret="test-client-secret",
-        spotify_redirect_uri="http://localhost:8000/api/v1/auth/spotify/callback",
         token_encryption_key="dGVzdC1lbmNyeXB0aW9uLWtleS0xMjM0NTY3ODk=",
     )
 
@@ -102,9 +101,7 @@ class FakeSessionFactory:
         return FakeAsyncSession()
 
 
-def _create_test_app(
-    connector: base_module.BaseConnector | None = None,
-) -> Any:
+def _create_test_app(connector: base_module.BaseConnector | None = None) -> Any:
     """Create a test app with fake Redis and an optional mock connector."""
     import fastapi
 
@@ -176,17 +173,14 @@ class TestAuthInitiate:
         assert response.status_code == 404
 
     async def test_unregistered_service_returns_404(
-        self,
-        client_no_connectors: httpx.AsyncClient,
+        self, client_no_connectors: httpx.AsyncClient
     ) -> None:
         response = await client_no_connectors.get(
             "/api/v1/auth/spotify", follow_redirects=False
         )
         assert response.status_code == 404
 
-    async def test_service_without_auth_capability_returns_400(
-        self,
-    ) -> None:
+    async def test_service_without_auth_capability_returns_400(self) -> None:
         """A connector without AUTHENTICATION capability should return 400."""
         connector = MagicMock(spec=base_module.BaseConnector)
         connector.service_type = types_module.ServiceType.LASTFM

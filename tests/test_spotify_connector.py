@@ -17,7 +17,7 @@ def _make_settings() -> config_module.Settings:
     return config_module.Settings(
         spotify_client_id="test-client-id",
         spotify_client_secret="test-client-secret",
-        spotify_redirect_uri="http://localhost:8000/callback",
+        spotify_redirect_path="/callback",
     )
 
 
@@ -351,8 +351,7 @@ class TestPlayedTrackItem:
             service=types_module.ServiceType.SPOTIFY,
         )
         item = spotify_module.PlayedTrackItem(
-            track=track,
-            played_at="2024-01-15T10:30:00.000Z",
+            track=track, played_at="2024-01-15T10:30:00.000Z"
         )
         assert item.track.external_id == "t1"
         assert item.played_at == "2024-01-15T10:30:00.000Z"
