@@ -53,7 +53,10 @@
 {% endif %}
 
 <h2>Connect Another Service</h2>
-<p><a href="/api/v1/auth/spotify" role="button">Connect Spotify</a></p>
+<p>
+    <a href="/api/v1/auth/spotify" role="button">Connect Spotify</a>
+    <a href="/api/v1/auth/listenbrainz" role="button" class="outline">Connect ListenBrainz</a>
+</p>
 
 <h2>Log Out</h2>
 <form method="post" action="/api/v1/auth/logout">

@@ -9,6 +9,7 @@ import redis.asyncio as aioredis
 
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
+import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
@@ -61,6 +62,9 @@ def create_app() -> fastapi.FastAPI:
     # Set up connector registry
     connector_registry = registry_module.ConnectorRegistry()
     connector_registry.register(spotify_module.SpotifyConnector(settings=settings))
+    connector_registry.register(
+        listenbrainz_module.ListenBrainzConnector(settings=settings)
+    )
     application.state.connector_registry = connector_registry
 
     @application.get("/healthz")
