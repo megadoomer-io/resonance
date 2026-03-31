@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Resonance{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="grid">
+    <article>
+        <header>Artists</header>
+        <p><strong>{{ artist_count }}</strong></p>
+    </article>
+    <article>
+        <header>Tracks</header>
+        <p><strong>{{ track_count }}</strong></p>
+    </article>
+    <article>
+        <header>Listening Events</header>
+        <p><strong>{{ event_count }}</strong></p>
+    </article>
+</div>
+
+<h2>Connected Services</h2>
+{% if connections %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>Connected</th>
+                <th>Last Used</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for conn in connections %}
+            <tr>
+                <td>{{ conn.service_type.value | capitalize }}</td>
+                <td>{{ conn.connected_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ conn.last_used_at.strftime('%Y-%m-%d %H:%M') if conn.last_used_at else 'Never' }}</td>
+                <td>
+                    <button
+                        hx-post="/api/v1/sync/{{ conn.service_type.value }}"
+                        hx-on::after-request="htmx.trigger('#sync-status', 'load')"
+                    >Sync Now</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No services connected yet. <a href="/login">Connect a service</a> to get started.</p>
+{% endif %}
+
+<h2>Sync Status</h2>
+<div id="sync-status" hx-get="/partials/sync-status" hx-trigger="load" hx-swap="innerHTML">
+    Loading...
+</div>
+{% endblock %}

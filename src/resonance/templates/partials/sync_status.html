@@ -1,0 +1,51 @@
+{% if sync_jobs %}
+{% if has_active_sync %}
+<div hx-get="/partials/sync-status" hx-trigger="every 3s" hx-swap="outerHTML">
+{% endif %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Created</th>
+                <th>Started</th>
+                <th>Completed</th>
+                <th>Items</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in sync_jobs %}
+            <tr>
+                <td>
+                    {% if job.status.value in ('pending', 'running') %}
+                    <span aria-busy="true">{{ job.status.value | capitalize }}</span>
+                    {% else %}
+                    {{ job.status.value | capitalize }}
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.progress_total %}
+                    <progress value="{{ job.progress_current }}" max="{{ job.progress_total }}"></progress>
+                    {{ job.progress_current }}/{{ job.progress_total }}
+                    {% elif job.status.value == 'completed' %}
+                    Done
+                    {% else %}
+                    --
+                    {% endif %}
+                </td>
+                <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ job.started_at.strftime('%H:%M:%S') if job.started_at else '--' }}</td>
+                <td>{{ job.completed_at.strftime('%H:%M:%S') if job.completed_at else '--' }}</td>
+                <td>{{ job.items_created }} new / {{ job.items_updated }} updated</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% if has_active_sync %}
+</div>
+{% endif %}
+{% else %}
+<p>No sync jobs yet. Connect a service and click <strong>Sync Now</strong> to get started.</p>
+{% endif %}

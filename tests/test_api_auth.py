@@ -235,7 +235,7 @@ class TestAuthCallback:
 class TestAuthLogout:
     """Tests for POST /api/v1/auth/logout."""
 
-    async def test_logout_returns_ok(self, client: httpx.AsyncClient) -> None:
-        response = await client.post("/api/v1/auth/logout")
-        assert response.status_code == 200
-        assert response.json() == {"status": "logged_out"}
+    async def test_logout_redirects_to_login(self, client: httpx.AsyncClient) -> None:
+        response = await client.post("/api/v1/auth/logout", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"

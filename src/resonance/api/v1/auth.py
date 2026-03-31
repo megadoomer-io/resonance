@@ -84,7 +84,7 @@ async def auth_callback(
         session_module.SessionData, fastapi.Depends(deps_module.get_session)
     ],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> dict[str, str]:
+) -> fastapi_responses.RedirectResponse:
     """Handle OAuth callback — exchange code, create/update user and connection."""
     service_type = _parse_service_type(service)
     connector = _get_connector(request, service_type)
@@ -171,7 +171,7 @@ async def auth_callback(
     session["oauth_state"] = None
     session["oauth_service"] = None
 
-    return {"status": "connected", "service": service}
+    return fastapi_responses.RedirectResponse(url="/", status_code=307)
 
 
 @router.post("/logout")
@@ -179,7 +179,7 @@ async def logout(
     session: Annotated[
         session_module.SessionData, fastapi.Depends(deps_module.get_session)
     ],
-) -> dict[str, str]:
+) -> fastapi_responses.RedirectResponse:
     """Clear the session and log the user out."""
     session.clear()
-    return {"status": "logged_out"}
+    return fastapi_responses.RedirectResponse(url="/login", status_code=307)
