@@ -123,8 +123,8 @@ class TestGetCurrentUser:
     @pytest.mark.anyio()
     async def test_returns_user_dict(self) -> None:
         userinfo_data = {
-            "sub": "user-uuid-123",
-            "musicbrainz_id": "cooluser42",
+            "sub": "cooluser42",
+            "metabrainz_user_id": 12345,
         }
 
         def handler(request: httpx.Request) -> httpx.Response:

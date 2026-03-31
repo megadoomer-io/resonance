@@ -158,9 +158,10 @@ class ListenBrainzConnector(base_module.BaseConnector):
             headers={"Authorization": f"Bearer {access_token}"},
         )
         data: dict[str, str] = response.json()
-        musicbrainz_id = data["musicbrainz_id"]
-        logger.info("Got MusicBrainz user: %s", musicbrainz_id)
-        return {"id": musicbrainz_id, "display_name": musicbrainz_id}
+        # MusicBrainz userinfo uses OpenID Connect 'sub' field for username
+        username = data["sub"]
+        logger.info("Got MusicBrainz user: %s", username)
+        return {"id": username, "display_name": username}
 
     async def get_listens(
         self,
