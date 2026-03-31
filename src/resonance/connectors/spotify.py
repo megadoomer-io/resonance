@@ -1,6 +1,9 @@
 """Spotify connector with OAuth and data fetching."""
 
+import asyncio
+import logging
 import urllib.parse
+from typing import Any
 
 import httpx
 import pydantic
@@ -8,6 +11,10 @@ import pydantic
 import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.types as types_module
+
+logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
 
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -55,6 +62,37 @@ class SpotifyConnector(base_module.BaseConnector):
             self._http_client = httpx.AsyncClient()
         return self._http_client
 
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Make an HTTP request with retry on 429 (rate limit).
+
+        Spotify returns a Retry-After header with the number of seconds to wait.
+        """
+        for attempt in range(_MAX_RETRIES + 1):
+            response = await self.http_client.request(method, url, **kwargs)
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response
+
+            retry_after = int(response.headers.get("Retry-After", "1"))
+            logger.warning(
+                "Spotify rate limited (429) on %s %s, attempt %d/%d, retrying in %ds",
+                method,
+                url,
+                attempt + 1,
+                _MAX_RETRIES + 1,
+                retry_after,
+            )
+            await asyncio.sleep(retry_after)
+
+        # Final attempt failed
+        response.raise_for_status()
+        return response  # unreachable, raise_for_status throws
+
     def get_auth_url(self, state: str) -> str:
         """Build Spotify OAuth authorization URL."""
         params = urllib.parse.urlencode(
@@ -70,7 +108,9 @@ class SpotifyConnector(base_module.BaseConnector):
 
     async def exchange_code(self, code: str) -> base_module.TokenResponse:
         """Exchange an authorization code for access and refresh tokens."""
-        response = await self.http_client.post(
+        logger.info("Exchanging OAuth code for tokens")
+        response = await self._request(
+            "POST",
             SPOTIFY_TOKEN_URL,
             data={
                 "grant_type": "authorization_code",
@@ -80,14 +120,16 @@ class SpotifyConnector(base_module.BaseConnector):
                 "client_secret": self._client_secret,
             },
         )
-        response.raise_for_status()
+        logger.info("Token exchange successful")
         return base_module.TokenResponse.model_validate(response.json())
 
     async def refresh_access_token(
         self, refresh_token: str
     ) -> base_module.TokenResponse:
         """Refresh an expired access token."""
-        response = await self.http_client.post(
+        logger.info("Refreshing access token")
+        response = await self._request(
+            "POST",
             SPOTIFY_TOKEN_URL,
             data={
                 "grant_type": "refresh_token",
@@ -96,23 +138,26 @@ class SpotifyConnector(base_module.BaseConnector):
                 "client_secret": self._client_secret,
             },
         )
-        response.raise_for_status()
+        logger.info("Token refresh successful")
         return base_module.TokenResponse.model_validate(response.json())
 
     async def get_current_user(self, access_token: str) -> dict[str, str]:
         """Get the current user's profile."""
-        response = await self.http_client.get(
+        logger.info("Fetching current user profile")
+        response = await self._request(
+            "GET",
             f"{SPOTIFY_API_BASE}/me",
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        response.raise_for_status()
         data: dict[str, str] = response.json()
+        logger.info("Got user profile: %s", data.get("id", "unknown"))
         return {"id": data["id"], "display_name": data["display_name"]}
 
     async def get_followed_artists(
         self, access_token: str
     ) -> list[base_module.SpotifyArtistData]:
         """Paginate through followed artists."""
+        logger.info("Fetching followed artists")
         artists: list[base_module.SpotifyArtistData] = []
         after: str | None = None
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -122,12 +167,12 @@ class SpotifyConnector(base_module.BaseConnector):
             if after is not None:
                 params["after"] = after
 
-            response = await self.http_client.get(
+            response = await self._request(
+                "GET",
                 f"{SPOTIFY_API_BASE}/me/following",
                 headers=headers,
                 params=params,
             )
-            response.raise_for_status()
             data = response.json()
 
             for item in data["artists"]["items"]:
@@ -144,23 +189,25 @@ class SpotifyConnector(base_module.BaseConnector):
                 break
             after = cursor_after
 
+        logger.info("Fetched %d followed artists", len(artists))
         return artists
 
     async def get_saved_tracks(
         self, access_token: str
     ) -> list[base_module.SpotifyTrackData]:
         """Paginate through saved (liked) tracks."""
+        logger.info("Fetching saved tracks")
         tracks: list[base_module.SpotifyTrackData] = []
         url: str | None = f"{SPOTIFY_API_BASE}/me/tracks"
         headers = {"Authorization": f"Bearer {access_token}"}
 
         while url is not None:
-            response = await self.http_client.get(
+            response = await self._request(
+                "GET",
                 url,
                 headers=headers,
                 params={"limit": 50},
             )
-            response.raise_for_status()
             data = response.json()
 
             for item in data["items"]:
@@ -178,16 +225,18 @@ class SpotifyConnector(base_module.BaseConnector):
 
             url = data.get("next")
 
+        logger.info("Fetched %d saved tracks", len(tracks))
         return tracks
 
     async def get_recently_played(self, access_token: str) -> list[PlayedTrackItem]:
         """Get recently played tracks."""
-        response = await self.http_client.get(
+        logger.info("Fetching recently played tracks")
+        response = await self._request(
+            "GET",
             f"{SPOTIFY_API_BASE}/me/player/recently-played",
             headers={"Authorization": f"Bearer {access_token}"},
             params={"limit": 50},
         )
-        response.raise_for_status()
         data = response.json()
 
         items: list[PlayedTrackItem] = []
@@ -207,4 +256,5 @@ class SpotifyConnector(base_module.BaseConnector):
                 )
             )
 
+        logger.info("Fetched %d recently played tracks", len(items))
         return items
