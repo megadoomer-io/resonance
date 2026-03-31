@@ -34,7 +34,7 @@ _SCOPES = (
 class PlayedTrackItem(pydantic.BaseModel):
     """A track with its played_at timestamp from recently played."""
 
-    track: base_module.SpotifyTrackData
+    track: base_module.TrackData
     played_at: str
 
 
@@ -190,10 +190,10 @@ class SpotifyConnector(base_module.BaseConnector):
 
     async def get_followed_artists(
         self, access_token: str
-    ) -> list[base_module.SpotifyArtistData]:
+    ) -> list[base_module.ArtistData]:
         """Paginate through followed artists."""
         logger.info("Fetching followed artists")
-        artists: list[base_module.SpotifyArtistData] = []
+        artists: list[base_module.ArtistData] = []
         after: str | None = None
         headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -212,7 +212,7 @@ class SpotifyConnector(base_module.BaseConnector):
 
             for item in data["artists"]["items"]:
                 artists.append(
-                    base_module.SpotifyArtistData(
+                    base_module.ArtistData(
                         external_id=item["id"],
                         name=item["name"],
                         service=types_module.ServiceType.SPOTIFY,
@@ -227,12 +227,10 @@ class SpotifyConnector(base_module.BaseConnector):
         logger.info("Fetched %d followed artists", len(artists))
         return artists
 
-    async def get_saved_tracks(
-        self, access_token: str
-    ) -> list[base_module.SpotifyTrackData]:
+    async def get_saved_tracks(self, access_token: str) -> list[base_module.TrackData]:
         """Paginate through saved (liked) tracks."""
         logger.info("Fetching saved tracks")
-        tracks: list[base_module.SpotifyTrackData] = []
+        tracks: list[base_module.TrackData] = []
         url: str | None = f"{SPOTIFY_API_BASE}/me/tracks"
         headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -249,7 +247,7 @@ class SpotifyConnector(base_module.BaseConnector):
                 track = item["track"]
                 primary_artist = track["artists"][0]
                 tracks.append(
-                    base_module.SpotifyTrackData(
+                    base_module.TrackData(
                         external_id=track["id"],
                         title=track["name"],
                         artist_external_id=primary_artist["id"],
@@ -280,7 +278,7 @@ class SpotifyConnector(base_module.BaseConnector):
             primary_artist = track["artists"][0]
             items.append(
                 PlayedTrackItem(
-                    track=base_module.SpotifyTrackData(
+                    track=base_module.TrackData(
                         external_id=track["id"],
                         title=track["name"],
                         artist_external_id=primary_artist["id"],

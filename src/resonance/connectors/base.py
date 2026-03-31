@@ -31,7 +31,7 @@ class TokenResponse(pydantic.BaseModel):
     scope: str | None = None
 
 
-class SpotifyArtistData(pydantic.BaseModel):
+class ArtistData(pydantic.BaseModel):
     """Artist data returned from a connector."""
 
     external_id: str
@@ -39,7 +39,7 @@ class SpotifyArtistData(pydantic.BaseModel):
     service: types_module.ServiceType
 
 
-class SpotifyTrackData(pydantic.BaseModel):
+class TrackData(pydantic.BaseModel):
     """Track data returned from a connector."""
 
     external_id: str

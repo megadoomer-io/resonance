@@ -63,11 +63,11 @@ class TestTokenResponse:
         assert token.scope == "read"
 
 
-class TestSpotifyArtistData:
-    """Tests for SpotifyArtistData model."""
+class TestArtistData:
+    """Tests for ArtistData model."""
 
     def test_creation(self) -> None:
-        artist = base_module.SpotifyArtistData(
+        artist = base_module.ArtistData(
             external_id="abc",
             name="Test Artist",
             service=types_module.ServiceType.SPOTIFY,
@@ -77,11 +77,11 @@ class TestSpotifyArtistData:
         assert artist.service == types_module.ServiceType.SPOTIFY
 
 
-class TestSpotifyTrackData:
-    """Tests for SpotifyTrackData model."""
+class TestTrackData:
+    """Tests for TrackData model."""
 
     def test_creation(self) -> None:
-        track = base_module.SpotifyTrackData(
+        track = base_module.TrackData(
             external_id="track1",
             title="Test Track",
             artist_external_id="artist1",

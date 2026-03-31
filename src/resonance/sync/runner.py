@@ -28,11 +28,11 @@ class SyncableConnector(Protocol):
 
     async def get_followed_artists(
         self, access_token: str
-    ) -> list[base_module.SpotifyArtistData]: ...
+    ) -> list[base_module.ArtistData]: ...
 
     async def get_saved_tracks(
         self, access_token: str
-    ) -> list[base_module.SpotifyTrackData]: ...
+    ) -> list[base_module.TrackData]: ...
 
     async def get_recently_played(
         self, access_token: str
@@ -110,7 +110,7 @@ async def run_sync(
 
 
 async def _upsert_artist(
-    session: AsyncSession, artist_data: base_module.SpotifyArtistData
+    session: AsyncSession, artist_data: base_module.ArtistData
 ) -> bool:
     """Find artist by service_links JSON lookup, create if not found.
 
@@ -142,7 +142,7 @@ async def _upsert_artist(
 
 
 async def _upsert_artist_from_track(
-    session: AsyncSession, track_data: base_module.SpotifyTrackData
+    session: AsyncSession, track_data: base_module.TrackData
 ) -> None:
     """Ensure the artist from a track exists in the database.
 
@@ -150,7 +150,7 @@ async def _upsert_artist_from_track(
         session: The async database session.
         track_data: Track data containing artist information.
     """
-    artist_data = base_module.SpotifyArtistData(
+    artist_data = base_module.ArtistData(
         external_id=track_data.artist_external_id,
         name=track_data.artist_name,
         service=track_data.service,
@@ -159,7 +159,7 @@ async def _upsert_artist_from_track(
 
 
 async def _upsert_track(
-    session: AsyncSession, track_data: base_module.SpotifyTrackData
+    session: AsyncSession, track_data: base_module.TrackData
 ) -> bool:
     """Find track by service_links, create if not found.
 
@@ -202,7 +202,7 @@ async def _upsert_track(
 async def _upsert_user_artist_relation(
     session: AsyncSession,
     user_id: uuid.UUID,
-    artist_data: base_module.SpotifyArtistData,
+    artist_data: base_module.ArtistData,
     connection_id: uuid.UUID,
 ) -> None:
     """Create a FOLLOW relation if not already present.
@@ -248,7 +248,7 @@ async def _upsert_user_artist_relation(
 async def _upsert_user_track_relation(
     session: AsyncSession,
     user_id: uuid.UUID,
-    track_data: base_module.SpotifyTrackData,
+    track_data: base_module.TrackData,
     connection_id: uuid.UUID,
 ) -> None:
     """Create a LIKE relation if not already present.
@@ -294,7 +294,7 @@ async def _upsert_user_track_relation(
 async def _upsert_listening_event(
     session: AsyncSession,
     user_id: uuid.UUID,
-    track_data: base_module.SpotifyTrackData,
+    track_data: base_module.TrackData,
     played_at: str,
 ) -> None:
     """Create a listening event if not a duplicate.

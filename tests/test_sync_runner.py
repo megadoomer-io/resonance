@@ -12,8 +12,8 @@ import resonance.types as types_module
 
 def _make_artist_data(
     external_id: str = "art1", name: str = "Artist One"
-) -> base_module.SpotifyArtistData:
-    return base_module.SpotifyArtistData(
+) -> base_module.ArtistData:
+    return base_module.ArtistData(
         external_id=external_id,
         name=name,
         service=types_module.ServiceType.SPOTIFY,
@@ -25,8 +25,8 @@ def _make_track_data(
     title: str = "Song One",
     artist_external_id: str = "art1",
     artist_name: str = "Artist One",
-) -> base_module.SpotifyTrackData:
-    return base_module.SpotifyTrackData(
+) -> base_module.TrackData:
+    return base_module.TrackData(
         external_id=external_id,
         title=title,
         artist_external_id=artist_external_id,

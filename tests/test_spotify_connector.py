@@ -197,7 +197,7 @@ class TestGetFollowedArtists:
         result = await connector.get_followed_artists(access_token="token")
 
         assert len(result) == 2
-        assert isinstance(result[0], base_module.SpotifyArtistData)
+        assert isinstance(result[0], base_module.ArtistData)
         assert result[0].external_id == "art1"
         assert result[0].name == "Artist One"
         assert result[0].service == types_module.ServiceType.SPOTIFY
@@ -282,7 +282,7 @@ class TestGetSavedTracks:
         result = await connector.get_saved_tracks(access_token="token")
 
         assert len(result) == 2
-        assert isinstance(result[0], base_module.SpotifyTrackData)
+        assert isinstance(result[0], base_module.TrackData)
         assert result[0].external_id == "track1"
         assert result[0].title == "Song One"
         assert result[0].artist_external_id == "art1"
@@ -343,7 +343,7 @@ class TestPlayedTrackItem:
     """Tests for PlayedTrackItem model."""
 
     def test_creation(self) -> None:
-        track = base_module.SpotifyTrackData(
+        track = base_module.TrackData(
             external_id="t1",
             title="Song",
             artist_external_id="a1",
