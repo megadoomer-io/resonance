@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+import arq.connections as arq_connections
 import fastapi
 import redis.asyncio as aioredis
 import sqlalchemy as sa
@@ -17,7 +18,7 @@ import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
 import resonance.logging as logging_module
 import resonance.middleware.session as session_middleware
-import resonance.models.sync as sync_models
+import resonance.models.task as task_models
 import resonance.types as types_module
 import resonance.ui.routes as ui_routes_module
 
@@ -32,15 +33,24 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     session_factory = database_module.create_session_factory(engine)
     redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]  # redis 5.x lacks stubs
 
+    arq_redis = await arq_connections.create_pool(
+        arq_connections.RedisSettings(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            password=settings.redis_password or None,
+        )
+    )
+
     application.state.engine = engine
     application.state.session_factory = session_factory
     application.state.redis = redis_pool
+    application.state.arq_redis = arq_redis
 
-    # Reset RUNNING jobs back to PENDING (interrupted by pod restart)
+    # Reset RUNNING tasks back to PENDING (interrupted by pod restart)
     async with session_factory() as db:
         result = await db.execute(
-            sa.update(sync_models.SyncJob)
-            .where(sync_models.SyncJob.status == types_module.SyncStatus.RUNNING)
+            sa.update(task_models.SyncTask)
+            .where(task_models.SyncTask.status == types_module.SyncStatus.RUNNING)
             .values(
                 status=types_module.SyncStatus.PENDING,
                 started_at=None,
@@ -48,11 +58,12 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
         )
         row_count = result.rowcount if hasattr(result, "rowcount") else 0
         if row_count:
-            logger.info("Reset %d interrupted sync jobs back to pending", row_count)
+            logger.info("Reset %d interrupted sync tasks back to pending", row_count)
         await db.commit()
 
     yield
 
+    await arq_redis.aclose()
     await redis_pool.aclose()
     await engine.dispose()
 
