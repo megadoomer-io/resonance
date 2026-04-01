@@ -30,7 +30,7 @@ class TestWorkerSettings:
         assert worker_module.WorkerSettings.max_jobs == 10
 
     def test_job_timeout(self) -> None:
-        assert worker_module.WorkerSettings.job_timeout == 300
+        assert worker_module.WorkerSettings.job_timeout == 7200
 
     def test_redis_settings_is_instance(self) -> None:
         """redis_settings is an arq RedisSettings instance."""
