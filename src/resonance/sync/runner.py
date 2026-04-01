@@ -257,6 +257,14 @@ async def _sync_listenbrainz(
             "listenbrainz_sync_skipped_ranges",
             skipped_ranges=skipped_ranges,
         )
+        import json
+
+        job.error_message = json.dumps(
+            {
+                "skipped_ranges": skipped_ranges,
+                "note": "Sync completed but skipped some time ranges due to API errors",
+            }
+        )
 
     return items_created, items_updated
 
