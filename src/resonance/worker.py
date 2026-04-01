@@ -734,3 +734,21 @@ class WorkerSettings:
             port=settings.redis_port,
             password=settings.redis_password or None,
         )
+
+
+def main() -> None:
+    """Run the arq worker.
+
+    Python 3.14 removed the implicit event loop from
+    asyncio.get_event_loop(), which arq 0.27 calls in Worker.__init__.
+    This entrypoint creates a loop first so the Worker can find it.
+    """
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    arq.run_worker(WorkerSettings)  # type: ignore[arg-type]
+
+
+if __name__ == "__main__":
+    main()
