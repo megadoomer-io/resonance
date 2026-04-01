@@ -200,8 +200,23 @@ async def _sync_listenbrainz(
     except Exception:
         log.warning("could_not_fetch_listen_count")
 
+    page_size = 100
+    skipped_ranges: list[dict[str, int | str | None]] = []
+
     while True:
-        listens = await connector.get_listens(username, max_ts=max_ts, count=100)
+        # Fetch page with retry + adaptive page size + skip
+        listens = await _fetch_listens_resilient(
+            log, connector, username, max_ts, page_size, skipped_ranges
+        )
+        if listens is None:
+            # _fetch_listens_resilient returns None when it skipped a range
+            # and advanced max_ts — continue to next page
+            if skipped_ranges:
+                advanced = skipped_ranges[-1].get("advanced_ts")
+                if isinstance(advanced, int):
+                    max_ts = advanced
+                    continue
+            break
         if not listens:
             break
         page += 1
@@ -221,6 +236,9 @@ async def _sync_listenbrainz(
             items_created += 1
             processed += 1
 
+        # Reset page size back to 100 after a successful page
+        page_size = 100
+
         # Use the oldest listen's timestamp for next page
         max_ts = listens[-1].listened_at
         job.progress_current = processed
@@ -233,7 +251,87 @@ async def _sync_listenbrainz(
             total_created=items_created,
         )
 
+    if skipped_ranges:
+        log.warning(
+            "listenbrainz_sync_skipped_ranges",
+            skipped_ranges=skipped_ranges,
+        )
+
     return items_created, items_updated
+
+
+async def _fetch_listens_resilient(
+    log: structlog.stdlib.BoundLogger,
+    connector: listenbrainz_module.ListenBrainzConnector,
+    username: str,
+    max_ts: int | None,
+    page_size: int,
+    skipped_ranges: list[dict[str, int | str | None]],
+) -> list[listenbrainz_module.ListenBrainzListenItem] | None:
+    """Fetch a page of listens with retry, adaptive page size, and skip.
+
+    Strategy:
+    1. Try at current page_size (default 100)
+    2. On timeout, retry up to 3 times
+    3. If still failing, halve the page size and retry
+    4. If page_size reaches below 10, skip the range and advance max_ts
+
+    Returns:
+        List of listens, empty list if no more data, or None if a range
+        was skipped (check skipped_ranges for the advanced_ts).
+    """
+    import httpx as httpx_module
+
+    current_size = page_size
+    retries = 0
+    max_retries = 3
+
+    while True:
+        try:
+            return await connector.get_listens(
+                username, max_ts=max_ts, count=current_size
+            )
+        except httpx_module.ReadTimeout:
+            retries += 1
+            if retries <= max_retries:
+                log.warning(
+                    "listenbrainz_page_timeout",
+                    max_ts=max_ts,
+                    page_size=current_size,
+                    retry=retries,
+                    max_retries=max_retries,
+                )
+                continue
+
+            # Exhausted retries at this page size — halve it
+            current_size = current_size // 2
+            retries = 0
+
+            if current_size < 10:
+                # Give up on this range — skip forward
+                # Estimate: advance max_ts by ~1 day (86400 seconds)
+                skip_seconds = 86400
+                advanced_ts = (max_ts - skip_seconds) if max_ts else None
+                skipped_ranges.append(
+                    {
+                        "max_ts": max_ts,
+                        "advanced_ts": advanced_ts,
+                        "reason": "ReadTimeout after retry with reduced page size",
+                    }
+                )
+                log.error(
+                    "listenbrainz_page_skipped",
+                    max_ts=max_ts,
+                    advanced_ts=advanced_ts,
+                    message="Skipping ~1 day of listens due to persistent timeout",
+                )
+                return None
+
+            log.warning(
+                "listenbrainz_reducing_page_size",
+                max_ts=max_ts,
+                new_page_size=current_size,
+            )
 
 
 async def _upsert_artist(
