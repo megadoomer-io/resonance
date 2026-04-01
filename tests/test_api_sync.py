@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -13,7 +13,7 @@ import pytest
 import resonance.config as config_module
 import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
-import resonance.models.sync as sync_models
+import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.types as types_module
 
@@ -131,6 +131,7 @@ def _create_test_app(db_session: FakeAsyncSession | None = None) -> Any:
     application = fastapi.FastAPI(title="test", lifespan=None)
     application.state.settings = settings
     application.state.session_factory = FakeSessionFactory(db_session)
+    application.state.arq_redis = AsyncMock()
 
     application.add_middleware(
         session_middleware.SessionMiddleware,
@@ -163,6 +164,7 @@ def _create_authenticated_app(
     application = fastapi.FastAPI(title="test", lifespan=None)
     application.state.settings = settings
     application.state.session_factory = FakeSessionFactory(db_session)
+    application.state.arq_redis = AsyncMock()
 
     application.add_middleware(
         session_middleware.SessionMiddleware,
@@ -243,16 +245,17 @@ class TestSyncTrigger:
         fake_conn.service_type = types_module.ServiceType.SPOTIFY
         fake_conn.encrypted_access_token = "encrypted-token"
 
-        fake_running_job = MagicMock(spec=sync_models.SyncJob)
-        fake_running_job.id = uuid.uuid4()
-        fake_running_job.status = types_module.SyncStatus.RUNNING
+        fake_running_task = MagicMock(spec=task_models.SyncTask)
+        fake_running_task.id = uuid.uuid4()
+        fake_running_task.status = types_module.SyncStatus.RUNNING
+        fake_running_task.task_type = types_module.SyncTaskType.SYNC_JOB
 
         db_session = FakeAsyncSession()
-        # First: find connection; Second: find running sync job
+        # First: find connection; Second: find running sync task
         db_session.set_execute_results(
             [
                 FakeScalarResult(fake_conn),
-                FakeScalarResult(fake_running_job),
+                FakeScalarResult(fake_running_task),
             ]
         )
 
@@ -276,28 +279,27 @@ class TestSyncStatus:
         response = await client.get("/api/v1/sync/status")
         assert response.status_code == 401
 
-    async def test_returns_sync_jobs(self) -> None:
+    async def test_returns_sync_tasks(self) -> None:
         user_id = uuid.uuid4()
         job_id = uuid.uuid4()
 
-        fake_job = MagicMock(spec=sync_models.SyncJob)
-        fake_job.id = job_id
-        fake_job.status = types_module.SyncStatus.COMPLETED
-        fake_job.sync_type = types_module.SyncType.FULL
-        fake_job.progress_current = 10
-        fake_job.progress_total = 10
-        fake_job.items_created = 5
-        fake_job.items_updated = 3
-        fake_job.error_message = None
-        fake_job.started_at = datetime.datetime(
+        fake_task = MagicMock(spec=task_models.SyncTask)
+        fake_task.id = job_id
+        fake_task.status = types_module.SyncStatus.COMPLETED
+        fake_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_task.progress_current = 10
+        fake_task.progress_total = 10
+        fake_task.result = {"items_created": 5, "items_updated": 3}
+        fake_task.error_message = None
+        fake_task.started_at = datetime.datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=datetime.UTC
         )
-        fake_job.completed_at = datetime.datetime(
+        fake_task.completed_at = datetime.datetime(
             2026, 1, 1, 0, 1, 0, tzinfo=datetime.UTC
         )
 
         db_session = FakeAsyncSession()
-        scalars_result = FakeScalarsResult([fake_job])
+        scalars_result = FakeScalarsResult([fake_task])
         execute_result = MagicMock()
         execute_result.scalars.return_value = scalars_result
         db_session.set_execute_results([execute_result])
@@ -316,7 +318,7 @@ class TestSyncStatus:
         assert len(data) == 1
         assert data[0]["id"] == str(job_id)
         assert data[0]["status"] == "completed"
-        assert data[0]["sync_type"] == "full"
+        assert data[0]["task_type"] == "sync_job"
         assert data[0]["items_created"] == 5
         assert data[0]["items_updated"] == 3
 
