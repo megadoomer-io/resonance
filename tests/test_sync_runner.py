@@ -1,5 +1,6 @@
 """Tests for the sync runner upsert functions."""
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -157,4 +158,108 @@ class TestMBIDArtistMatching:
         created = await runner_module._upsert_artist(session, artist_data)
 
         assert created is True
+        session.add.assert_called_once()
+
+
+class TestListeningEventTitleFallback:
+    """Tests for title-based track lookup in _upsert_listening_event."""
+
+    @pytest.mark.anyio()
+    async def test_creates_event_for_track_without_external_id(self) -> None:
+        """Track with empty external_id is found by title and event is created."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        # Only one query: title match (skips service_links lookup)
+        title_result = MagicMock()
+        title_result.scalar_one_or_none.return_value = existing_track
+
+        # Second query: duplicate check -> no existing event
+        no_dup = MagicMock()
+        no_dup.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [title_result, no_dup]
+        session.add = MagicMock()
+
+        track_data = _make_track_data(
+            external_id="",
+            title="No MBID Song",
+            artist_external_id="",
+            artist_name="Some Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:00+00:00"
+        )
+
+        session.add.assert_called_once()
+        added_event = session.add.call_args[0][0]
+        assert added_event.track_id == existing_track.id
+        assert added_event.user_id == user_id
+
+    @pytest.mark.anyio()
+    async def test_returns_when_no_track_found_by_title(self) -> None:
+        """No event created when track has no external_id and title match fails."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+
+        # Title match returns None
+        session.execute.side_effect = [no_result]
+        session.add = MagicMock()
+
+        track_data = _make_track_data(
+            external_id="",
+            title="Unknown Song",
+            artist_external_id="",
+            artist_name="Unknown Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:00+00:00"
+        )
+
+        session.add.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_falls_back_to_title_when_service_links_miss(self) -> None:
+        """Track with external_id falls back to title when service_links miss."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        # 1. service_links lookup -> None
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+        # 2. title match -> existing track
+        title_result = MagicMock()
+        title_result.scalar_one_or_none.return_value = existing_track
+        # 3. duplicate check -> no existing event
+        no_dup = MagicMock()
+        no_dup.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [no_result, title_result, no_dup]
+        session.add = MagicMock()
+
+        track_data = _make_track_data(
+            external_id="some-id",
+            title="Known Song",
+            artist_external_id="art1",
+            artist_name="Artist One",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:00+00:00"
+        )
+
         session.add.assert_called_once()

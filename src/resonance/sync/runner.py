@@ -331,17 +331,24 @@ async def _upsert_listening_event(
         played_at: ISO 8601 timestamp of when the track was played.
     """
     service_key = track_data.service.value
+    track: models_module.Track | None = None
 
-    # For tracks without an external_id, we can't reliably look up the track
-    if not track_data.external_id:
-        return
+    # 1. Try service_links lookup if we have an external_id
+    if track_data.external_id:
+        track_stmt = sa.select(models_module.Track).where(
+            models_module.Track.service_links[service_key].as_string()
+            == track_data.external_id
+        )
+        track_result = await session.execute(track_stmt)
+        track = track_result.scalar_one_or_none()
 
-    track_stmt = sa.select(models_module.Track).where(
-        models_module.Track.service_links[service_key].as_string()
-        == track_data.external_id
-    )
-    track_result = await session.execute(track_stmt)
-    track = track_result.scalar_one_or_none()
+    # 2. Fall back to title match (handles tracks without external IDs)
+    if track is None:
+        track_stmt = sa.select(models_module.Track).where(
+            models_module.Track.title == track_data.title,
+        )
+        track_result = await session.execute(track_stmt)
+        track = track_result.scalar_one_or_none()
 
     if track is None:
         return
