@@ -360,7 +360,9 @@ async def _upsert_track(
         return False
 
     # 4. Look up artist for the new track
-    artist_id = uuid.uuid4()
+    artist: models_module.Artist | None = None
+
+    # Try by service_links first
     if track_data.artist_external_id:
         artist_stmt = sa.select(models_module.Artist).where(
             models_module.Artist.service_links[service_key].as_string()
@@ -368,8 +370,24 @@ async def _upsert_track(
         )
         artist_result = await session.execute(artist_stmt)
         artist = artist_result.scalar_one_or_none()
-        if artist is not None:
-            artist_id = artist.id
+
+    # Fall back to name match
+    if artist is None and track_data.artist_name:
+        artist_stmt = sa.select(models_module.Artist).where(
+            models_module.Artist.name == track_data.artist_name
+        )
+        artist_result = await session.execute(artist_stmt)
+        artist = artist_result.scalar_one_or_none()
+
+    if artist is None:
+        logger.warning(
+            "Could not find artist for track %r by %r — skipping",
+            track_data.title,
+            track_data.artist_name,
+        )
+        return False
+
+    artist_id = artist.id
 
     track = models_module.Track(
         id=uuid.uuid4(),
