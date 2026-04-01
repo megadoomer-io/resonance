@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -8,6 +7,7 @@ if TYPE_CHECKING:
 import fastapi
 import redis.asyncio as aioredis
 import sqlalchemy as sa
+import structlog
 
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
@@ -15,12 +15,13 @@ import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
+import resonance.logging as logging_module
 import resonance.middleware.session as session_middleware
 import resonance.models.sync as sync_models
 import resonance.types as types_module
 import resonance.ui.routes as ui_routes_module
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 @asynccontextmanager
@@ -59,6 +60,7 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
 def create_app() -> fastapi.FastAPI:
     """Create and configure the FastAPI application."""
     settings = config_module.Settings()
+    logging_module.configure_logging(settings.log_level)
     application = fastapi.FastAPI(
         title=settings.app_name,
         docs_url="/docs" if settings.debug else None,

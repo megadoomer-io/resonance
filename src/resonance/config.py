@@ -6,6 +6,7 @@ class Settings(pydantic_settings.BaseSettings):
 
     app_name: str = "resonance"
     debug: bool = False
+    log_level: str = "INFO"
 
     # Database (standard PG env vars)
     pghost: str = "localhost"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import logging
 import secrets
 import uuid
 from typing import Annotated
@@ -13,6 +12,7 @@ import fastapi.responses as fastapi_responses
 import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import structlog
 
 import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
@@ -22,7 +22,7 @@ import resonance.middleware.session as session_module
 import resonance.models.user as user_models
 import resonance.types as types_module
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 router = fastapi.APIRouter(prefix="/auth", tags=["auth"])
 

@@ -1,19 +1,19 @@
 """ListenBrainz connector with MusicBrainz OAuth and listen history."""
 
 import asyncio
-import logging
 import urllib.parse
 from typing import Any
 
 import httpx
 import pydantic
+import structlog
 
 import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.connectors.ratelimit as ratelimit_module
 import resonance.types as types_module
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 _MAX_RETRIES = 3
 _MAX_RETRY_DELAY = 30  # seconds — don't wait longer than this per retry

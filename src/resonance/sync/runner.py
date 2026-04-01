@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import datetime
-import logging
 import traceback
 import uuid
 from typing import TYPE_CHECKING, Protocol
 
 import sqlalchemy as sa
+import structlog
 
 import resonance.connectors.base as base_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -19,7 +19,7 @@ import resonance.types as types_module
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 
 class SyncableConnector(Protocol):
@@ -54,6 +54,7 @@ async def run_sync(
         session: The async database session.
         access_token: OAuth access token for the connector.
     """
+    log = logger.bind(sync_job_id=str(job.id), user_id=str(job.user_id))
     try:
         job.status = types_module.SyncStatus.RUNNING
         job.started_at = datetime.datetime.now(datetime.UTC)
@@ -66,14 +67,16 @@ async def run_sync(
             )
         )
         connection = conn_result.scalar_one()
+        log = log.bind(service=connection.service_type.value)
+        log.info("sync_started")
 
         if isinstance(connector, listenbrainz_module.ListenBrainzConnector):
             items_created, items_updated = await _sync_listenbrainz(
-                job, connector, session, connection.external_user_id
+                log, job, connector, session, connection.external_user_id
             )
         else:
             items_created, items_updated = await _sync_spotify(
-                job, connector, session, access_token
+                log, job, connector, session, access_token
             )
 
         job.items_created = items_created
@@ -81,9 +84,14 @@ async def run_sync(
         job.status = types_module.SyncStatus.COMPLETED
         job.completed_at = datetime.datetime.now(datetime.UTC)
         await session.commit()
+        log.info(
+            "sync_completed",
+            items_created=items_created,
+            items_updated=items_updated,
+        )
 
     except Exception:
-        logger.exception("Sync job failed: %s", job.id)
+        log.exception("sync_failed")
         job.status = types_module.SyncStatus.FAILED
         job.error_message = traceback.format_exc()
         job.completed_at = datetime.datetime.now(datetime.UTC)
@@ -91,6 +99,7 @@ async def run_sync(
 
 
 async def _sync_spotify(
+    log: structlog.stdlib.BoundLogger,
     job: models_module.SyncJob,
     connector: SyncableConnector,
     session: AsyncSession,
@@ -111,6 +120,7 @@ async def _sync_spotify(
     items_updated = 0
 
     artists = await connector.get_followed_artists(access_token)
+    log.info("spotify_artists_fetched", count=len(artists))
     for artist_data in artists:
         with session.no_autoflush:
             created = await _upsert_artist(session, artist_data)
@@ -124,6 +134,7 @@ async def _sync_spotify(
             )
 
     saved_tracks = await connector.get_saved_tracks(access_token)
+    log.info("spotify_tracks_fetched", count=len(saved_tracks))
     for track_data in saved_tracks:
         with session.no_autoflush:
             await _upsert_artist_from_track(session, track_data)
@@ -139,6 +150,7 @@ async def _sync_spotify(
             )
 
     recently_played = await connector.get_recently_played(access_token)
+    log.info("spotify_recent_fetched", count=len(recently_played))
     for played_item in recently_played:
         with session.no_autoflush:
             await _upsert_artist_from_track(session, played_item.track)
@@ -156,6 +168,7 @@ async def _sync_spotify(
 
 
 async def _sync_listenbrainz(
+    log: structlog.stdlib.BoundLogger,
     job: models_module.SyncJob,
     connector: listenbrainz_module.ListenBrainzConnector,
     session: AsyncSession,
@@ -175,11 +188,13 @@ async def _sync_listenbrainz(
     items_created = 0
     items_updated = 0
     max_ts: int | None = None
+    page = 0
 
     while True:
         listens = await connector.get_listens(username, max_ts=max_ts, count=100)
         if not listens:
             break
+        page += 1
 
         for listen in listens:
             with session.no_autoflush:
@@ -198,6 +213,13 @@ async def _sync_listenbrainz(
         # Use the oldest listen's timestamp for next page
         max_ts = listens[-1].listened_at
         await session.commit()  # commit per page
+        log.info(
+            "listenbrainz_page_synced",
+            page=page,
+            listens_in_page=len(listens),
+            total_created=items_created,
+            total_updated=items_updated,
+        )
 
     return items_created, items_updated
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import logging
 import uuid
 from typing import Annotated, Any
 
@@ -12,6 +11,7 @@ import fastapi
 import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import structlog
 
 import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
@@ -22,7 +22,7 @@ import resonance.models.user as user_models
 import resonance.sync.runner as runner_module
 import resonance.types as types_module
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
 
 router = fastapi.APIRouter(prefix="/sync", tags=["sync"])
 
