@@ -319,5 +319,5 @@ class TestAuthLogout:
 
     async def test_logout_redirects_to_login(self, client: httpx.AsyncClient) -> None:
         response = await client.post("/api/v1/auth/logout", follow_redirects=False)
-        assert response.status_code == 307
+        assert response.status_code == 303
         assert response.headers["location"] == "/login"

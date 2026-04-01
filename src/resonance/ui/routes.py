@@ -356,4 +356,5 @@ async def merge_confirm(
     session["merge_service_type"] = None
     session["merge_connection_id"] = None
 
-    return fastapi.responses.RedirectResponse(url="/account", status_code=307)
+    # 303 See Other — browser follows redirect with GET (not POST)
+    return fastapi.responses.RedirectResponse(url="/account", status_code=303)

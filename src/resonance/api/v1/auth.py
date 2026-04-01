@@ -249,4 +249,5 @@ async def logout(
 ) -> fastapi_responses.RedirectResponse:
     """Clear the session and log the user out."""
     session.clear()
-    return fastapi_responses.RedirectResponse(url="/login", status_code=307)
+    # 303 See Other — browser follows redirect with GET (not POST)
+    return fastapi_responses.RedirectResponse(url="/login", status_code=303)
