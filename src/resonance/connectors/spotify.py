@@ -62,7 +62,7 @@ class SpotifyConnector(base_module.BaseConnector):
     def http_client(self) -> httpx.AsyncClient:
         """Lazily create and return the HTTP client."""
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient()
+            self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
 
     async def _request(
