@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import uuid
 from typing import Annotated, Any
 
 import fastapi
+import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
+import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
 import resonance.crypto as crypto_module
 import resonance.dependencies as deps_module
@@ -120,6 +123,40 @@ async def trigger_sync(
             status_code=404,
             detail=f"No connector registered for {service_type.value}",
         )
+
+    # Refresh token if expired
+    if (
+        connection.token_expires_at is not None
+        and connection.token_expires_at < datetime.datetime.now(datetime.UTC)
+        and connection.encrypted_refresh_token is not None
+        and hasattr(connector, "refresh_access_token")
+    ):
+        refresh_token = crypto_module.decrypt_token(
+            connection.encrypted_refresh_token, settings.token_encryption_key
+        )
+        try:
+            new_tokens: base_module.TokenResponse = (
+                await connector.refresh_access_token(refresh_token)
+            )
+            access_token = new_tokens.access_token
+            connection.encrypted_access_token = crypto_module.encrypt_token(
+                new_tokens.access_token, settings.token_encryption_key
+            )
+            if new_tokens.refresh_token:
+                connection.encrypted_refresh_token = crypto_module.encrypt_token(
+                    new_tokens.refresh_token, settings.token_encryption_key
+                )
+            if new_tokens.expires_in:
+                connection.token_expires_at = datetime.datetime.now(
+                    datetime.UTC
+                ) + datetime.timedelta(seconds=new_tokens.expires_in)
+            await db.commit()
+            logger.info("Refreshed expired token for %s", service)
+        except httpx.HTTPStatusError:
+            logger.warning(
+                "Failed to refresh token for %s — using existing token",
+                service,
+            )
 
     # Launch background task with its own db session
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = (
