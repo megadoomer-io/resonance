@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
@@ -9,6 +11,7 @@ import resonance.models as models_module
 import resonance.models.base as base_module
 import resonance.models.music as music_module
 import resonance.models.sync as sync_module
+import resonance.models.task as task_module
 import resonance.models.taste as taste_module
 import resonance.models.user as user_module
 import resonance.types as types_module
@@ -396,6 +399,32 @@ class TestSyncJobModel:
 
 
 # ---------------------------------------------------------------------------
+# SyncTask model
+# ---------------------------------------------------------------------------
+
+
+class TestSyncTask:
+    """Tests for the SyncTask model."""
+
+    def test_sync_task_has_expected_columns(self) -> None:
+        task = task_module.SyncTask(
+            user_id=uuid.uuid4(),
+            service_connection_id=uuid.uuid4(),
+            task_type=types_module.SyncTaskType.SYNC_JOB,
+            status=types_module.SyncStatus.PENDING,
+        )
+        assert task.parent_id is None
+        assert task.params == {}
+        assert task.result == {}
+        assert task.progress_current == 0
+        assert task.progress_total is None
+        assert task.error_message is None
+
+    def test_sync_task_tablename(self) -> None:
+        assert task_module.SyncTask.__tablename__ == "sync_tasks"
+
+
+# ---------------------------------------------------------------------------
 # Package re-exports
 # ---------------------------------------------------------------------------
 
@@ -429,3 +458,6 @@ class TestModelsPackageExports:
 
     def test_sync_job_exported(self) -> None:
         assert models_module.SyncJob is sync_module.SyncJob
+
+    def test_sync_task_exported(self) -> None:
+        assert models_module.SyncTask is task_module.SyncTask
