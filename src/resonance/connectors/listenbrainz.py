@@ -163,6 +163,16 @@ class ListenBrainzConnector(base_module.BaseConnector):
         logger.info("Got MusicBrainz user: %s", username)
         return {"id": username, "display_name": username}
 
+    async def get_listen_count(self, username: str) -> int:
+        """Get the total number of listens for a user."""
+        response = await self._request(
+            "GET",
+            f"{LISTENBRAINZ_API_BASE}/user/{username}/listen-count",
+        )
+        data = response.json()
+        count: int = data["payload"]["count"]
+        return count
+
     async def get_listens(
         self,
         username: str,

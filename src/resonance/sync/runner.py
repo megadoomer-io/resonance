@@ -189,6 +189,16 @@ async def _sync_listenbrainz(
     items_updated = 0
     max_ts: int | None = None
     page = 0
+    processed = 0
+
+    # Get total listen count for progress tracking
+    try:
+        total = await connector.get_listen_count(username)
+        job.progress_total = total
+        await session.commit()
+        log.info("listenbrainz_total_listens", total=total)
+    except Exception:
+        log.warning("could_not_fetch_listen_count")
 
     while True:
         listens = await connector.get_listens(username, max_ts=max_ts, count=100)
@@ -209,16 +219,18 @@ async def _sync_listenbrainz(
                     session, job.user_id, listen.track, played_at
                 )
             items_created += 1
+            processed += 1
 
         # Use the oldest listen's timestamp for next page
         max_ts = listens[-1].listened_at
-        await session.commit()  # commit per page
+        job.progress_current = processed
+        await session.commit()  # commit per page (also persists progress)
         log.info(
             "listenbrainz_page_synced",
             page=page,
             listens_in_page=len(listens),
+            progress=f"{processed}/{job.progress_total or '?'}",
             total_created=items_created,
-            total_updated=items_updated,
         )
 
     return items_created, items_updated
