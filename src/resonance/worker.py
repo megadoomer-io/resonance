@@ -20,6 +20,7 @@ import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.crypto as crypto_module
 import resonance.database as database_module
+import resonance.logging as logging_module
 import resonance.models.task as task_module
 import resonance.models.user as user_models
 import resonance.sync.runner as runner_module
@@ -673,6 +674,9 @@ async def startup(ctx: dict[str, Any]) -> None:
         ctx: arq worker context dict.
     """
     settings = config_module.Settings()
+    logging_module.configure_logging(settings.log_level)
+    logger.info("worker_started")
+
     engine = database_module.create_async_engine(settings)
     session_factory = database_module.create_session_factory(engine)
 
