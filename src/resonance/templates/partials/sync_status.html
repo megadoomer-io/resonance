@@ -13,6 +13,7 @@
                 <th>Started</th>
                 <th>Completed</th>
                 <th>Items</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -40,6 +41,18 @@
                 <td>{{ job.started_at.strftime('%H:%M:%S') if job.started_at else '--' }}</td>
                 <td>{{ job.completed_at.strftime('%H:%M:%S') if job.completed_at else '--' }}</td>
                 <td>{{ job.items_created }} new / {{ job.items_updated }} updated</td>
+                <td>
+                    {% if job.status.value in ('pending', 'running') %}
+                    <button
+                        hx-post="/api/v1/sync/cancel/{{ job.id }}"
+                        hx-target="#sync-status"
+                        hx-swap="innerHTML"
+                        hx-confirm="Cancel this sync job?"
+                        class="outline secondary"
+                        style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
+                    >Cancel</button>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

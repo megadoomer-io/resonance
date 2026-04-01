@@ -149,6 +149,39 @@ async def trigger_sync(
     return {"status": "started", "sync_job_id": str(job_id)}
 
 
+@router.post("/cancel/{job_id}")
+async def cancel_sync(
+    job_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Cancel a pending or running sync job."""
+    import datetime
+
+    stmt = sa.select(sync_models.SyncJob).where(
+        sync_models.SyncJob.id == job_id,
+        sync_models.SyncJob.user_id == user_id,
+    )
+    result = await db.execute(stmt)
+    job = result.scalar_one_or_none()
+
+    if job is None:
+        raise fastapi.HTTPException(status_code=404, detail="Sync job not found")
+
+    if job.status not in (
+        types_module.SyncStatus.PENDING,
+        types_module.SyncStatus.RUNNING,
+    ):
+        raise fastapi.HTTPException(status_code=400, detail="Job is already finished")
+
+    job.status = types_module.SyncStatus.FAILED
+    job.error_message = "Cancelled by user"
+    job.completed_at = datetime.datetime.now(datetime.UTC)
+    await db.commit()
+
+    return {"status": "cancelled", "job_id": str(job_id)}
+
+
 @router.get("/status")
 async def sync_status(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
