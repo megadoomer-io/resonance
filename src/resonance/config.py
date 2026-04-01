@@ -35,6 +35,9 @@ class Settings(pydantic_settings.BaseSettings):
     spotify_client_secret: str = ""
     spotify_redirect_path: str = "/api/v1/auth/spotify/callback"
 
+    # Worker mode
+    worker_mode: str = "external"  # "external" (prod) or "inline" (dev)
+
     # MusicBrainz OAuth (for ListenBrainz auth)
     musicbrainz_client_id: str = ""
     musicbrainz_client_secret: str = ""

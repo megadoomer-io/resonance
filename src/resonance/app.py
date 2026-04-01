@@ -30,7 +30,7 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     settings: config_module.Settings = application.state.settings
     engine = database_module.create_async_engine(settings)
     session_factory = database_module.create_session_factory(engine)
-    redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]  # redis 5.x lacks stubs
 
     application.state.engine = engine
     application.state.session_factory = session_factory
@@ -69,7 +69,7 @@ def create_app() -> fastapi.FastAPI:
     )
     application.state.settings = settings
 
-    session_redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    session_redis = aioredis.from_url(settings.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]  # redis 5.x lacks stubs
     application.add_middleware(
         session_middleware.SessionMiddleware,
         redis=session_redis,
