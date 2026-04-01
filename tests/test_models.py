@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import uuid
+
 import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
 import resonance.models as models_module
 import resonance.models.base as base_module
 import resonance.models.music as music_module
-import resonance.models.sync as sync_module
+import resonance.models.task as task_module
 import resonance.models.taste as taste_module
 import resonance.models.user as user_module
 import resonance.types as types_module
@@ -349,50 +351,29 @@ class TestUserTrackRelationModel:
 
 
 # ---------------------------------------------------------------------------
-# Sync model
+# SyncTask model
 # ---------------------------------------------------------------------------
 
 
-class TestSyncJobModel:
-    """Tests for the SyncJob model."""
+class TestSyncTask:
+    """Tests for the SyncTask model."""
 
-    def test_table_name(self) -> None:
-        assert sync_module.SyncJob.__tablename__ == "sync_jobs"
+    def test_sync_task_has_expected_columns(self) -> None:
+        task = task_module.SyncTask(
+            user_id=uuid.uuid4(),
+            service_connection_id=uuid.uuid4(),
+            task_type=types_module.SyncTaskType.SYNC_JOB,
+            status=types_module.SyncStatus.PENDING,
+        )
+        assert task.parent_id is None
+        assert task.params == {}
+        assert task.result == {}
+        assert task.progress_current == 0
+        assert task.progress_total is None
+        assert task.error_message is None
 
-    def test_expected_columns(self) -> None:
-        table: sa.Table = sync_module.SyncJob.__table__  # type: ignore[assignment]
-        col_names = {c.name for c in table.columns}
-        assert col_names >= {
-            "id",
-            "user_id",
-            "service_connection_id",
-            "sync_type",
-            "status",
-            "progress_current",
-            "progress_total",
-            "error_message",
-            "items_created",
-            "items_updated",
-            "started_at",
-            "completed_at",
-            "created_at",
-        }
-
-    def test_sync_type_is_enum(self) -> None:
-        col = _get_column(sync_module.SyncJob.__table__, "sync_type")  # type: ignore[arg-type]
-        assert isinstance(col.type, sa.Enum)
-
-    def test_status_is_enum(self) -> None:
-        col = _get_column(sync_module.SyncJob.__table__, "status")  # type: ignore[arg-type]
-        assert isinstance(col.type, sa.Enum)
-
-    def test_index_on_user_status(self) -> None:
-        table: sa.Table = sync_module.SyncJob.__table__  # type: ignore[assignment]
-        index_col_sets = [
-            frozenset(col.name for col in idx.columns) for idx in table.indexes
-        ]
-        expected = frozenset({"user_id", "status"})
-        assert expected in index_col_sets
+    def test_sync_task_tablename(self) -> None:
+        assert task_module.SyncTask.__tablename__ == "sync_tasks"
 
 
 # ---------------------------------------------------------------------------
@@ -427,5 +408,5 @@ class TestModelsPackageExports:
     def test_user_track_relation_exported(self) -> None:
         assert models_module.UserTrackRelation is taste_module.UserTrackRelation
 
-    def test_sync_job_exported(self) -> None:
-        assert models_module.SyncJob is sync_module.SyncJob
+    def test_sync_task_exported(self) -> None:
+        assert models_module.SyncTask is task_module.SyncTask

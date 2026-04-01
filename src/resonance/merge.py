@@ -24,7 +24,7 @@ class MergeStats:
     artist_relations_skipped: int = 0
     track_relations_moved: int = 0
     track_relations_skipped: int = 0
-    sync_jobs_moved: int = 0
+    sync_tasks_moved: int = 0
 
 
 async def get_account_summary(
@@ -45,7 +45,7 @@ async def get_account_summary(
         ("listening_events", models.ListeningEvent),
         ("artist_relations", models.UserArtistRelation),
         ("track_relations", models.UserTrackRelation),
-        ("sync_jobs", models.SyncJob),
+        ("sync_tasks", models.SyncTask),
     ]
 
     counts: dict[str, int] = {}
@@ -114,16 +114,16 @@ async def merge_accounts(
         stats.track_relations_skipped,
     ) = await _merge_track_relations(session, target_user_id, source_user_id)
 
-    # 5. Move SyncJobs
+    # 5. Move SyncTasks
     cursor = cast(
         "sa.CursorResult[tuple[()]]",
         await session.execute(
-            sa.update(models.SyncJob)
-            .where(models.SyncJob.user_id == source_user_id)
+            sa.update(models.SyncTask)
+            .where(models.SyncTask.user_id == source_user_id)
             .values(user_id=target_user_id)
         ),
     )
-    stats.sync_jobs_moved = cursor.rowcount
+    stats.sync_tasks_moved = cursor.rowcount
 
     # 6. Delete source user
     await session.execute(

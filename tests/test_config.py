@@ -57,6 +57,11 @@ def test_settings_has_musicbrainz_credentials() -> None:
     assert hasattr(settings, "musicbrainz_redirect_uri")
 
 
+def test_worker_mode_defaults_to_external() -> None:
+    settings = config_module.Settings()
+    assert settings.worker_mode == "external"
+
+
 def test_redirect_uris_constructed_from_base_url() -> None:
     settings = config_module.Settings(base_url="https://example.com")
     assert (

@@ -2,32 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime
-import uuid
+import uuid  # noqa: TC003 - runtime import required for FastAPI dependency resolution
 from typing import Annotated, Any
 
 import fastapi
-import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
-import resonance.connectors.base as base_module
-import resonance.connectors.registry as registry_module
-import resonance.crypto as crypto_module
 import resonance.dependencies as deps_module
-import resonance.models.sync as sync_models
+import resonance.models.task as task_models
 import resonance.models.user as user_models
-import resonance.sync.runner as runner_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
 
 router = fastapi.APIRouter(prefix="/sync", tags=["sync"])
-
-# Set of strong references to background sync tasks to prevent garbage collection.
-_background_tasks: set[asyncio.Task[None]] = set()
 
 
 def _parse_service_type(service: str) -> types_module.ServiceType:
@@ -56,7 +47,7 @@ async def trigger_sync(
         db: The async database session.
 
     Returns:
-        A dict with status and sync_job_id.
+        A dict with status and sync_task_id.
 
     Raises:
         HTTPException: 404 if unknown service, 400 if no connection,
@@ -79,10 +70,11 @@ async def trigger_sync(
         )
 
     # Check for already-running sync (PENDING or RUNNING)
-    running_stmt = sa.select(sync_models.SyncJob).where(
-        sync_models.SyncJob.user_id == user_id,
-        sync_models.SyncJob.service_connection_id == connection.id,
-        sync_models.SyncJob.status.in_(
+    running_stmt = sa.select(task_models.SyncTask).where(
+        task_models.SyncTask.user_id == user_id,
+        task_models.SyncTask.service_connection_id == connection.id,
+        task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+        task_models.SyncTask.status.in_(
             [
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
@@ -98,92 +90,21 @@ async def trigger_sync(
             detail="A sync is already running for this service",
         )
 
-    # Create SyncJob
-    job = sync_models.SyncJob(
-        id=uuid.uuid4(),
+    # Create SyncTask
+    task = task_models.SyncTask(
         user_id=user_id,
         service_connection_id=connection.id,
-        sync_type=types_module.SyncType.FULL,
+        task_type=types_module.SyncTaskType.SYNC_JOB,
         status=types_module.SyncStatus.PENDING,
     )
-    db.add(job)
+    db.add(task)
     await db.commit()
 
-    # Decrypt access token
-    settings = request.app.state.settings
-    access_token = crypto_module.decrypt_token(
-        connection.encrypted_access_token, settings.token_encryption_key
-    )
+    # Enqueue arq job for background processing
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job("plan_sync", str(task.id))
 
-    # Get connector from registry
-    registry: registry_module.ConnectorRegistry = request.app.state.connector_registry
-    connector = registry.get(service_type)
-    if connector is None:
-        raise fastapi.HTTPException(
-            status_code=404,
-            detail=f"No connector registered for {service_type.value}",
-        )
-
-    # Refresh token if expired
-    if (
-        connection.token_expires_at is not None
-        and connection.token_expires_at < datetime.datetime.now(datetime.UTC)
-        and connection.encrypted_refresh_token is not None
-        and hasattr(connector, "refresh_access_token")
-    ):
-        refresh_token = crypto_module.decrypt_token(
-            connection.encrypted_refresh_token, settings.token_encryption_key
-        )
-        try:
-            new_tokens: base_module.TokenResponse = (
-                await connector.refresh_access_token(refresh_token)
-            )
-            access_token = new_tokens.access_token
-            connection.encrypted_access_token = crypto_module.encrypt_token(
-                new_tokens.access_token, settings.token_encryption_key
-            )
-            if new_tokens.refresh_token:
-                connection.encrypted_refresh_token = crypto_module.encrypt_token(
-                    new_tokens.refresh_token, settings.token_encryption_key
-                )
-            if new_tokens.expires_in:
-                connection.token_expires_at = datetime.datetime.now(
-                    datetime.UTC
-                ) + datetime.timedelta(seconds=new_tokens.expires_in)
-            await db.commit()
-            logger.info("Refreshed expired token for %s", service)
-        except httpx.HTTPStatusError:
-            logger.warning(
-                "Failed to refresh token for %s — using existing token",
-                service,
-            )
-
-    # Launch background task with its own db session
-    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = (
-        request.app.state.session_factory
-    )
-    job_id = job.id
-
-    async def _run_background_sync() -> None:
-        async with session_factory() as bg_session:
-            bg_stmt = sa.select(sync_models.SyncJob).where(
-                sync_models.SyncJob.id == job_id
-            )
-            bg_result = await bg_session.execute(bg_stmt)
-            bg_job = bg_result.scalar_one_or_none()
-            if bg_job is not None:
-                await runner_module.run_sync(
-                    bg_job,
-                    connector,  # type: ignore[arg-type]
-                    bg_session,
-                    access_token,
-                )
-
-    task = asyncio.create_task(_run_background_sync())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-    return {"status": "started", "sync_job_id": str(job_id)}
+    return {"status": "started", "sync_task_id": str(task.id)}
 
 
 @router.post("/cancel/{job_id}")
@@ -192,18 +113,16 @@ async def cancel_sync(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
-    """Cancel a pending or running sync job."""
-    import datetime
-
-    stmt = sa.select(sync_models.SyncJob).where(
-        sync_models.SyncJob.id == job_id,
-        sync_models.SyncJob.user_id == user_id,
+    """Cancel a pending or running sync task."""
+    stmt = sa.select(task_models.SyncTask).where(
+        task_models.SyncTask.id == job_id,
+        task_models.SyncTask.user_id == user_id,
     )
     result = await db.execute(stmt)
     job = result.scalar_one_or_none()
 
     if job is None:
-        raise fastapi.HTTPException(status_code=404, detail="Sync job not found")
+        raise fastapi.HTTPException(status_code=404, detail="Sync task not found")
 
     if job.status not in (
         types_module.SyncStatus.PENDING,
@@ -224,19 +143,22 @@ async def sync_status(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> list[dict[str, Any]]:
-    """Get recent sync job status for the authenticated user.
+    """Get recent sync task status for the authenticated user.
 
     Args:
         user_id: The authenticated user's ID.
         db: The async database session.
 
     Returns:
-        A list of sync job status dicts, most recent first.
+        A list of sync task status dicts, most recent first.
     """
     stmt = (
-        sa.select(sync_models.SyncJob)
-        .where(sync_models.SyncJob.user_id == user_id)
-        .order_by(sync_models.SyncJob.created_at.desc())
+        sa.select(task_models.SyncTask)
+        .where(
+            task_models.SyncTask.user_id == user_id,
+            task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+        )
+        .order_by(task_models.SyncTask.created_at.desc())
         .limit(10)
     )
     result = await db.execute(stmt)
@@ -246,11 +168,15 @@ async def sync_status(
         {
             "id": str(job.id),
             "status": str(job.status),
-            "sync_type": str(job.sync_type),
+            "task_type": str(job.task_type),
             "progress_current": job.progress_current,
             "progress_total": job.progress_total,
-            "items_created": job.items_created,
-            "items_updated": job.items_updated,
+            "items_created": job.result.get("items_created", 0)
+            if isinstance(job.result, dict)
+            else 0,
+            "items_updated": job.result.get("items_updated", 0)
+            if isinstance(job.result, dict)
+            else 0,
             "error_message": job.error_message,
             "started_at": (
                 job.started_at.isoformat() if job.started_at is not None else None

@@ -40,7 +40,7 @@
                 <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>{{ job.started_at.strftime('%H:%M:%S') if job.started_at else '--' }}</td>
                 <td>{{ job.completed_at.strftime('%H:%M:%S') if job.completed_at else '--' }}</td>
-                <td>{{ job.items_created }} new / {{ job.items_updated }} updated</td>
+                <td>{{ job.result.get('items_created', 0) }} new / {{ job.result.get('items_updated', 0) }} updated</td>
                 <td>
                     {% if job.status.value in ('pending', 'running') %}
                     <button

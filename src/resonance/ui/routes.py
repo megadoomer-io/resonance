@@ -15,7 +15,7 @@ import sqlalchemy.orm as sa_orm
 
 import resonance.merge as merge_module
 import resonance.models.music as music_models
-import resonance.models.sync as sync_models
+import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.types as types_module
 
@@ -91,12 +91,15 @@ async def dashboard(
         )
 
         latest_sync_result = await db.execute(
-            sa.select(sync_models.SyncJob)
-            .where(sync_models.SyncJob.user_id == user_uuid)
-            .order_by(sync_models.SyncJob.created_at.desc())
+            sa.select(task_models.SyncTask)
+            .where(
+                task_models.SyncTask.user_id == user_uuid,
+                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+            )
+            .order_by(task_models.SyncTask.created_at.desc())
             .limit(1)
         )
-        latest_sync: sync_models.SyncJob | None = (
+        latest_sync: task_models.SyncTask | None = (
             latest_sync_result.scalar_one_or_none()
         )
 
@@ -282,13 +285,16 @@ async def sync_status_partial(
 
     async with _get_db(request) as db:
         sync_jobs_result = await db.execute(
-            sa.select(sync_models.SyncJob)
-            .where(sync_models.SyncJob.user_id == user_uuid)
-            .order_by(sync_models.SyncJob.created_at.desc())
-            .options(sa_orm.joinedload(sync_models.SyncJob.service_connection))
+            sa.select(task_models.SyncTask)
+            .where(
+                task_models.SyncTask.user_id == user_uuid,
+                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+            )
+            .order_by(task_models.SyncTask.created_at.desc())
+            .options(sa_orm.joinedload(task_models.SyncTask.service_connection))
             .limit(5)
         )
-        sync_jobs: Sequence[sync_models.SyncJob] = sync_jobs_result.scalars().all()
+        sync_jobs: Sequence[task_models.SyncTask] = sync_jobs_result.scalars().all()
 
     has_active_sync = any(
         j.status in (types_module.SyncStatus.PENDING, types_module.SyncStatus.RUNNING)

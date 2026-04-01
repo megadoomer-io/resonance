@@ -59,7 +59,7 @@ class TestGetAccountSummary:
             "listening_events": 500,
             "artist_relations": 30,
             "track_relations": 200,
-            "sync_jobs": 3,
+            "sync_tasks": 3,
         }
 
         # The function issues 5 count queries in order; map them to results.
@@ -68,7 +68,7 @@ class TestGetAccountSummary:
             _scalar_result(expected_counts["listening_events"]),
             _scalar_result(expected_counts["artist_relations"]),
             _scalar_result(expected_counts["track_relations"]),
-            _scalar_result(expected_counts["sync_jobs"]),
+            _scalar_result(expected_counts["sync_tasks"]),
         ]
 
         result = await merge_module.get_account_summary(session, user_id)
@@ -94,7 +94,7 @@ class TestMergeAccounts:
         target_artist_rels: list[Any] | None = None,
         source_track_rels: list[Any] | None = None,
         target_track_rels: list[Any] | None = None,
-        sync_jobs_moved: int = 0,
+        sync_tasks_moved: int = 0,
     ) -> tuple[AsyncMock, uuid.UUID, uuid.UUID]:
         """Build a mock session with configurable return values."""
         session = AsyncMock()
@@ -119,7 +119,7 @@ class TestMergeAccounts:
         # N+1. SELECT source track relations
         # N+2. SELECT target track relations
         # N+3..M. DELETE / UPDATE individual track relations (dynamic)
-        # M+1. UPDATE sync_jobs
+        # M+1. UPDATE sync_tasks
         # M+2. DELETE source user
 
         results: list[Any] = [
@@ -157,7 +157,7 @@ class TestMergeAccounts:
             else:
                 results.append(_rowcount_result(1))  # UPDATE
 
-        results.append(_rowcount_result(sync_jobs_moved))  # sync_jobs
+        results.append(_rowcount_result(sync_tasks_moved))  # sync_tasks
         results.append(_rowcount_result(1))  # DELETE user
 
         session.execute.side_effect = results
@@ -299,12 +299,12 @@ class TestMergeAccounts:
         assert stats.track_relations_skipped == 0
 
     @pytest.mark.asyncio
-    async def test_reassigns_sync_jobs(self) -> None:
-        session, target_id, source_id = self._setup_session(sync_jobs_moved=5)
+    async def test_reassigns_sync_tasks(self) -> None:
+        session, target_id, source_id = self._setup_session(sync_tasks_moved=5)
 
         stats = await merge_module.merge_accounts(session, target_id, source_id)
 
-        assert stats.sync_jobs_moved == 5
+        assert stats.sync_tasks_moved == 5
 
     @pytest.mark.asyncio
     async def test_deletes_source_user(self) -> None:
@@ -383,7 +383,7 @@ class TestMergeAccounts:
             target_artist_rels=[target_artist_dup],
             source_track_rels=[source_track_dup, source_track_unique],
             target_track_rels=[target_track_dup],
-            sync_jobs_moved=3,
+            sync_tasks_moved=3,
         )
 
         stats = await merge_module.merge_accounts(session, target_id, source_id)
@@ -395,5 +395,5 @@ class TestMergeAccounts:
             artist_relations_skipped=1,
             track_relations_moved=1,
             track_relations_skipped=1,
-            sync_jobs_moved=3,
+            sync_tasks_moved=3,
         )
