@@ -112,38 +112,45 @@ async def _sync_spotify(
 
     artists = await connector.get_followed_artists(access_token)
     for artist_data in artists:
-        created = await _upsert_artist(session, artist_data)
-        if created:
-            items_created += 1
-        else:
-            items_updated += 1
-        await _upsert_user_artist_relation(
-            session, job.user_id, artist_data, job.service_connection_id
-        )
+        async with session.no_autoflush:
+            created = await _upsert_artist(session, artist_data)
+            await session.flush()
+            if created:
+                items_created += 1
+            else:
+                items_updated += 1
+            await _upsert_user_artist_relation(
+                session, job.user_id, artist_data, job.service_connection_id
+            )
 
     saved_tracks = await connector.get_saved_tracks(access_token)
     for track_data in saved_tracks:
-        await _upsert_artist_from_track(session, track_data)
-        await session.flush()  # ensure artist is persisted before track FK
-        created = await _upsert_track(session, track_data)
-        if created:
-            items_created += 1
-        else:
-            items_updated += 1
-        await _upsert_user_track_relation(
-            session, job.user_id, track_data, job.service_connection_id
-        )
+        async with session.no_autoflush:
+            await _upsert_artist_from_track(session, track_data)
+            await session.flush()
+            created = await _upsert_track(session, track_data)
+            await session.flush()
+            if created:
+                items_created += 1
+            else:
+                items_updated += 1
+            await _upsert_user_track_relation(
+                session, job.user_id, track_data, job.service_connection_id
+            )
 
     recently_played = await connector.get_recently_played(access_token)
     for played_item in recently_played:
-        await _upsert_artist_from_track(session, played_item.track)
-        await _upsert_track(session, played_item.track)
-        await _upsert_listening_event(
-            session,
-            job.user_id,
-            played_item.track,
-            played_item.played_at,
-        )
+        async with session.no_autoflush:
+            await _upsert_artist_from_track(session, played_item.track)
+            await session.flush()
+            await _upsert_track(session, played_item.track)
+            await session.flush()
+            await _upsert_listening_event(
+                session,
+                job.user_id,
+                played_item.track,
+                played_item.played_at,
+            )
 
     return items_created, items_updated
 
@@ -175,18 +182,18 @@ async def _sync_listenbrainz(
             break
 
         for listen in listens:
-            await _upsert_artist_from_track(session, listen.track)
-            await session.flush()  # ensure artist is persisted before track FK
-            created = await _upsert_track(session, listen.track)
-            if created:
-                items_created += 1
-            else:
-                items_updated += 1
-
-            played_at = datetime.datetime.fromtimestamp(
-                listen.listened_at, tz=datetime.UTC
-            ).isoformat()
-            await _upsert_listening_event(session, job.user_id, listen.track, played_at)
+            async with session.no_autoflush:
+                await _upsert_artist_from_track(session, listen.track)
+                await session.flush()
+                await _upsert_track(session, listen.track)
+                await session.flush()
+                played_at = datetime.datetime.fromtimestamp(
+                    listen.listened_at, tz=datetime.UTC
+                ).isoformat()
+                await _upsert_listening_event(
+                    session, job.user_id, listen.track, played_at
+                )
+            items_created += 1
 
         # Use the oldest listen's timestamp for next page
         max_ts = listens[-1].listened_at
