@@ -112,7 +112,7 @@ async def _sync_spotify(
 
     artists = await connector.get_followed_artists(access_token)
     for artist_data in artists:
-        async with session.no_autoflush:
+        with session.no_autoflush:
             created = await _upsert_artist(session, artist_data)
             await session.flush()
             if created:
@@ -125,7 +125,7 @@ async def _sync_spotify(
 
     saved_tracks = await connector.get_saved_tracks(access_token)
     for track_data in saved_tracks:
-        async with session.no_autoflush:
+        with session.no_autoflush:
             await _upsert_artist_from_track(session, track_data)
             await session.flush()
             created = await _upsert_track(session, track_data)
@@ -140,7 +140,7 @@ async def _sync_spotify(
 
     recently_played = await connector.get_recently_played(access_token)
     for played_item in recently_played:
-        async with session.no_autoflush:
+        with session.no_autoflush:
             await _upsert_artist_from_track(session, played_item.track)
             await session.flush()
             await _upsert_track(session, played_item.track)
@@ -182,7 +182,7 @@ async def _sync_listenbrainz(
             break
 
         for listen in listens:
-            async with session.no_autoflush:
+            with session.no_autoflush:
                 await _upsert_artist_from_track(session, listen.track)
                 await session.flush()
                 await _upsert_track(session, listen.track)
