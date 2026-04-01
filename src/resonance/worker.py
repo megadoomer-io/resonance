@@ -166,7 +166,7 @@ async def _plan_listenbrainz_sync(
     await session.commit()
 
     # Enqueue the child task
-    arq_redis: arq.ArqRedis = ctx["arq_redis"]
+    arq_redis: arq.ArqRedis = ctx["redis"]
     await arq_redis.enqueue_job("sync_range", str(child.id))
     log.info("listenbrainz_child_enqueued", child_id=str(child.id))
 
@@ -197,7 +197,7 @@ async def _plan_spotify_sync(
     )
 
     data_types = ["followed_artists", "saved_tracks", "recently_played"]
-    arq_redis: arq.ArqRedis = ctx["arq_redis"]
+    arq_redis: arq.ArqRedis = ctx["redis"]
 
     for data_type in data_types:
         child = task_module.SyncTask(
