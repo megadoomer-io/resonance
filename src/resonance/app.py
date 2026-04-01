@@ -47,9 +47,7 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
         )
         row_count = result.rowcount if hasattr(result, "rowcount") else 0
         if row_count:
-            logger.info(
-                "Reset %d interrupted sync jobs back to pending", row_count
-            )
+            logger.info("Reset %d interrupted sync jobs back to pending", row_count)
         await db.commit()
 
     yield
