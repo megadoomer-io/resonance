@@ -285,6 +285,7 @@ async def sync_status_partial(
             sa.select(sync_models.SyncJob)
             .where(sync_models.SyncJob.user_id == user_uuid)
             .order_by(sync_models.SyncJob.created_at.desc())
+            .options(sa_orm.joinedload(sync_models.SyncJob.service_connection))
             .limit(5)
         )
         sync_jobs: Sequence[sync_models.SyncJob] = sync_jobs_result.scalars().all()

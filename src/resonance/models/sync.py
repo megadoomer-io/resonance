@@ -9,6 +9,7 @@ import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
 import resonance.models.base as base_module
+import resonance.models.user as user_models
 import resonance.types as types_module
 
 
@@ -27,6 +28,7 @@ class SyncJob(base_module.Base):
     service_connection_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
         sa.ForeignKey("service_connections.id", ondelete="CASCADE"), nullable=False
     )
+    service_connection: orm.Mapped[user_models.ServiceConnection] = orm.relationship()
     sync_type: orm.Mapped[types_module.SyncType] = orm.mapped_column(
         sa.Enum(types_module.SyncType, native_enum=False), nullable=False
     )

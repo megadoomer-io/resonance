@@ -6,6 +6,7 @@
     <table>
         <thead>
             <tr>
+                <th>Service</th>
                 <th>Status</th>
                 <th>Progress</th>
                 <th>Created</th>
@@ -17,6 +18,7 @@
         <tbody>
             {% for job in sync_jobs %}
             <tr>
+                <td>{{ job.service_connection.service_type.value | capitalize }}</td>
                 <td>
                     {% if job.status.value in ('pending', 'running') %}
                     <span aria-busy="true">{{ job.status.value | capitalize }}</span>
