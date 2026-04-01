@@ -719,11 +719,14 @@ class WorkerSettings:
     lifecycle hooks, concurrency limits, and Redis connection settings.
     """
 
-    functions: typing.ClassVar[list[typing.Any]] = [plan_sync, sync_range]
+    functions: typing.ClassVar[list[typing.Any]] = [
+        arq.func(plan_sync, timeout=None),  # orchestrator — no timeout
+        arq.func(sync_range, timeout=None),  # duration depends on user data size
+    ]
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
-    job_timeout = 7200  # 2 hours — full LB sync can process 123K+ listens
+    job_timeout = 300  # default for future leaf tasks (e.g., page_fetch)
     # arq reads redis_settings as a class attribute (not a method call).
     # Settings() reads env vars, which are available at import time in K8s.
     _cfg = config_module.Settings()

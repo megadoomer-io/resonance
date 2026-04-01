@@ -19,8 +19,9 @@ class TestWorkerSettings:
     """Verify WorkerSettings has the expected attributes."""
 
     def test_functions_registered(self) -> None:
-        assert worker_module.plan_sync in worker_module.WorkerSettings.functions
-        assert worker_module.sync_range in worker_module.WorkerSettings.functions
+        coroutines = [f.coroutine for f in worker_module.WorkerSettings.functions]
+        assert worker_module.plan_sync in coroutines
+        assert worker_module.sync_range in coroutines
 
     def test_lifecycle_hooks(self) -> None:
         assert worker_module.WorkerSettings.on_startup is worker_module.startup
@@ -30,7 +31,7 @@ class TestWorkerSettings:
         assert worker_module.WorkerSettings.max_jobs == 10
 
     def test_job_timeout(self) -> None:
-        assert worker_module.WorkerSettings.job_timeout == 7200
+        assert worker_module.WorkerSettings.job_timeout == 300
 
     def test_redis_settings_is_instance(self) -> None:
         """redis_settings is an arq RedisSettings instance."""
