@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -6,6 +7,7 @@ if TYPE_CHECKING:
 
 import fastapi
 import redis.asyncio as aioredis
+import sqlalchemy as sa
 
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
@@ -14,7 +16,11 @@ import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.database as database_module
 import resonance.middleware.session as session_middleware
+import resonance.models.sync as sync_models
+import resonance.types as types_module
 import resonance.ui.routes as ui_routes_module
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -28,6 +34,23 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     application.state.engine = engine
     application.state.session_factory = session_factory
     application.state.redis = redis_pool
+
+    # Reset RUNNING jobs back to PENDING (interrupted by pod restart)
+    async with session_factory() as db:
+        result = await db.execute(
+            sa.update(sync_models.SyncJob)
+            .where(sync_models.SyncJob.status == types_module.SyncStatus.RUNNING)
+            .values(
+                status=types_module.SyncStatus.PENDING,
+                started_at=None,
+            )
+        )
+        row_count = result.rowcount if hasattr(result, "rowcount") else 0
+        if row_count:
+            logger.info(
+                "Reset %d interrupted sync jobs back to pending", row_count
+            )
+        await db.commit()
 
     yield
 
