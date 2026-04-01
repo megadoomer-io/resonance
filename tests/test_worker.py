@@ -169,6 +169,133 @@ class TestCheckParentCompletion:
         session.commit.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_aggregates_results_from_children(self) -> None:
+        """Parent result sums items_created/items_updated from children."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id)
+        session = AsyncMock()
+        log = MagicMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        child1 = _make_task(
+            parent_id=parent_id,
+            result={"items_created": 15, "items_updated": 7},
+        )
+        child2 = _make_task(
+            parent_id=parent_id,
+            result={"items_created": 25, "items_updated": 13},
+        )
+        child3 = _make_task(
+            parent_id=parent_id,
+            result={"items_created": 5, "items_updated": 0},
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child1, child2, child3]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(session, task, log)
+
+        assert parent_task.result["items_created"] == 45
+        assert parent_task.result["items_updated"] == 20
+        assert parent_task.result["children_completed"] == 3
+        assert parent_task.result["children_failed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_parent_completed_at_is_set(self) -> None:
+        """Parent completed_at timestamp is set when all children finish."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id)
+        session = AsyncMock()
+        log = MagicMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        assert parent_task.completed_at is None
+
+        child1 = _make_task(
+            parent_id=parent_id,
+            result={"items_created": 1, "items_updated": 0},
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child1]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(session, task, log)
+
+        assert parent_task.completed_at is not None
+        assert parent_task.status == types_module.SyncStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_parent_not_found(self) -> None:
+        """Gracefully handles parent_id pointing to a nonexistent record."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id)
+        session = AsyncMock()
+        log = MagicMock()
+
+        # pending count -> 0 (all children done)
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        # parent lookup returns None
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+        ]
+
+        await worker_module._check_parent_completion(session, task, log)
+
+        # Should not commit since parent was not found
+        session.commit.assert_not_called()
+        # Should have queried exactly twice (pending count + parent lookup)
+        assert session.execute.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_failed_children_marks_parent_failed(self) -> None:
         """When any child failed, parent is FAILED with error message."""
         parent_id = uuid.uuid4()
