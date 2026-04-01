@@ -36,6 +36,14 @@ class SyncType(enum.StrEnum):
     INCREMENTAL = "incremental"
 
 
+class SyncTaskType(enum.StrEnum):
+    """Types of hierarchical sync tasks."""
+
+    SYNC_JOB = "sync_job"
+    TIME_RANGE = "time_range"
+    PAGE_FETCH = "page_fetch"
+
+
 class SyncStatus(enum.StrEnum):
     """Status of a synchronization job."""
 
