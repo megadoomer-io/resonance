@@ -720,20 +720,14 @@ class WorkerSettings:
     on_shutdown = shutdown
     max_jobs = 10
     job_timeout = 300
-
-    @staticmethod
-    def redis_settings() -> arq_connections.RedisSettings:
-        """Build Redis connection settings from app config.
-
-        Returns:
-            arq RedisSettings for connecting to the task queue.
-        """
-        settings = config_module.Settings()
-        return arq_connections.RedisSettings(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_password or None,
-        )
+    # arq reads redis_settings as a class attribute (not a method call).
+    # Settings() reads env vars, which are available at import time in K8s.
+    _cfg = config_module.Settings()
+    redis_settings = arq_connections.RedisSettings(
+        host=_cfg.redis_host,
+        port=_cfg.redis_port,
+        password=_cfg.redis_password or None,
+    )
 
 
 def main() -> None:

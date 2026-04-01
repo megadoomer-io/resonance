@@ -32,9 +32,14 @@ class TestWorkerSettings:
     def test_job_timeout(self) -> None:
         assert worker_module.WorkerSettings.job_timeout == 300
 
-    def test_redis_settings_callable(self) -> None:
-        """redis_settings is a static method that returns RedisSettings."""
-        assert callable(worker_module.WorkerSettings.redis_settings)
+    def test_redis_settings_is_instance(self) -> None:
+        """redis_settings is an arq RedisSettings instance."""
+        import arq.connections as arq_connections
+
+        assert isinstance(
+            worker_module.WorkerSettings.redis_settings,
+            arq_connections.RedisSettings,
+        )
 
 
 class TestFunctionsCallable:
