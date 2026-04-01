@@ -296,6 +296,21 @@ async def sync_status_partial(
         )
         sync_jobs: Sequence[task_models.SyncTask] = sync_jobs_result.scalars().all()
 
+        # Aggregate progress from children into parent for display
+        for job in sync_jobs:
+            if job.status in (
+                types_module.SyncStatus.PENDING,
+                types_module.SyncStatus.RUNNING,
+            ):
+                child_progress_result = await db.execute(
+                    sa.select(sa.func.sum(task_models.SyncTask.progress_current)).where(
+                        task_models.SyncTask.parent_id == job.id
+                    )
+                )
+                child_total = child_progress_result.scalar_one_or_none()
+                if child_total is not None:
+                    job.progress_current = int(child_total)
+
     has_active_sync = any(
         j.status in (types_module.SyncStatus.PENDING, types_module.SyncStatus.RUNNING)
         for j in sync_jobs
