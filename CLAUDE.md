@@ -35,6 +35,17 @@ uv run alembic upgrade head        # apply all
 uv run alembic revision --autogenerate -m "description"  # create new
 ```
 
+## Database Migrations
+
+- **Never drop tables in the same migration that creates their replacement.** Use multi-step migrations:
+  1. Create the new table
+  2. Migrate data from old table to new table (separate migration)
+  3. Update application code to use new table
+  4. Drop the old table (separate migration, only after verifying data migration and code cutover)
+- Each migration step should be independently deployable and rollback-safe
+- Autogenerate requires a live database — write migrations manually when no local DB is available
+- Alembic migrations run as an init container on every deploy (`alembic upgrade head`)
+
 ## Code Quality
 
 - **pre-commit** hooks run ruff (lint + format) and mypy on every commit
@@ -64,7 +75,8 @@ src/resonance/
   generators/         # Playlist generator plugins (future)
   middleware/         # Session middleware (Redis-backed)
   models/             # SQLAlchemy async models
-  sync/               # Sync job runner + progress tracking
+  worker.py           # arq task queue worker (plan_sync, sync_range)
+  sync/               # Data upsert functions shared by worker tasks
   templates/          # Jinja2 server-rendered UI + HTMX partials
   ui/                 # UI route handlers
 ```
