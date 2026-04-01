@@ -249,6 +249,7 @@ async def _sync_listenbrainz(
             listens_in_page=len(listens),
             progress=f"{processed}/{job.progress_total or '?'}",
             total_created=items_created,
+            max_ts=max_ts,
         )
 
     if skipped_ranges:
@@ -282,6 +283,8 @@ async def _fetch_listens_resilient(
     """
     import httpx as httpx_module
 
+    retriable_errors = (httpx_module.ReadTimeout, httpx_module.RemoteProtocolError)
+
     current_size = page_size
     retries = 0
     max_retries = 3
@@ -291,7 +294,7 @@ async def _fetch_listens_resilient(
             return await connector.get_listens(
                 username, max_ts=max_ts, count=current_size
             )
-        except httpx_module.ReadTimeout:
+        except retriable_errors:
             retries += 1
             if retries <= max_retries:
                 log.warning(
