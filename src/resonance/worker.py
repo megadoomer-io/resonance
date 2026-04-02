@@ -720,8 +720,8 @@ class WorkerSettings:
     """
 
     functions: typing.ClassVar[list[typing.Any]] = [
-        arq.func(plan_sync, timeout=None),  # orchestrator — no timeout
-        arq.func(sync_range, timeout=None),  # duration depends on user data size
+        arq.func(plan_sync, timeout=86400),  # 24h — orchestrator, duration varies
+        arq.func(sync_range, timeout=86400),  # 24h — duration depends on user data
     ]
     on_startup = startup
     on_shutdown = shutdown
