@@ -92,28 +92,38 @@ class TestCheckParentCompletion:
         session = AsyncMock()
         log = MagicMock()
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         # Should not query the database at all
         session.execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_pending_siblings_skips_parent_update(self) -> None:
-        """When siblings are still pending, parent is not updated."""
+    async def test_pending_siblings_enqueues_next(self) -> None:
+        """When siblings are still pending, next one is enqueued."""
         parent_id = uuid.uuid4()
         task = _make_task(parent_id=parent_id)
+        next_task = _make_task(
+            parent_id=parent_id,
+            status=types_module.SyncStatus.PENDING,
+        )
         session = AsyncMock()
         log = MagicMock()
+        arq_redis = AsyncMock()
 
-        # First query: count of non-terminal siblings returns 1
+        # 1. pending count -> 1
         pending_result = MagicMock()
         pending_result.scalar_one.return_value = 1
-        session.execute.return_value = pending_result
 
-        await worker_module._check_parent_completion(session, task, log)
+        # 2. next pending sibling
+        next_result = MagicMock()
+        next_result.scalar_one_or_none.return_value = next_task
 
-        # Should have queried once (pending count) and not committed
-        assert session.execute.call_count == 1
+        session.execute.side_effect = [pending_result, next_result]
+
+        await worker_module._check_parent_completion(session, task, arq_redis, log)
+
+        # Should enqueue the next sibling, not update parent
+        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(next_task.id))
         session.commit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -166,7 +176,7 @@ class TestCheckParentCompletion:
             children_result,
         ]
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         assert parent_task.status == types_module.SyncStatus.COMPLETED
         assert parent_task.result["items_created"] == 30
@@ -221,7 +231,7 @@ class TestCheckParentCompletion:
             children_result,
         ]
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         assert parent_task.result["items_created"] == 45
         assert parent_task.result["items_updated"] == 20
@@ -268,7 +278,7 @@ class TestCheckParentCompletion:
             children_result,
         ]
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         assert parent_task.completed_at is not None
         assert parent_task.status == types_module.SyncStatus.COMPLETED
@@ -294,7 +304,7 @@ class TestCheckParentCompletion:
             parent_result,
         ]
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         # Should not commit since parent was not found
         session.commit.assert_not_called()
@@ -346,7 +356,7 @@ class TestCheckParentCompletion:
             children_result,
         ]
 
-        await worker_module._check_parent_completion(session, task, log)
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
 
         assert parent_task.status == types_module.SyncStatus.FAILED
         assert parent_task.error_message == "1 child task(s) failed"

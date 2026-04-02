@@ -214,19 +214,22 @@ async def _plan_spotify_sync(
 
     await session.commit()
 
-    # Re-query children to get their IDs after commit
-    children_result = await session.execute(
-        sa.select(task_module.SyncTask).where(task_module.SyncTask.parent_id == task.id)
+    # Enqueue only the first child — subsequent children are enqueued
+    # sequentially by _check_parent_completion after each one completes.
+    # This prevents concurrent Spotify API requests that trigger 429s.
+    first_child_result = await session.execute(
+        sa.select(task_module.SyncTask)
+        .where(task_module.SyncTask.parent_id == task.id)
+        .order_by(task_module.SyncTask.created_at)
+        .limit(1)
     )
-    children = children_result.scalars().all()
-
-    for child in children:
-        await arq_redis.enqueue_job("sync_range", str(child.id))
-        log.info(
-            "spotify_child_enqueued",
-            child_id=str(child.id),
-            data_type=child.params.get("data_type"),
-        )
+    first_child = first_child_result.scalar_one()
+    await arq_redis.enqueue_job("sync_range", str(first_child.id))
+    log.info(
+        "spotify_child_enqueued",
+        child_id=str(first_child.id),
+        data_type=first_child.params.get("data_type"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +302,10 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await session.commit()
                 task = task_reload
 
-        # Always check parent completion
+        # Always check parent completion (may enqueue next sibling)
         if task is not None:
-            await _check_parent_completion(session, task, log)
+            arq_redis: arq.ArqRedis = ctx["redis"]
+            await _check_parent_completion(session, task, arq_redis, log)
 
 
 # ---------------------------------------------------------------------------
@@ -505,17 +509,20 @@ async def _run_spotify_range(
 async def _check_parent_completion(
     session: sa_async.AsyncSession,
     task: task_module.SyncTask,
+    arq_redis: arq.ArqRedis,
     log: structlog.stdlib.BoundLogger,
 ) -> None:
-    """Check if all sibling tasks are done; if so, mark the parent complete.
+    """Check sibling tasks; enqueue next pending sibling or mark parent done.
 
-    When all children of a parent task have reached a terminal state
-    (COMPLETED or FAILED), the parent is marked COMPLETED (or FAILED if
-    any child failed). Result counters are aggregated from children.
+    After a child task completes, this function checks if there are pending
+    siblings to enqueue (sequential execution for rate-limit-sensitive
+    services like Spotify) or if all children are done (cascade completion
+    to parent).
 
     Args:
         session: Active database session.
         task: The child task that just completed.
+        arq_redis: arq Redis pool for enqueuing jobs.
         log: Bound structured logger.
     """
     if task.parent_id is None:
@@ -533,7 +540,26 @@ async def _check_parent_completion(
     pending_count: int = pending_count_result.scalar_one()
 
     if pending_count > 0:
-        log.info("parent_still_pending", pending_children=pending_count)
+        # Enqueue the next PENDING sibling (sequential execution)
+        next_pending_result = await session.execute(
+            sa.select(task_module.SyncTask)
+            .where(
+                task_module.SyncTask.parent_id == task.parent_id,
+                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
+            )
+            .order_by(task_module.SyncTask.created_at)
+            .limit(1)
+        )
+        next_pending = next_pending_result.scalar_one_or_none()
+        if next_pending is not None:
+            await arq_redis.enqueue_job("sync_range", str(next_pending.id))
+            log.info(
+                "next_sibling_enqueued",
+                next_task_id=str(next_pending.id),
+                remaining=pending_count,
+            )
+        else:
+            log.info("parent_still_pending", pending_children=pending_count)
         return
 
     # All children are done — load parent and aggregate results
