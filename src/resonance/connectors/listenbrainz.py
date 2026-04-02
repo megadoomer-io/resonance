@@ -1,10 +1,8 @@
 """ListenBrainz connector with MusicBrainz OAuth and listen history."""
 
-import asyncio
 import urllib.parse
 from typing import Any
 
-import httpx
 import pydantic
 import structlog
 
@@ -14,9 +12,6 @@ import resonance.connectors.ratelimit as ratelimit_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
-
-_MAX_RETRIES = 3
-_MAX_RETRY_DELAY = 30  # seconds — don't wait longer than this per retry
 
 MUSICBRAINZ_AUTH_URL = "https://musicbrainz.org/oauth2/authorize"
 MUSICBRAINZ_TOKEN_URL = "https://musicbrainz.org/oauth2/token"
@@ -46,75 +41,8 @@ class ListenBrainzConnector(base_module.BaseConnector):
         self._client_id = settings.musicbrainz_client_id
         self._client_secret = settings.musicbrainz_client_secret
         self._redirect_uri = settings.musicbrainz_redirect_uri
-        self._http_client: httpx.AsyncClient | None = None
+        self._http_client = None
         self._budget = ratelimit_module.RateLimitBudget(default_interval=0.2)
-
-    @property
-    def http_client(self) -> httpx.AsyncClient:
-        """Lazily create and return the HTTP client."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=60.0)
-        return self._http_client
-
-    async def _request(
-        self,
-        method: str,
-        url: str,
-        *,
-        high_priority: bool = False,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        """Make an HTTP request with budget-aware pacing and retry on 429.
-
-        Args:
-            method: HTTP method (GET, POST, etc.).
-            url: Request URL.
-            high_priority: If True, skip pacing when budget is available.
-            **kwargs: Additional arguments passed to httpx request.
-
-        Returns:
-            The HTTP response.
-
-        Raises:
-            httpx.HTTPStatusError: On non-429 HTTP errors or when the rate
-                limit wait exceeds the maximum retry delay.
-        """
-        for attempt in range(_MAX_RETRIES + 1):
-            interval = self._budget.paced_interval(high_priority=high_priority)
-            if interval > _MAX_RETRY_DELAY:
-                logger.error(
-                    "Rate limit wait %.0fs exceeds max %ds",
-                    interval,
-                    _MAX_RETRY_DELAY,
-                )
-                raise httpx.HTTPStatusError(
-                    "Rate limit exceeded",
-                    request=httpx.Request(method, url),
-                    response=httpx.Response(429),
-                )
-            if interval > 0:
-                logger.debug(
-                    "Pacing: waiting %.1fs before %s %s", interval, method, url
-                )
-                await asyncio.sleep(interval)
-
-            response = await self.http_client.request(method, url, **kwargs)
-            self._budget.update_from_headers(dict(response.headers))
-
-            if response.status_code != 429:
-                response.raise_for_status()
-                return response
-
-            logger.warning(
-                "429 on %s %s, attempt %d/%d",
-                method,
-                url,
-                attempt + 1,
-                _MAX_RETRIES + 1,
-            )
-
-        response.raise_for_status()
-        return response  # unreachable, raise_for_status throws
 
     def get_auth_url(self, state: str) -> str:
         """Build MusicBrainz OAuth authorization URL."""
