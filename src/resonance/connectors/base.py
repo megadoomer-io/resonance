@@ -77,6 +77,15 @@ class BaseConnector(abc.ABC):
         """Check whether this connector supports a given capability."""
         return capability in self.capabilities
 
+    # Transient errors that should be retried with exponential backoff.
+    _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+    )
+    _MAX_TRANSIENT_RETRIES = 5
+    _TRANSIENT_BACKOFF_BASE = 2.0  # seconds — doubles each retry
+
     async def _request(
         self,
         method: str,
@@ -85,13 +94,13 @@ class BaseConnector(abc.ABC):
         high_priority: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Make an HTTP request with rate limit pacing and 429 backoff.
+        """Make an HTTP request with rate limit pacing and automatic retry.
 
-        Respects Retry-After headers and backs off accordingly. Will keep
-        retrying 429 responses indefinitely — the worker context has no
-        user-facing timeout, so we always wait and resume rather than fail.
-
-        Non-429 errors are raised immediately.
+        Handles two retry scenarios:
+        - **429 rate limits**: Respects Retry-After headers, retries
+          indefinitely until the request succeeds.
+        - **Transient errors** (timeouts, disconnects, connection errors):
+          Retries with exponential backoff up to _MAX_TRANSIENT_RETRIES.
 
         Args:
             method: HTTP method (GET, POST, etc.).
@@ -103,8 +112,13 @@ class BaseConnector(abc.ABC):
             The HTTP response.
 
         Raises:
-            httpx.HTTPStatusError: On non-429 HTTP errors.
+            httpx.HTTPStatusError: On non-429/non-transient HTTP errors.
+            httpx.ReadTimeout: After exhausting transient retries.
+            httpx.RemoteProtocolError: After exhausting transient retries.
+            httpx.ConnectError: After exhausting transient retries.
         """
+        transient_attempt = 0
+
         while True:
             interval = self._budget.paced_interval(high_priority=high_priority)
             if interval > 0:
@@ -121,7 +135,34 @@ class BaseConnector(abc.ABC):
                     )
                 await asyncio.sleep(interval)
 
-            response = await self.http_client.request(method, url, **kwargs)
+            try:
+                response = await self.http_client.request(method, url, **kwargs)
+            except self._TRANSIENT_ERRORS as exc:
+                transient_attempt += 1
+                if transient_attempt > self._MAX_TRANSIENT_RETRIES:
+                    logger.error(
+                        "transient_retries_exhausted",
+                        method=method,
+                        url=url,
+                        attempts=transient_attempt,
+                        error=str(exc),
+                    )
+                    raise
+                backoff = self._TRANSIENT_BACKOFF_BASE**transient_attempt
+                logger.warning(
+                    "transient_error_retry",
+                    method=method,
+                    url=url,
+                    attempt=transient_attempt,
+                    max_attempts=self._MAX_TRANSIENT_RETRIES,
+                    backoff_seconds=round(backoff, 1),
+                    error=type(exc).__name__,
+                )
+                await asyncio.sleep(backoff)
+                continue
+
+            # Reset transient counter on successful response (even if 429)
+            transient_attempt = 0
             self._budget.update_from_headers(dict(response.headers))
 
             if response.status_code != 429:
