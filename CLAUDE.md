@@ -46,6 +46,12 @@ uv run alembic revision --autogenerate -m "description"  # create new
 - Autogenerate requires a live database — write migrations manually when no local DB is available
 - Alembic migrations run as an init container on every deploy (`alembic upgrade head`)
 
+## Database Operations
+
+- **Never use raw SQL** for data fixes or ad-hoc queries against production — always use SQLAlchemy ORM or Alembic migrations. Raw SQL bypasses ORM constraints (e.g., enum value casing) and is error-prone.
+- For production data fixes, create an Alembic migration with `op.execute()` using proper enum values
+- Enum columns use `native_enum=False` (stored as varchar) — always ensure CHECK constraints exist to enforce valid values at the DB level
+
 ## Code Quality
 
 - **pre-commit** hooks run ruff (lint + format) and mypy on every commit
