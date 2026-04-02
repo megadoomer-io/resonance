@@ -169,12 +169,16 @@ class BaseConnector(abc.ABC):
                 response.raise_for_status()
                 return response
 
-            # On 429, the budget has been updated with Retry-After.
-            # Log and loop — paced_interval will return the wait time.
-            retry_after = response.headers.get("Retry-After", "unknown")
+            # On 429, sleep for the Retry-After duration before retrying.
+            # We handle the wait here explicitly rather than relying on
+            # paced_interval() at the top of the loop, to ensure we
+            # actually wait the full backoff period.
+            retry_after_raw = response.headers.get("Retry-After")
+            retry_after = float(retry_after_raw) if retry_after_raw else 30.0
             logger.warning(
                 "rate_limited",
                 method=method,
                 url=url,
-                retry_after=retry_after,
+                retry_after_seconds=round(retry_after, 1),
             )
+            await asyncio.sleep(retry_after)

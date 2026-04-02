@@ -41,7 +41,8 @@
                 <td>
                     <button
                         hx-post="/api/v1/sync/{{ conn.service_type.value }}"
-                        hx-on::after-request="htmx.trigger('#sync-status', 'load')"
+                        hx-swap="none"
+                        hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
                     >Sync Now</button>
                 </td>
             </tr>
