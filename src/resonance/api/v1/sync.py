@@ -78,6 +78,7 @@ async def trigger_sync(
             [
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
+                types_module.SyncStatus.DEFERRED,
             ]
         ),
     )
@@ -127,6 +128,7 @@ async def cancel_sync(
     if job.status not in (
         types_module.SyncStatus.PENDING,
         types_module.SyncStatus.RUNNING,
+        types_module.SyncStatus.DEFERRED,
     ):
         raise fastapi.HTTPException(status_code=400, detail="Job is already finished")
 

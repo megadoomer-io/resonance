@@ -271,6 +271,42 @@ class TestSyncTrigger:
         assert response.status_code == 409
         assert "already running" in response.json()["detail"].lower()
 
+    async def test_deferred_task_returns_409(self) -> None:
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.encrypted_access_token = "encrypted-token"
+
+        fake_deferred_task = MagicMock(spec=task_models.SyncTask)
+        fake_deferred_task.id = uuid.uuid4()
+        fake_deferred_task.status = types_module.SyncStatus.DEFERRED
+        fake_deferred_task.task_type = types_module.SyncTaskType.SYNC_JOB
+
+        db_session = FakeAsyncSession()
+        # First: find connection; Second: find deferred sync task
+        db_session.set_execute_results(
+            [
+                FakeScalarResult(fake_conn),
+                FakeScalarResult(fake_deferred_task),
+            ]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post("/api/v1/sync/spotify")
+
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"].lower()
+
 
 class TestSyncStatus:
     """Tests for GET /api/v1/sync/status."""
