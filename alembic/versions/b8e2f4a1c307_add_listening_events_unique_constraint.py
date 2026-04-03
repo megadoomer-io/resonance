@@ -20,15 +20,16 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    # Delete duplicate listening_events, keeping the row with the smallest id
-    # per (user_id, track_id, listened_at) group.
+    # Delete duplicate listening_events, keeping one row per
+    # (user_id, track_id, listened_at) group using DISTINCT ON.
+    # PostgreSQL UUIDs don't support MIN(), so we use ctid as the tiebreaker.
     op.execute(
         """
         DELETE FROM listening_events
-        WHERE id NOT IN (
-            SELECT MIN(id)
+        WHERE ctid NOT IN (
+            SELECT DISTINCT ON (user_id, track_id, listened_at) ctid
             FROM listening_events
-            GROUP BY user_id, track_id, listened_at
+            ORDER BY user_id, track_id, listened_at, created_at
         )
         """
     )
