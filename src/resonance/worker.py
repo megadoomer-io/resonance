@@ -30,6 +30,21 @@ import resonance.types as types_module
 logger = structlog.get_logger()
 
 
+class WorkerContext(typing.TypedDict):
+    """Typed arq worker context dict.
+
+    arq passes ``dict[str, Any]`` at runtime; this TypedDict lets mypy
+    catch key-name typos and wrong value types at check time.
+    """
+
+    settings: config_module.Settings
+    engine: sa_async.AsyncEngine
+    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession]
+    connector_registry: registry_module.ConnectorRegistry
+    strategies: dict[types_module.ServiceType, sync_base.SyncStrategy]
+    redis: arq.ArqRedis
+
+
 # ---------------------------------------------------------------------------
 # plan_sync: top-level entry point for a sync job
 # ---------------------------------------------------------------------------
@@ -45,9 +60,8 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
         ctx: arq worker context dict (contains session_factory, settings, etc.).
         sync_task_id: UUID string of the SYNC_JOB SyncTask.
     """
-    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
-        "session_factory"
-    ]
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
     log = logger.bind(sync_task_id=sync_task_id)
 
     async with session_factory() as session:
@@ -75,10 +89,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             log.info("plan_sync_started")
 
             # Look up strategy
-            strategies: dict[types_module.ServiceType, sync_base.SyncStrategy] = ctx[
-                "strategies"
-            ]
-            strategy = strategies.get(connection.service_type)
+            strategy = wctx["strategies"].get(connection.service_type)
             if strategy is None:
                 task.status = types_module.SyncStatus.FAILED
                 task.error_message = (
@@ -89,7 +100,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 return
 
             # Look up connector
-            connector = ctx["connector_registry"].get(connection.service_type)
+            connector = wctx["connector_registry"].get(connection.service_type)
             if connector is None:
                 task.status = types_module.SyncStatus.FAILED
                 task.error_message = f"No connector for {connection.service_type.value}"
@@ -109,7 +120,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 return
 
             # Create child tasks from descriptors
-            arq_redis: arq.ArqRedis = ctx["redis"]
+            arq_redis = wctx["redis"]
             children: list[task_module.SyncTask] = []
             for desc in descriptors:
                 child = task_module.SyncTask(
@@ -168,10 +179,9 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
         ctx: arq worker context dict.
         sync_task_id: UUID string of the TIME_RANGE SyncTask.
     """
-    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
-        "session_factory"
-    ]
-    connector_registry: registry_module.ConnectorRegistry = ctx["connector_registry"]
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    connector_registry = wctx["connector_registry"]
     log = logger.bind(sync_task_id=sync_task_id)
 
     async with session_factory() as session:
@@ -199,10 +209,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             )
             log.info("sync_range_started")
 
-            strategies: dict[types_module.ServiceType, sync_base.SyncStrategy] = ctx[
-                "strategies"
-            ]
-            strategy = strategies.get(connection.service_type)
+            strategy = wctx["strategies"].get(connection.service_type)
             connector = connector_registry.get(connection.service_type)
             if strategy is None or connector is None:
                 raise RuntimeError(
@@ -223,7 +230,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                     datetime.UTC
                 ) + datetime.timedelta(seconds=defer.retry_after)
                 await session.commit()
-                arq_redis_defer: arq.ArqRedis = ctx["redis"]
+                arq_redis_defer = wctx["redis"]
                 await arq_redis_defer.enqueue_job(
                     "sync_range",
                     str(task.id),
@@ -247,7 +254,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
         # Always check parent completion (may enqueue next sibling)
         if task is not None:
-            arq_redis: arq.ArqRedis = ctx["redis"]
+            arq_redis = wctx["redis"]
             await _check_parent_completion(session, task, arq_redis, log)
 
 
@@ -506,6 +513,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     Args:
         ctx: arq worker context dict.
     """
+    wctx = typing.cast("WorkerContext", ctx)
     settings = config_module.Settings()
     logging_module.configure_logging(settings.log_level)
 
@@ -518,11 +526,11 @@ async def startup(ctx: dict[str, Any]) -> None:
         listenbrainz_module.ListenBrainzConnector(settings=settings)
     )
 
-    ctx["settings"] = settings
-    ctx["engine"] = engine
-    ctx["session_factory"] = session_factory
-    ctx["connector_registry"] = connector_registry
-    ctx["strategies"] = {
+    wctx["settings"] = settings
+    wctx["engine"] = engine
+    wctx["session_factory"] = session_factory
+    wctx["connector_registry"] = connector_registry
+    wctx["strategies"] = {
         types_module.ServiceType.SPOTIFY: spotify_sync.SpotifySyncStrategy(
             token_encryption_key=settings.token_encryption_key
         ),
@@ -530,7 +538,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     }
 
     # Re-enqueue orphaned tasks that lost their arq jobs
-    await _reenqueue_orphaned_tasks(session_factory, ctx["redis"])
+    await _reenqueue_orphaned_tasks(session_factory, wctx["redis"])
 
     logger.info("worker_started")
 
@@ -543,7 +551,8 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     Args:
         ctx: arq worker context dict.
     """
-    engine: sa_async.AsyncEngine = ctx["engine"]
+    wctx = typing.cast("WorkerContext", ctx)
+    engine = wctx["engine"]
     await engine.dispose()
     logger.info("worker_shutdown")
 

@@ -14,6 +14,27 @@ import resonance.types as types_module
 import resonance.worker as worker_module
 
 # ---------------------------------------------------------------------------
+# WorkerContext TypedDict tests
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerContext:
+    """Tests for the WorkerContext TypedDict."""
+
+    def test_has_expected_keys(self) -> None:
+        annotations = worker_module.WorkerContext.__annotations__
+        expected_keys = {
+            "settings",
+            "engine",
+            "session_factory",
+            "connector_registry",
+            "strategies",
+            "redis",
+        }
+        assert set(annotations.keys()) == expected_keys
+
+
+# ---------------------------------------------------------------------------
 # Smoke tests: functions are callable and WorkerSettings is configured
 # ---------------------------------------------------------------------------
 
