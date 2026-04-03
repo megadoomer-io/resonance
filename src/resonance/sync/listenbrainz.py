@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+MAX_PAGES = 5000
+
 
 class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
     """Sync strategy for ListenBrainz listening history."""
@@ -112,6 +114,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             int(str(max_ts_param)) if max_ts_param is not None else None
         )
         items_created = int(str(task.params.get("items_so_far", 0)))
+        pages_fetched = int(str(task.params.get("pages_fetched", 0)))
         # Preserve watermark across deferral/resume cycles
         last_listened_at_param = task.params.get("last_listened_at")
         last_listened_at: int | None = (
@@ -119,8 +122,19 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             if last_listened_at_param is not None
             else None
         )
+        page_limit_reached = False
 
         while True:
+            if pages_fetched >= MAX_PAGES:
+                page_limit_reached = True
+                logger.warning(
+                    "page_limit_reached",
+                    username=username,
+                    pages_fetched=pages_fetched,
+                    items_created=items_created,
+                )
+                break
+
             try:
                 listens = await lb_connector.get_listens(
                     username, max_ts=max_ts, min_ts=min_ts, count=100
@@ -131,12 +145,15 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                     resume_params={
                         "max_ts": max_ts,
                         "items_so_far": items_created,
+                        "pages_fetched": pages_fetched,
                         "last_listened_at": last_listened_at,
                     },
                 ) from exc
 
             if not listens:
                 break
+
+            pages_fetched += 1
 
             # Track last_listened_at from the first page's first listen
             if last_listened_at is None:
@@ -164,6 +181,8 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
+        if page_limit_reached:
+            result["page_limit_reached"] = True
         return result
 
 

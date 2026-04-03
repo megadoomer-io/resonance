@@ -72,10 +72,10 @@ class SyncTask(base_module.Base):
         sa.Text, nullable=True, default=None
     )
     progress_current: orm.Mapped[int] = orm.mapped_column(
-        sa.Integer, nullable=False, insert_default=0
+        sa.BigInteger, nullable=False, insert_default=0
     )
     progress_total: orm.Mapped[int | None] = orm.mapped_column(
-        sa.Integer, nullable=True, default=None
+        sa.BigInteger, nullable=True, default=None
     )
     started_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None

@@ -369,6 +369,13 @@ class TestUserTrackRelationModel:
 class TestSyncTask:
     """Tests for the SyncTask model."""
 
+    def test_progress_fields_are_biginteger(self) -> None:
+        table: sa.Table = task_module.SyncTask.__table__  # type: ignore[assignment]
+        current_col = _get_column(table, "progress_current")
+        total_col = _get_column(table, "progress_total")
+        assert isinstance(current_col.type, sa.BigInteger)
+        assert isinstance(total_col.type, sa.BigInteger)
+
     def test_sync_task_has_expected_columns(self) -> None:
         task = task_module.SyncTask(
             user_id=uuid.uuid4(),

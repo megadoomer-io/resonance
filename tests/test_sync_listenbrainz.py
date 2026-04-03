@@ -257,6 +257,50 @@ class TestExecute:
         session.commit.assert_called()
 
     @pytest.mark.asyncio
+    async def test_page_limit_stops_sync_with_note(self) -> None:
+        """Sync stops after hitting the page limit and includes a note."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        # Return a non-empty page every time (would loop forever without limit)
+        listen = _make_listen(1700000100, "Song A", "Artist A")
+        connector.get_listens = AsyncMock(return_value=[listen])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module,
+                "MAX_PAGES",
+                3,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        # Should have fetched exactly MAX_PAGES pages
+        assert connector.get_listens.call_count == 3
+        assert result["items_created"] == 3
+        assert result.get("page_limit_reached") is True
+
+    @pytest.mark.asyncio
     async def test_rate_limit_raises_defer_request(self) -> None:
         """RateLimitExceededError raises DeferRequest with resume params."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()
