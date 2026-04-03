@@ -83,6 +83,12 @@ class SyncTask(base_module.Base):
     completed_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None
     )
+    description: orm.Mapped[str | None] = orm.mapped_column(
+        sa.Text, nullable=True, default=None
+    )
+    deferred_until: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),

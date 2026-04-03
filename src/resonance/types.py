@@ -51,3 +51,4 @@ class SyncStatus(enum.StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    DEFERRED = "deferred"

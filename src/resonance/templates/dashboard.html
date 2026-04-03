@@ -39,11 +39,28 @@
                 <td>{{ conn.connected_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>{{ conn.last_used_at.strftime('%Y-%m-%d %H:%M') if conn.last_used_at else 'Never' }}</td>
                 <td>
+                    {% set active_task = active_syncs.get(conn.id | string) %}
+                    {% if active_task %}
+                        {% if active_task.status.value == 'deferred' %}
+                        <span>Deferred{% if active_task.deferred_until %} until {{ active_task.deferred_until.strftime('%H:%M') }}{% endif %}</span>
+                        {% else %}
+                        <span aria-busy="true">Syncing...</span>
+                        {% endif %}
+                        <button
+                            hx-post="/api/v1/sync/cancel/{{ active_task.id }}"
+                            hx-swap="none"
+                            hx-confirm="Cancel sync?"
+                            hx-on::after-request="location.reload()"
+                            class="outline secondary"
+                            style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
+                        >Cancel</button>
+                    {% else %}
                     <button
                         hx-post="/api/v1/sync/{{ conn.service_type.value }}"
                         hx-swap="none"
                         hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
                     >Sync Now</button>
+                    {% endif %}
                 </td>
             </tr>
             {% endfor %}

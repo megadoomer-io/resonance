@@ -271,6 +271,42 @@ class TestSyncTrigger:
         assert response.status_code == 409
         assert "already running" in response.json()["detail"].lower()
 
+    async def test_deferred_task_returns_409(self) -> None:
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.encrypted_access_token = "encrypted-token"
+
+        fake_deferred_task = MagicMock(spec=task_models.SyncTask)
+        fake_deferred_task.id = uuid.uuid4()
+        fake_deferred_task.status = types_module.SyncStatus.DEFERRED
+        fake_deferred_task.task_type = types_module.SyncTaskType.SYNC_JOB
+
+        db_session = FakeAsyncSession()
+        # First: find connection; Second: find deferred sync task
+        db_session.set_execute_results(
+            [
+                FakeScalarResult(fake_conn),
+                FakeScalarResult(fake_deferred_task),
+            ]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post("/api/v1/sync/spotify")
+
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"].lower()
+
 
 class TestSyncStatus:
     """Tests for GET /api/v1/sync/status."""
@@ -342,3 +378,44 @@ class TestSyncStatus:
 
         assert response.status_code == 200
         assert response.json() == []
+
+    async def test_returns_description_and_deferred_until(self) -> None:
+        user_id = uuid.uuid4()
+        job_id = uuid.uuid4()
+        deferred_time = datetime.datetime(2026, 4, 3, 12, 0, 0, tzinfo=datetime.UTC)
+
+        fake_task = MagicMock(spec=task_models.SyncTask)
+        fake_task.id = job_id
+        fake_task.status = types_module.SyncStatus.DEFERRED
+        fake_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_task.progress_current = 0
+        fake_task.progress_total = 0
+        fake_task.result = {}
+        fake_task.error_message = None
+        fake_task.description = "Fetching your saved tracks"
+        fake_task.deferred_until = deferred_time
+        fake_task.started_at = datetime.datetime(
+            2026, 4, 3, 11, 0, 0, tzinfo=datetime.UTC
+        )
+        fake_task.completed_at = None
+
+        db_session = FakeAsyncSession()
+        scalars_result = FakeScalarsResult([fake_task])
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalars_result
+        db_session.set_execute_results([execute_result])
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.get("/api/v1/sync/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["description"] == "Fetching your saved tracks"
+        assert data[0]["deferred_until"] == deferred_time.isoformat()

@@ -9,10 +9,7 @@
                 <th>Service</th>
                 <th>Status</th>
                 <th>Progress</th>
-                <th>Created</th>
-                <th>Started</th>
-                <th>Completed</th>
-                <th>Items</th>
+                <th>Time</th>
                 <th></th>
             </tr>
         </thead>
@@ -21,28 +18,75 @@
             <tr>
                 <td>{{ job.service_connection.service_type.value | capitalize }}</td>
                 <td>
-                    {% if job.status.value in ('pending', 'running') %}
+                    {% if job.status.value == 'deferred' %}
+                    Deferred{% if job.deferred_until %} until {{ job.deferred_until.strftime('%H:%M') }}{% endif %}
+                    {% elif job.status.value in ('pending', 'running') %}
                     <span aria-busy="true">{{ job.status.value | capitalize }}</span>
                     {% else %}
                     {{ job.status.value | capitalize }}
                     {% endif %}
                 </td>
                 <td>
-                    {% if job.progress_total %}
-                    <progress value="{{ job.progress_current }}" max="{{ job.progress_total }}"></progress>
-                    {{ job.progress_current }}/{{ job.progress_total }}
+                    {% if job.status.value in ('pending', 'running', 'deferred') %}
+                        {% for child in job.children %}
+                            {% if child.status.value == 'running' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small><strong>{{ child.description or 'Processing...' }}</strong></small>
+                                {% if child.progress_total %}
+                                <progress value="{{ child.progress_current }}" max="{{ child.progress_total }}" style="width: 100%;"></progress>
+                                <small>{{ child.progress_current }} of {{ child.progress_total }}
+                                {% if child.started_at and child.progress_current > 0 %}
+                                    {% set elapsed = (now - child.started_at).total_seconds() %}
+                                    {% set rate = child.progress_current / elapsed if elapsed > 0 else 0 %}
+                                    {% set remaining = ((child.progress_total - child.progress_current) / rate) if rate > 0 else 0 %}
+                                    {% if remaining > 60 %}
+                                    (~{{ (remaining / 60) | int }}m remaining)
+                                    {% elif remaining > 5 %}
+                                    (~{{ remaining | int }}s remaining)
+                                    {% endif %}
+                                {% endif %}
+                                </small>
+                                {% else %}
+                                <small>{{ child.progress_current }} so far</small>
+                                {% endif %}
+                            </div>
+                            {% elif child.status.value == 'deferred' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ child.deferred_until.strftime('%H:%M') }}{% endif %}</small>
+                            </div>
+                            {% elif child.status.value == 'pending' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small>{{ child.description or 'Waiting...' }}</small>
+                            </div>
+                            {% elif child.status.value == 'completed' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small>{{ child.description or 'Done' }} — {{ child.result.get('items_created', 0) }} new, {{ child.result.get('items_updated', 0) }} updated</small>
+                            </div>
+                            {% endif %}
+                        {% endfor %}
                     {% elif job.status.value == 'completed' %}
-                    Done
+                        {{ job.result.get('items_created', 0) }} new / {{ job.result.get('items_updated', 0) }} updated
+                    {% elif job.status.value == 'failed' %}
+                        {% if job.error_message %}
+                        <small>{{ job.error_message[:80] }}</small>
+                        {% else %}
+                        Failed
+                        {% endif %}
                     {% else %}
                     --
                     {% endif %}
                 </td>
-                <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>{{ job.started_at.strftime('%H:%M:%S') if job.started_at else '--' }}</td>
-                <td>{{ job.completed_at.strftime('%H:%M:%S') if job.completed_at else '--' }}</td>
-                <td>{{ job.result.get('items_created', 0) }} new / {{ job.result.get('items_updated', 0) }} updated</td>
                 <td>
-                    {% if job.status.value in ('pending', 'running') %}
+                    {% if job.completed_at %}
+                    {{ job.completed_at.strftime('%H:%M:%S') }}
+                    {% elif job.started_at %}
+                    Started {{ job.started_at.strftime('%H:%M:%S') }}
+                    {% else %}
+                    {{ job.created_at.strftime('%H:%M') }}
+                    {% endif %}
+                </td>
+                <td>
+                    {% if job.status.value in ('pending', 'running', 'deferred') %}
                     <button
                         hx-post="/api/v1/sync/cancel/{{ job.id }}"
                         hx-target="#sync-status"

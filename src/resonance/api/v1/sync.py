@@ -78,6 +78,7 @@ async def trigger_sync(
             [
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
+                types_module.SyncStatus.DEFERRED,
             ]
         ),
     )
@@ -127,6 +128,7 @@ async def cancel_sync(
     if job.status not in (
         types_module.SyncStatus.PENDING,
         types_module.SyncStatus.RUNNING,
+        types_module.SyncStatus.DEFERRED,
     ):
         raise fastapi.HTTPException(status_code=400, detail="Job is already finished")
 
@@ -177,6 +179,12 @@ async def sync_status(
             "items_updated": job.result.get("items_updated", 0)
             if isinstance(job.result, dict)
             else 0,
+            "description": job.description,
+            "deferred_until": (
+                job.deferred_until.isoformat()
+                if job.deferred_until is not None
+                else None
+            ),
             "error_message": job.error_message,
             "started_at": (
                 job.started_at.isoformat() if job.started_at is not None else None
