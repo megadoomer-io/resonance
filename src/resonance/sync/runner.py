@@ -79,20 +79,17 @@ async def _upsert_artist(
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
     if existing is not None:
-        # Merge service_links
+        # Merge service_links — always record the service, even without an ID
         links = dict(existing.service_links or {})
-        if artist_data.external_id:
-            links[service_key] = artist_data.external_id
+        links[service_key] = artist_data.external_id
         existing.service_links = links
         return False
 
-    # 4. Create new
+    # 4. Create new — always record the source service
     artist = models_module.Artist(
         id=uuid.uuid4(),
         name=artist_data.name,
-        service_links=(
-            {service_key: artist_data.external_id} if artist_data.external_id else {}
-        ),
+        service_links={service_key: artist_data.external_id},
     )
     session.add(artist)
     return True
@@ -170,9 +167,9 @@ async def _upsert_track(
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
     if existing is not None:
+        # Always record the source service, even without an ID
         links = dict(existing.service_links or {})
-        if track_data.external_id:
-            links[service_key] = track_data.external_id
+        links[service_key] = track_data.external_id
         existing.service_links = links
         return False
 
@@ -210,9 +207,7 @@ async def _upsert_track(
         id=uuid.uuid4(),
         title=track_data.title,
         artist_id=artist_id,
-        service_links=(
-            {service_key: track_data.external_id} if track_data.external_id else {}
-        ),
+        service_links={service_key: track_data.external_id},
     )
     session.add(track)
     return True

@@ -106,8 +106,8 @@ class TestMBIDArtistMatching:
         assert existing_artist.service_links["listenbrainz"] == "mbid-456"
 
     @pytest.mark.anyio()
-    async def test_empty_external_id_skips_service_links_lookup(self) -> None:
-        """Artist with empty external_id skips service_links and uses name."""
+    async def test_empty_external_id_still_records_service_presence(self) -> None:
+        """Artist with empty external_id still records the service key."""
         session = AsyncMock()
         existing_artist = MagicMock()
         existing_artist.name = "Name Only"
@@ -129,8 +129,9 @@ class TestMBIDArtistMatching:
         created = await runner_module._upsert_artist(session, artist_data)
 
         assert created is False
-        # Should NOT have added empty string to service_links
-        assert "listenbrainz" not in existing_artist.service_links
+        # Service key is recorded even without an external ID
+        assert "listenbrainz" in existing_artist.service_links
+        assert existing_artist.service_links["listenbrainz"] == ""
 
     @pytest.mark.anyio()
     async def test_creates_new_artist_when_no_match(self) -> None:
@@ -159,6 +160,31 @@ class TestMBIDArtistMatching:
 
         assert created is True
         session.add.assert_called_once()
+
+    @pytest.mark.anyio()
+    async def test_creates_new_artist_without_external_id_records_service(self) -> None:
+        """New artist with empty external_id still records service presence."""
+        session = AsyncMock()
+
+        no_result = MagicMock()
+        no_result.scalar_one_or_none.return_value = None
+
+        # Only name match query (skips service_links and MBID checks)
+        session.execute.side_effect = [no_result]
+        session.add = MagicMock()
+
+        artist_data = _make_artist_data(
+            external_id="",
+            name="No MBID Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        created = await runner_module._upsert_artist(session, artist_data)
+
+        assert created is True
+        added_artist = session.add.call_args[0][0]
+        assert "listenbrainz" in added_artist.service_links
+        assert added_artist.service_links["listenbrainz"] == ""
 
 
 class TestListeningEventTitleFallback:
