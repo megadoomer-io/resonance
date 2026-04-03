@@ -611,7 +611,13 @@ class TestReenqueueOrphanedTasks:
         deferred_result = MagicMock()
         deferred_result.scalars.return_value = deferred_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result]
+        # 3. Stale tasks query (children of terminal parents)
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result, stale_result]
 
         arq_redis = AsyncMock()
 
@@ -639,7 +645,13 @@ class TestReenqueueOrphanedTasks:
         deferred_result = MagicMock()
         deferred_result.scalars.return_value = deferred_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result]
+        # 3. Stale tasks query (children of terminal parents)
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result, stale_result]
 
         arq_redis = AsyncMock()
 
@@ -667,7 +679,13 @@ class TestReenqueueOrphanedTasks:
         deferred_result = MagicMock()
         deferred_result.scalars.return_value = deferred_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result]
+        # 3. Stale tasks query (children of terminal parents)
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result, stale_result]
 
         arq_redis = AsyncMock()
 
@@ -692,7 +710,13 @@ class TestReenqueueOrphanedTasks:
         deferred_result = MagicMock()
         deferred_result.scalars.return_value = deferred_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result]
+        # 3. Stale tasks query (children of terminal parents)
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result, stale_result]
 
         arq_redis = AsyncMock()
 

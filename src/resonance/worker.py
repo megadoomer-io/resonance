@@ -404,15 +404,32 @@ async def _reenqueue_orphaned_tasks(
     async with session_factory() as session:
         now = datetime.datetime.now(datetime.UTC)
 
-        # Find PENDING tasks (orphaned — their arq job likely expired)
+        # Find PENDING tasks (orphaned — their arq job likely expired).
+        # Exclude children whose parent already completed or failed —
+        # those are stale leftovers, not actionable orphans.
+        parent_alias = sa.orm.aliased(task_module.SyncTask)
         pending_result = await session.execute(
-            sa.select(task_module.SyncTask).where(
+            sa.select(task_module.SyncTask)
+            .outerjoin(
+                parent_alias,
+                task_module.SyncTask.parent_id == parent_alias.id,
+            )
+            .where(
                 task_module.SyncTask.status == types_module.SyncStatus.PENDING,
                 task_module.SyncTask.task_type.in_(
                     [
                         types_module.SyncTaskType.SYNC_JOB,
                         types_module.SyncTaskType.TIME_RANGE,
                     ]
+                ),
+                sa.or_(
+                    task_module.SyncTask.parent_id.is_(None),
+                    parent_alias.status.notin_(
+                        [
+                            types_module.SyncStatus.COMPLETED,
+                            types_module.SyncStatus.FAILED,
+                        ]
+                    ),
                 ),
             )
         )
@@ -429,6 +446,32 @@ async def _reenqueue_orphaned_tasks(
             )
         )
         deferred_tasks = list(deferred_result.scalars().all())
+
+        # Mark stale children of terminal parents as FAILED
+        stale_result = await session.execute(
+            sa.select(task_module.SyncTask)
+            .join(
+                parent_alias,
+                task_module.SyncTask.parent_id == parent_alias.id,
+            )
+            .where(
+                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
+                parent_alias.status.in_(
+                    [
+                        types_module.SyncStatus.COMPLETED,
+                        types_module.SyncStatus.FAILED,
+                    ]
+                ),
+            )
+        )
+        stale_tasks = list(stale_result.scalars().all())
+        for task in stale_tasks:
+            task.status = types_module.SyncStatus.FAILED
+            task.error_message = "Parent task already terminal"
+            task.completed_at = now
+        if stale_tasks:
+            await session.commit()
+            logger.info("cleaned_stale_orphans", count=len(stale_tasks))
 
         # Reset deferred tasks back to PENDING before re-enqueueing
         for task in deferred_tasks:
