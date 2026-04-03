@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
@@ -36,17 +38,41 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         self,
         session: sa_async.AsyncSession,
         task: task_module.SyncTask,
+        connector: spotify_module.SpotifyConnector,
     ) -> str:
-        """Load the service connection and decrypt the access token."""
+        """Load the connection, refresh if expired, return the token."""
         conn_result = await session.execute(
             sa.select(user_models.ServiceConnection).where(
                 user_models.ServiceConnection.id == task.service_connection_id
             )
         )
         connection = conn_result.scalar_one()
-        return crypto_module.decrypt_token(
+        access_token = crypto_module.decrypt_token(
             connection.encrypted_access_token, self._token_encryption_key
         )
+
+        # Refresh token if expired
+        if (
+            connection.token_expires_at is not None
+            and connection.token_expires_at <= datetime.datetime.now(datetime.UTC)
+            and connection.encrypted_refresh_token is not None
+        ):
+            refresh_token = crypto_module.decrypt_token(
+                connection.encrypted_refresh_token, self._token_encryption_key
+            )
+            token_response = await connector.refresh_access_token(refresh_token)
+            access_token = token_response.access_token
+            connection.encrypted_access_token = crypto_module.encrypt_token(
+                access_token, self._token_encryption_key
+            )
+            if token_response.expires_in is not None:
+                connection.token_expires_at = datetime.datetime.now(
+                    datetime.UTC
+                ) + datetime.timedelta(seconds=token_response.expires_in)
+            await session.commit()
+            logger.info("spotify_token_refreshed")
+
+        return access_token
 
     async def plan(
         self,
@@ -80,8 +106,11 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         sp_connector = _cast_connector(connector)
         data_type = str(task.params.get("data_type", ""))
 
-        # Decrypt token at execute-time from the connection
-        access_token = await self._get_access_token(session, task)
+        if data_type not in _DATA_TYPE_DESCRIPTIONS:
+            logger.warning("unknown_spotify_data_type", data_type=data_type)
+
+        # Decrypt token at execute-time, refreshing if expired
+        access_token = await self._get_access_token(session, task, sp_connector)
 
         items_created = 0
         items_updated = 0

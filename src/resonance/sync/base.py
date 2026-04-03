@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pydantic
 
@@ -21,7 +21,7 @@ class SyncTaskDescriptor(pydantic.BaseModel):
     """Lightweight description of a child task to create."""
 
     task_type: types_module.SyncTaskType
-    params: dict[str, object]
+    params: dict[str, Any]
     progress_total: int | None = None
     description: str = ""
 
@@ -29,7 +29,7 @@ class SyncTaskDescriptor(pydantic.BaseModel):
 class DeferRequest(Exception):  # noqa: N818 — not an error; a control-flow signal
     """Raised by execute() when a rate limit exceeds acceptable wait time."""
 
-    def __init__(self, retry_after: float, resume_params: dict[str, object]) -> None:
+    def __init__(self, retry_after: float, resume_params: dict[str, Any]) -> None:
         self.retry_after = retry_after
         self.resume_params = resume_params
         super().__init__(f"Sync deferred for {retry_after:.0f}s")
@@ -56,6 +56,6 @@ class SyncStrategy(abc.ABC):
         session: sa_async.AsyncSession,
         task: task_module.SyncTask,
         connector: connector_base.BaseConnector,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """Execute a single child task. May raise DeferRequest."""
         ...

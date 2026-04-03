@@ -41,7 +41,7 @@
                                     {% set remaining = ((child.progress_total - child.progress_current) / rate) if rate > 0 else 0 %}
                                     {% if remaining > 60 %}
                                     (~{{ (remaining / 60) | int }}m remaining)
-                                    {% elif remaining > 0 %}
+                                    {% elif remaining > 5 %}
                                     (~{{ remaining | int }}s remaining)
                                     {% endif %}
                                 {% endif %}

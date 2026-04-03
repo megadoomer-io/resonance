@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING
 
+import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
@@ -55,7 +56,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         progress_total: int | None = None
         try:
             progress_total = await lb_connector.get_listen_count(username)
-        except Exception:
+        except httpx.HTTPError, connector_base.RateLimitExceededError:
             logger.warning("could_not_fetch_listen_count", username=username)
 
         # Check for watermark (incremental sync)
@@ -111,7 +112,13 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             int(str(max_ts_param)) if max_ts_param is not None else None
         )
         items_created = int(str(task.params.get("items_so_far", 0)))
-        last_listened_at: int | None = None
+        # Preserve watermark across deferral/resume cycles
+        last_listened_at_param = task.params.get("last_listened_at")
+        last_listened_at: int | None = (
+            int(str(last_listened_at_param))
+            if last_listened_at_param is not None
+            else None
+        )
 
         while True:
             try:
@@ -121,7 +128,11 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             except connector_base.RateLimitExceededError as exc:
                 raise sync_base.DeferRequest(
                     retry_after=exc.retry_after,
-                    resume_params={"max_ts": max_ts, "items_so_far": items_created},
+                    resume_params={
+                        "max_ts": max_ts,
+                        "items_so_far": items_created,
+                        "last_listened_at": last_listened_at,
+                    },
                 ) from exc
 
             if not listens:

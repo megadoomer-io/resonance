@@ -6,6 +6,7 @@ import datetime
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 import resonance.connectors.base as connector_base
@@ -193,7 +194,7 @@ class TestPlan:
         session = AsyncMock()
         connection = _make_connection()
         connector = _make_lb_connector()
-        connector.get_listen_count = AsyncMock(side_effect=Exception("API error"))
+        connector.get_listen_count = AsyncMock(side_effect=httpx.HTTPError("API error"))
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None

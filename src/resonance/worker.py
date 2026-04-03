@@ -100,6 +100,14 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Plan
             descriptors = await strategy.plan(session, connection, connector)
 
+            if not descriptors:
+                task.status = types_module.SyncStatus.COMPLETED
+                task.result = {"items_created": 0, "items_updated": 0}
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+                log.info("plan_sync_no_work")
+                return
+
             # Create child tasks from descriptors
             arq_redis: arq.ArqRedis = ctx["redis"]
             children: list[task_module.SyncTask] = []
@@ -398,7 +406,6 @@ async def startup(ctx: dict[str, Any]) -> None:
     """
     settings = config_module.Settings()
     logging_module.configure_logging(settings.log_level)
-    logger.info("worker_started")
 
     engine = database_module.create_async_engine(settings)
     session_factory = database_module.create_session_factory(engine)
