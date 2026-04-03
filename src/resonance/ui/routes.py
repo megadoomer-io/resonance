@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import pathlib
 import uuid
 from contextlib import asynccontextmanager
@@ -103,6 +104,26 @@ async def dashboard(
             latest_sync_result.scalar_one_or_none()
         )
 
+        # Build active sync lookup for conditional button
+        active_syncs: dict[str, task_models.SyncTask] = {}
+        for conn in connections:
+            active_stmt = sa.select(task_models.SyncTask).where(
+                task_models.SyncTask.user_id == user_uuid,
+                task_models.SyncTask.service_connection_id == conn.id,
+                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+                task_models.SyncTask.status.in_(
+                    [
+                        types_module.SyncStatus.PENDING,
+                        types_module.SyncStatus.RUNNING,
+                        types_module.SyncStatus.DEFERRED,
+                    ]
+                ),
+            )
+            active_result = await db.execute(active_stmt)
+            active_task = active_result.scalar_one_or_none()
+            if active_task is not None:
+                active_syncs[str(conn.id)] = active_task
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -113,6 +134,7 @@ async def dashboard(
             "event_count": event_count,
             "connections": connections,
             "latest_sync": latest_sync,
+            "active_syncs": active_syncs,
         },
     )
 
@@ -301,6 +323,7 @@ async def sync_status_partial(
             if job.status in (
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
+                types_module.SyncStatus.DEFERRED,
             ):
                 child_progress_result = await db.execute(
                     sa.select(sa.func.sum(task_models.SyncTask.progress_current)).where(
@@ -311,15 +334,40 @@ async def sync_status_partial(
                 if child_total is not None:
                     job.progress_current = int(child_total)
 
+        # Collect active children for per-task display
+        for job in sync_jobs:
+            if job.status in (
+                types_module.SyncStatus.PENDING,
+                types_module.SyncStatus.RUNNING,
+                types_module.SyncStatus.DEFERRED,
+            ):
+                children_result = await db.execute(
+                    sa.select(task_models.SyncTask)
+                    .where(task_models.SyncTask.parent_id == job.id)
+                    .order_by(task_models.SyncTask.created_at)
+                )
+                job._active_children = list(children_result.scalars().all())  # type: ignore[attr-defined]
+            else:
+                job._active_children = []  # type: ignore[attr-defined]
+
     has_active_sync = any(
-        j.status in (types_module.SyncStatus.PENDING, types_module.SyncStatus.RUNNING)
+        j.status
+        in (
+            types_module.SyncStatus.PENDING,
+            types_module.SyncStatus.RUNNING,
+            types_module.SyncStatus.DEFERRED,
+        )
         for j in sync_jobs
     )
 
     return templates.TemplateResponse(
         request,
         "partials/sync_status.html",
-        {"sync_jobs": sync_jobs, "has_active_sync": has_active_sync},
+        {
+            "sync_jobs": sync_jobs,
+            "has_active_sync": has_active_sync,
+            "now": datetime.datetime.now(datetime.UTC),
+        },
     )
 
 
