@@ -350,10 +350,14 @@ async def _upsert_listening_event(
 
     listened_at = datetime.datetime.fromisoformat(played_at)
 
-    check_stmt = sa.select(models_module.ListeningEvent).where(
-        models_module.ListeningEvent.user_id == user_id,
-        models_module.ListeningEvent.track_id == track.id,
-        models_module.ListeningEvent.listened_at == listened_at,
+    check_stmt = (
+        sa.select(models_module.ListeningEvent.id)
+        .where(
+            models_module.ListeningEvent.user_id == user_id,
+            models_module.ListeningEvent.track_id == track.id,
+            models_module.ListeningEvent.listened_at == listened_at,
+        )
+        .limit(1)
     )
     check_result = await session.execute(check_stmt)
     if check_result.scalar_one_or_none() is not None:
