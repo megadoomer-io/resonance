@@ -20,17 +20,29 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    # Delete duplicate listening_events, keeping one row per
-    # (user_id, track_id, listened_at) group using DISTINCT ON.
-    # PostgreSQL UUIDs don't support MIN(), so we use ctid as the tiebreaker.
+    # Delete duplicate listening_events, keeping the earliest-created row
+    # per (user_id, track_id, listened_at) group.
+    # Uses a targeted CTE to only touch actual duplicate groups, avoiding
+    # a full-table scan on what is typically a very large table with few dupes.
     op.execute(
         """
-        DELETE FROM listening_events
-        WHERE ctid NOT IN (
-            SELECT DISTINCT ON (user_id, track_id, listened_at) ctid
+        WITH dupes AS (
+            SELECT user_id, track_id, listened_at
             FROM listening_events
-            ORDER BY user_id, track_id, listened_at, created_at
+            GROUP BY user_id, track_id, listened_at
+            HAVING count(*) > 1
+        ),
+        keep AS (
+            SELECT DISTINCT ON (le.user_id, le.track_id, le.listened_at) le.id
+            FROM listening_events le
+            JOIN dupes d USING (user_id, track_id, listened_at)
+            ORDER BY le.user_id, le.track_id, le.listened_at, le.created_at
         )
+        DELETE FROM listening_events
+        WHERE (user_id, track_id, listened_at) IN (
+            SELECT user_id, track_id, listened_at FROM dupes
+        )
+        AND id NOT IN (SELECT id FROM keep)
         """
     )
 
