@@ -7,6 +7,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as pg_dialect
 import structlog
 
 import resonance.connectors.base as base_module
@@ -350,24 +351,17 @@ async def _upsert_listening_event(
 
     listened_at = datetime.datetime.fromisoformat(played_at)
 
-    check_stmt = (
-        sa.select(models_module.ListeningEvent.id)
-        .where(
-            models_module.ListeningEvent.user_id == user_id,
-            models_module.ListeningEvent.track_id == track.id,
-            models_module.ListeningEvent.listened_at == listened_at,
+    stmt = (
+        pg_dialect.insert(models_module.ListeningEvent)
+        .values(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            track_id=track.id,
+            source_service=track_data.service,
+            listened_at=listened_at,
         )
-        .limit(1)
+        .on_conflict_do_nothing(
+            constraint="uq_listening_events_user_track_time",
+        )
     )
-    check_result = await session.execute(check_stmt)
-    if check_result.scalar_one_or_none() is not None:
-        return
-
-    event = models_module.ListeningEvent(
-        id=uuid.uuid4(),
-        user_id=user_id,
-        track_id=track.id,
-        source_service=track_data.service,
-        listened_at=listened_at,
-    )
-    session.add(event)
+    await session.execute(stmt)

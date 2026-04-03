@@ -56,6 +56,12 @@ class ListeningEvent(base_module.TimestampMixin, base_module.Base):
     __tablename__ = "listening_events"
     __table_args__ = (
         sa.Index("ix_listening_events_user_listened", "user_id", "listened_at"),
+        sa.UniqueConstraint(
+            "user_id",
+            "track_id",
+            "listened_at",
+            name="uq_listening_events_user_track_time",
+        ),
     )
 
     id: orm.Mapped[uuid.UUID] = orm.mapped_column(

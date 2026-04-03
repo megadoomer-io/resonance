@@ -250,6 +250,17 @@ class TestListeningEventModel:
         expected = frozenset({"user_id", "listened_at"})
         assert expected in index_col_sets
 
+    def test_unique_constraint_on_user_track_listened_at(self) -> None:
+        table: sa.Table = music_module.ListeningEvent.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"user_id", "track_id", "listened_at"})
+        assert expected in uc_col_sets
+
 
 # ---------------------------------------------------------------------------
 # Taste models

@@ -4,6 +4,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import sqlalchemy.dialects.postgresql as pg_dialect
 
 import resonance.connectors.base as base_module
 import resonance.sync.runner as runner_module
@@ -187,28 +188,55 @@ class TestMBIDArtistMatching:
         assert added_artist.service_links["listenbrainz"] == ""
 
 
-class TestListeningEventTitleFallback:
-    """Tests for title-based track lookup in _upsert_listening_event."""
+class TestListeningEventUpsert:
+    """Tests for _upsert_listening_event using INSERT ... ON CONFLICT DO NOTHING."""
 
     @pytest.mark.anyio()
-    async def test_creates_event_for_track_without_external_id(self) -> None:
-        """Track with empty external_id is found by title and event is created."""
+    async def test_uses_on_conflict_do_nothing_insert(self) -> None:
+        """Listening event insert uses PostgreSQL ON CONFLICT DO NOTHING."""
         session = AsyncMock()
         user_id = uuid.uuid4()
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
 
-        # Only one query: title match (skips service_links lookup)
+        # Track lookup by title (empty external_id skips service_links)
         title_result = MagicMock()
         title_result.scalar_one_or_none.return_value = existing_track
 
-        # Second query: duplicate check -> no existing event
-        no_dup = MagicMock()
-        no_dup.scalar_one_or_none.return_value = None
+        session.execute.side_effect = [title_result, AsyncMock()]
 
-        session.execute.side_effect = [title_result, no_dup]
-        session.add = MagicMock()
+        track_data = _make_track_data(
+            external_id="",
+            title="Test Song",
+            artist_external_id="",
+            artist_name="Some Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:00+00:00"
+        )
+
+        # The second execute call should be an INSERT ... ON CONFLICT DO NOTHING
+        insert_call = session.execute.call_args_list[1]
+        stmt = insert_call[0][0]
+        assert isinstance(stmt, pg_dialect.Insert)
+
+    @pytest.mark.anyio()
+    async def test_creates_event_for_track_without_external_id(self) -> None:
+        """Track with empty external_id is found by title and event is inserted."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        # Track lookup by title
+        title_result = MagicMock()
+        title_result.scalar_one_or_none.return_value = existing_track
+
+        session.execute.side_effect = [title_result, AsyncMock()]
 
         track_data = _make_track_data(
             external_id="",
@@ -222,10 +250,8 @@ class TestListeningEventTitleFallback:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        session.add.assert_called_once()
-        added_event = session.add.call_args[0][0]
-        assert added_event.track_id == existing_track.id
-        assert added_event.user_id == user_id
+        # Should execute an INSERT (not session.add)
+        assert session.execute.call_count == 2
 
     @pytest.mark.anyio()
     async def test_returns_when_no_track_found_by_title(self) -> None:
@@ -236,9 +262,7 @@ class TestListeningEventTitleFallback:
         no_result = MagicMock()
         no_result.scalar_one_or_none.return_value = None
 
-        # Title match returns None
         session.execute.side_effect = [no_result]
-        session.add = MagicMock()
 
         track_data = _make_track_data(
             external_id="",
@@ -252,7 +276,8 @@ class TestListeningEventTitleFallback:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        session.add.assert_not_called()
+        # Only the track lookup, no insert
+        assert session.execute.call_count == 1
 
     @pytest.mark.anyio()
     async def test_falls_back_to_title_when_service_links_miss(self) -> None:
@@ -269,12 +294,8 @@ class TestListeningEventTitleFallback:
         # 2. title match -> existing track
         title_result = MagicMock()
         title_result.scalar_one_or_none.return_value = existing_track
-        # 3. duplicate check -> no existing event
-        no_dup = MagicMock()
-        no_dup.scalar_one_or_none.return_value = None
 
-        session.execute.side_effect = [no_result, title_result, no_dup]
-        session.add = MagicMock()
+        session.execute.side_effect = [no_result, title_result, AsyncMock()]
 
         track_data = _make_track_data(
             external_id="some-id",
@@ -288,4 +309,5 @@ class TestListeningEventTitleFallback:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        session.add.assert_called_once()
+        # Track lookups (2) + insert (1) = 3
+        assert session.execute.call_count == 3
