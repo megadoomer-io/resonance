@@ -28,7 +28,7 @@
                 </td>
                 <td>
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
-                        {% for child in job._active_children %}
+                        {% for child in job.children %}
                             {% if child.status.value == 'running' %}
                             <div style="margin-bottom: 0.25rem;">
                                 <small><strong>{{ child.description or 'Processing...' }}</strong></small>

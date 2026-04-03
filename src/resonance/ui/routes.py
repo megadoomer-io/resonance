@@ -313,7 +313,10 @@ async def sync_status_partial(
                 task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
             )
             .order_by(task_models.SyncTask.created_at.desc())
-            .options(sa_orm.joinedload(task_models.SyncTask.service_connection))
+            .options(
+                sa_orm.joinedload(task_models.SyncTask.service_connection),
+                sa_orm.subqueryload(task_models.SyncTask.children),
+            )
             .limit(5)
         )
         sync_jobs: Sequence[task_models.SyncTask] = sync_jobs_result.scalars().all()
@@ -333,22 +336,6 @@ async def sync_status_partial(
                 child_total = child_progress_result.scalar_one_or_none()
                 if child_total is not None:
                     job.progress_current = int(child_total)
-
-        # Collect active children for per-task display
-        for job in sync_jobs:
-            if job.status in (
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-                types_module.SyncStatus.DEFERRED,
-            ):
-                children_result = await db.execute(
-                    sa.select(task_models.SyncTask)
-                    .where(task_models.SyncTask.parent_id == job.id)
-                    .order_by(task_models.SyncTask.created_at)
-                )
-                job._active_children = list(children_result.scalars().all())  # type: ignore[attr-defined]
-            else:
-                job._active_children = []  # type: ignore[attr-defined]
 
     has_active_sync = any(
         j.status

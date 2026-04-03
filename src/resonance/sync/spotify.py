@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+import sqlalchemy as sa
+import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
 import resonance.connectors.base as connector_base
 import resonance.connectors.spotify as spotify_module
 import resonance.crypto as crypto_module
 import resonance.models.task as task_module
+import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.sync.runner as runner_module
 import resonance.types as types_module
-
-if TYPE_CHECKING:
-    import sqlalchemy.ext.asyncio as sa_async
-
-    import resonance.models.user as user_models
 
 logger = structlog.get_logger()
 
@@ -36,6 +32,22 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
     def __init__(self, token_encryption_key: str) -> None:
         self._token_encryption_key = token_encryption_key
 
+    async def _get_access_token(
+        self,
+        session: sa_async.AsyncSession,
+        task: task_module.SyncTask,
+    ) -> str:
+        """Load the service connection and decrypt the access token."""
+        conn_result = await session.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.id == task.service_connection_id
+            )
+        )
+        connection = conn_result.scalar_one()
+        return crypto_module.decrypt_token(
+            connection.encrypted_access_token, self._token_encryption_key
+        )
+
     async def plan(
         self,
         session: sa_async.AsyncSession,
@@ -43,16 +55,12 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         connector: connector_base.BaseConnector,
     ) -> list[sync_base.SyncTaskDescriptor]:
         """Create descriptors for followed_artists, saved_tracks, recently_played."""
-        access_token = crypto_module.decrypt_token(
-            connection.encrypted_access_token, self._token_encryption_key
-        )
-
         descriptors: list[sync_base.SyncTaskDescriptor] = []
         for data_type, description in _DATA_TYPE_DESCRIPTIONS.items():
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
                     task_type=types_module.SyncTaskType.TIME_RANGE,
-                    params={"data_type": data_type, "access_token": access_token},
+                    params={"data_type": data_type},
                     description=description,
                 )
             )
@@ -66,11 +74,14 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
     ) -> dict[str, object]:
         """Execute a Spotify sync child task.
 
-        Dispatches to the appropriate helper based on data_type in task.params.
+        Loads the service connection to decrypt the access token at
+        execute-time, avoiding plaintext token storage in task.params.
         """
         sp_connector = _cast_connector(connector)
         data_type = str(task.params.get("data_type", ""))
-        access_token = str(task.params.get("access_token", ""))
+
+        # Decrypt token at execute-time from the connection
+        access_token = await self._get_access_token(session, task)
 
         items_created = 0
         items_updated = 0

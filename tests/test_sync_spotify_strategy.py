@@ -79,7 +79,8 @@ class TestSpotifyPlan:
             assert desc.description != ""
 
     @pytest.mark.asyncio
-    async def test_descriptors_include_decrypted_token(self) -> None:
+    async def test_descriptors_do_not_contain_access_token(self) -> None:
+        """Access tokens must not be persisted in task params."""
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
         session = AsyncMock()
         connector = AsyncMock()
@@ -88,7 +89,7 @@ class TestSpotifyPlan:
         descriptors = await strategy.plan(session, connection, connector)
 
         for desc in descriptors:
-            assert desc.params["access_token"] == "my-secret-token"
+            assert "access_token" not in desc.params
 
     def test_concurrency_is_sequential(self) -> None:
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
@@ -102,17 +103,23 @@ class TestSpotifyExecute:
     async def test_followed_artists_dispatches_to_connector(self) -> None:
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
         session = AsyncMock()
-        task = _make_task(
-            params={"data_type": "followed_artists", "access_token": "tok"}
-        )
+        task = _make_task(params={"data_type": "followed_artists"})
         connector = MagicMock(spec=spotify_module.SpotifyConnector)
 
-        with patch.object(
-            sync_spotify_module,
-            "_sync_followed_artists",
-            new_callable=AsyncMock,
-            return_value=(2, 1),
-        ) as mock_sync:
+        with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
+            patch.object(
+                sync_spotify_module,
+                "_sync_followed_artists",
+                new_callable=AsyncMock,
+                return_value=(2, 1),
+            ) as mock_sync,
+        ):
             result = await strategy.execute(session, task, connector)
 
         mock_sync.assert_awaited_once()
@@ -123,12 +130,16 @@ class TestSpotifyExecute:
     async def test_rate_limit_raises_defer_request(self) -> None:
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
         session = AsyncMock()
-        task = _make_task(
-            params={"data_type": "followed_artists", "access_token": "tok"}
-        )
+        task = _make_task(params={"data_type": "followed_artists"})
         connector = MagicMock(spec=spotify_module.SpotifyConnector)
 
         with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
             patch.object(
                 sync_spotify_module,
                 "_sync_followed_artists",

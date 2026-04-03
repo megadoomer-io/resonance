@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pydantic
 
@@ -38,7 +38,7 @@ class DeferRequest(Exception):  # noqa: N818 — not an error; a control-flow si
 class SyncStrategy(abc.ABC):
     """Defines how a service plans and executes sync tasks."""
 
-    concurrency: str  # "sequential" or "parallel"
+    concurrency: Literal["sequential", "parallel"]
 
     @abc.abstractmethod
     async def plan(
