@@ -24,20 +24,25 @@ def upgrade() -> None:
         "sync_tasks",
         sa.Column("deferred_until", sa.DateTime(timezone=True), nullable=True),
     )
+
+    # Add DEFERRED to the status CHECK constraint.
+    # SQLAlchemy stores StrEnum .name (uppercase), not .value (lowercase).
     op.drop_constraint("ck_sync_tasks_status", "sync_tasks", type_="check")
     op.create_check_constraint(
         "ck_sync_tasks_status",
         "sync_tasks",
-        "status IN ('pending', 'running', 'completed', 'failed', 'deferred')",
+        "status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'DEFERRED')",
     )
 
 
 def downgrade() -> None:
+    # Restore status constraint without DEFERRED
     op.drop_constraint("ck_sync_tasks_status", "sync_tasks", type_="check")
     op.create_check_constraint(
         "ck_sync_tasks_status",
         "sync_tasks",
-        "status IN ('pending', 'running', 'completed', 'failed')",
+        "status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED')",
     )
+
     op.drop_column("sync_tasks", "deferred_until")
     op.drop_column("sync_tasks", "description")
