@@ -15,6 +15,18 @@ import resonance.types as types_module  # noqa: TC001 — Pydantic models need t
 logger = structlog.get_logger()
 
 
+class RateLimitExceededError(Exception):
+    """Raised when a server's Retry-After exceeds the maximum acceptable wait."""
+
+    def __init__(self, retry_after: float, max_wait: float) -> None:
+        self.retry_after = retry_after
+        self.max_wait = max_wait
+        super().__init__(
+            f"Rate limit Retry-After ({retry_after:.0f}s) exceeds "
+            f"maximum wait ({max_wait:.0f}s)"
+        )
+
+
 class ConnectorCapability(enum.StrEnum):
     """Capabilities that a connector can declare support for."""
 
@@ -85,6 +97,7 @@ class BaseConnector(abc.ABC):
     )
     _MAX_TRANSIENT_RETRIES = 5
     _TRANSIENT_BACKOFF_BASE = 2.0  # seconds — doubles each retry
+    _MAX_RATE_LIMIT_WAIT = 120.0  # seconds — fail instead of sleeping longer
 
     async def _request(
         self,
@@ -169,10 +182,7 @@ class BaseConnector(abc.ABC):
                 response.raise_for_status()
                 return response
 
-            # On 429, sleep for the Retry-After duration before retrying.
-            # We handle the wait here explicitly rather than relying on
-            # paced_interval() at the top of the loop, to ensure we
-            # actually wait the full backoff period.
+            # On 429, check Retry-After and either wait or fail fast.
             retry_after_raw = response.headers.get("Retry-After")
             retry_after = float(retry_after_raw) if retry_after_raw else 30.0
             logger.warning(
@@ -181,4 +191,6 @@ class BaseConnector(abc.ABC):
                 url=url,
                 retry_after_seconds=round(retry_after, 1),
             )
+            if retry_after > self._MAX_RATE_LIMIT_WAIT:
+                raise RateLimitExceededError(retry_after, self._MAX_RATE_LIMIT_WAIT)
             await asyncio.sleep(retry_after)

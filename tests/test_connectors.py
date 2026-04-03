@@ -1,6 +1,12 @@
 """Tests for the connector framework."""
 
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
 import resonance.connectors.base as base_module
+import resonance.connectors.ratelimit as ratelimit_module
 import resonance.connectors.registry as registry_module
 import resonance.types as types_module
 
@@ -10,6 +16,10 @@ class FakeConnector(base_module.BaseConnector):
 
     service_type = types_module.ServiceType.SPOTIFY
     capabilities = frozenset({base_module.ConnectorCapability.FOLLOWS})
+
+    def __init__(self) -> None:
+        self._http_client = None
+        self._budget = ratelimit_module.RateLimitBudget()
 
 
 class TestConnectorCapability:
@@ -135,3 +145,39 @@ class TestConnectorRegistry:
     def test_all_empty(self) -> None:
         registry = registry_module.ConnectorRegistry()
         assert registry.all() == []
+
+
+class TestRequestRateLimitCap:
+    """Tests for _request rate limit handling."""
+
+    @pytest.mark.asyncio
+    async def test_raises_when_retry_after_exceeds_cap(self) -> None:
+        """A 429 with Retry-After above _MAX_RATE_LIMIT_WAIT raises."""
+        connector = FakeConnector()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.return_value = httpx.Response(
+            429, headers={"Retry-After": "9999"}
+        )
+        connector._http_client = mock_client
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert exc_info.value.retry_after == 9999.0
+        assert exc_info.value.max_wait == 120.0
+
+    @pytest.mark.asyncio
+    async def test_retries_when_retry_after_within_cap(self) -> None:
+        """A 429 with Retry-After within cap retries and succeeds."""
+        connector = FakeConnector()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        request = httpx.Request("GET", "https://api.example.com/test")
+        mock_client.request.side_effect = [
+            httpx.Response(429, headers={"Retry-After": "0"}, request=request),
+            httpx.Response(200, json={"ok": True}, request=request),
+        ]
+        connector._http_client = mock_client
+
+        response = await connector._request("GET", "https://api.example.com/test")
+        assert response.status_code == 200
+        assert mock_client.request.call_count == 2
