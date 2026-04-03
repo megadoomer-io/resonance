@@ -690,7 +690,16 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result, stale_result]
+        # 4. Children count for SYNC_JOB -> 0 (no children yet)
+        children_count_result = MagicMock()
+        children_count_result.scalar_one.return_value = 0
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            children_count_result,
+        ]
 
         arq_redis = AsyncMock()
 
@@ -769,6 +778,52 @@ class TestReenqueueOrphanedTasks:
         assert task.status == types_module.SyncStatus.PENDING
         arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
         session.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_sync_job_that_already_has_children(self) -> None:
+        """PENDING SYNC_JOB with existing children is not re-enqueued."""
+        parent = _make_task(status=types_module.SyncStatus.PENDING)
+        parent.task_type = types_module.SyncTaskType.SYNC_JOB
+
+        session = AsyncMock()
+
+        # 1. PENDING tasks query — returns the parent SYNC_JOB
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = [parent]
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+
+        # 2. DEFERRED tasks query — none
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        # 3. Stale tasks query — none
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        # 4. Children check for the SYNC_JOB — returns count=1
+        children_count_result = MagicMock()
+        children_count_result.scalar_one.return_value = 1
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            children_count_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        # Should NOT re-enqueue the parent (it already has children)
+        arq_redis.enqueue_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_orphans_does_nothing(self) -> None:

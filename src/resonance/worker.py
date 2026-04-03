@@ -490,13 +490,29 @@ async def _reenqueue_orphaned_tasks(
         if not all_tasks:
             return
 
+        enqueued = 0
         for task in all_tasks:
             if task.task_type == types_module.SyncTaskType.SYNC_JOB:
+                # Skip SYNC_JOBs that already have children — re-planning
+                # would create duplicate child tasks.
+                children_count_result = await session.execute(
+                    sa.select(sa.func.count()).where(
+                        task_module.SyncTask.parent_id == task.id,
+                    )
+                )
+                if children_count_result.scalar_one() > 0:
+                    logger.info(
+                        "skipped_sync_job_with_children",
+                        task_id=str(task.id),
+                    )
+                    continue
                 await arq_redis.enqueue_job("plan_sync", str(task.id))
             else:
                 await arq_redis.enqueue_job("sync_range", str(task.id))
+            enqueued += 1
 
-        logger.info("reenqueued_orphaned_tasks", count=len(all_tasks))
+        if enqueued:
+            logger.info("reenqueued_orphaned_tasks", count=enqueued)
 
 
 # ---------------------------------------------------------------------------
