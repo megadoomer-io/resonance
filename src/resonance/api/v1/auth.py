@@ -137,7 +137,7 @@ async def auth_callback(
         )
         external_user_id = user_profile["id"]
         display_name = user_profile.get("display_name", external_user_id)
-    except httpx.HTTPStatusError:
+    except httpx.HTTPStatusError, base_module.RateLimitExceededError:
         logger.warning(
             "Could not fetch %s user profile (rate limited?), "
             "falling back to session lookup",
