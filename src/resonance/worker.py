@@ -18,12 +18,13 @@ import resonance.config as config_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
-import resonance.crypto as crypto_module
 import resonance.database as database_module
 import resonance.logging as logging_module
 import resonance.models.task as task_module
 import resonance.models.user as user_models
-import resonance.sync.runner as runner_module
+import resonance.sync.base as sync_base
+import resonance.sync.listenbrainz as lb_sync
+import resonance.sync.spotify as spotify_sync
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -47,7 +48,6 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
         "session_factory"
     ]
-    settings: config_module.Settings = ctx["settings"]
     log = logger.bind(sync_task_id=sync_task_id)
 
     async with session_factory() as session:
@@ -74,20 +74,64 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             )
             log.info("plan_sync_started")
 
-            if connection.service_type == types_module.ServiceType.LISTENBRAINZ:
-                await _plan_listenbrainz_sync(
-                    ctx, session, task, connection, settings, log
-                )
-            elif connection.service_type == types_module.ServiceType.SPOTIFY:
-                await _plan_spotify_sync(ctx, session, task, connection, settings, log)
-            else:
-                log.error("unsupported_service_type")
+            # Look up strategy
+            strategies: dict[types_module.ServiceType, sync_base.SyncStrategy] = ctx[
+                "strategies"
+            ]
+            strategy = strategies.get(connection.service_type)
+            if strategy is None:
                 task.status = types_module.SyncStatus.FAILED
                 task.error_message = (
-                    f"Unsupported service type: {connection.service_type}"
+                    f"No sync strategy for {connection.service_type.value}"
                 )
                 task.completed_at = datetime.datetime.now(datetime.UTC)
                 await session.commit()
+                return
+
+            # Look up connector
+            connector = ctx["connector_registry"].get(connection.service_type)
+            if connector is None:
+                task.status = types_module.SyncStatus.FAILED
+                task.error_message = f"No connector for {connection.service_type.value}"
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+                return
+
+            # Plan
+            descriptors = await strategy.plan(session, connection, connector)
+
+            # Create child tasks from descriptors
+            arq_redis: arq.ArqRedis = ctx["redis"]
+            children: list[task_module.SyncTask] = []
+            for desc in descriptors:
+                child = task_module.SyncTask(
+                    id=uuid.uuid4(),
+                    user_id=task.user_id,
+                    service_connection_id=task.service_connection_id,
+                    parent_id=task.id,
+                    task_type=desc.task_type,
+                    status=types_module.SyncStatus.PENDING,
+                    params=desc.params,
+                    progress_total=desc.progress_total,
+                    description=desc.description,
+                )
+                session.add(child)
+                children.append(child)
+            await session.commit()
+
+            # Enqueue based on concurrency policy
+            if strategy.concurrency == "parallel":
+                for child in children:
+                    await arq_redis.enqueue_job("sync_range", str(child.id))
+                    log.info("child_enqueued", child_id=str(child.id))
+            else:
+                # Sequential: enqueue only the first
+                await arq_redis.enqueue_job("sync_range", str(children[0].id))
+                log.info(
+                    "child_enqueued",
+                    child_id=str(children[0].id),
+                    mode="sequential",
+                )
 
         except Exception:
             log.exception("plan_sync_failed")
@@ -101,147 +145,16 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Planner helpers (create child TIME_RANGE tasks)
-# ---------------------------------------------------------------------------
-
-
-async def _plan_listenbrainz_sync(
-    ctx: dict[str, Any],
-    session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
-    connection: user_models.ServiceConnection,
-    settings: config_module.Settings,
-    log: structlog.stdlib.BoundLogger,
-) -> None:
-    """Create a single TIME_RANGE child task for ListenBrainz sync.
-
-    Checks for a watermark (most recent completed TIME_RANGE task for this
-    connection) to enable incremental sync.
-
-    Args:
-        ctx: arq worker context dict.
-        session: Active database session.
-        task: The parent SYNC_JOB task.
-        connection: The user's ListenBrainz service connection.
-        settings: Application settings.
-        log: Bound structured logger.
-    """
-    connector_registry: registry_module.ConnectorRegistry = ctx["connector_registry"]
-    connector = connector_registry.get(types_module.ServiceType.LISTENBRAINZ)
-    if connector is None:
-        log.error("listenbrainz_connector_not_registered")
-        task.status = types_module.SyncStatus.FAILED
-        task.error_message = "ListenBrainz connector not registered"
-        task.completed_at = datetime.datetime.now(datetime.UTC)
-        await session.commit()
-        return
-
-    lb_connector: listenbrainz_module.ListenBrainzConnector = connector  # type: ignore[assignment]
-    username = connection.external_user_id
-
-    # Get listen count for progress tracking
-    try:
-        total = await lb_connector.get_listen_count(username)
-        task.progress_total = total
-        await session.commit()
-        log.info("listenbrainz_listen_count", total=total)
-    except Exception:
-        log.warning("could_not_fetch_listen_count")
-
-    # Check for watermark (incremental sync)
-    min_ts = await _get_watermark(session, connection.id)
-    if min_ts is not None:
-        log.info("listenbrainz_incremental_sync", min_ts=min_ts)
-
-    # Create child TIME_RANGE task
-    child = task_module.SyncTask(
-        id=uuid.uuid4(),
-        user_id=task.user_id,
-        service_connection_id=task.service_connection_id,
-        parent_id=task.id,
-        task_type=types_module.SyncTaskType.TIME_RANGE,
-        status=types_module.SyncStatus.PENDING,
-        params={"username": username, "min_ts": min_ts},
-    )
-    session.add(child)
-    await session.commit()
-
-    # Enqueue the child task
-    arq_redis: arq.ArqRedis = ctx["redis"]
-    await arq_redis.enqueue_job("sync_range", str(child.id))
-    log.info("listenbrainz_child_enqueued", child_id=str(child.id))
-
-
-async def _plan_spotify_sync(
-    ctx: dict[str, Any],
-    session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
-    connection: user_models.ServiceConnection,
-    settings: config_module.Settings,
-    log: structlog.stdlib.BoundLogger,
-) -> None:
-    """Create three TIME_RANGE child tasks for Spotify sync.
-
-    Creates one child for each data type: followed_artists, saved_tracks,
-    and recently_played. Each child receives the decrypted access token.
-
-    Args:
-        ctx: arq worker context dict.
-        session: Active database session.
-        task: The parent SYNC_JOB task.
-        connection: The user's Spotify service connection.
-        settings: Application settings.
-        log: Bound structured logger.
-    """
-    access_token = crypto_module.decrypt_token(
-        connection.encrypted_access_token, settings.token_encryption_key
-    )
-
-    data_types = ["followed_artists", "saved_tracks", "recently_played"]
-    arq_redis: arq.ArqRedis = ctx["redis"]
-
-    for data_type in data_types:
-        child = task_module.SyncTask(
-            id=uuid.uuid4(),
-            user_id=task.user_id,
-            service_connection_id=task.service_connection_id,
-            parent_id=task.id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
-            status=types_module.SyncStatus.PENDING,
-            params={"data_type": data_type, "access_token": access_token},
-        )
-        session.add(child)
-
-    await session.commit()
-
-    # Enqueue only the first child — subsequent children are enqueued
-    # sequentially by _check_parent_completion after each one completes.
-    # This prevents concurrent Spotify API requests that trigger 429s.
-    first_child_result = await session.execute(
-        sa.select(task_module.SyncTask)
-        .where(task_module.SyncTask.parent_id == task.id)
-        .order_by(task_module.SyncTask.created_at)
-        .limit(1)
-    )
-    first_child = first_child_result.scalar_one()
-    await arq_redis.enqueue_job("sync_range", str(first_child.id))
-    log.info(
-        "spotify_child_enqueued",
-        child_id=str(first_child.id),
-        data_type=first_child.params.get("data_type"),
-    )
-
-
-# ---------------------------------------------------------------------------
 # sync_range: execute a TIME_RANGE task
 # ---------------------------------------------------------------------------
 
 
 async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
-    """Execute a TIME_RANGE task that fetches and upserts data.
+    """Execute a TIME_RANGE task using the appropriate sync strategy.
 
-    Routes to the appropriate runner based on service type, then marks
-    the task COMPLETED or FAILED and checks parent completion.
+    Delegates to the strategy's execute() method, handling completion,
+    deferral (DeferRequest), and failure. Always checks parent completion
+    afterward to cascade status or enqueue the next sequential sibling.
 
     Args:
         ctx: arq worker context dict.
@@ -250,11 +163,11 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
         "session_factory"
     ]
-    settings: config_module.Settings = ctx["settings"]
     connector_registry: registry_module.ConnectorRegistry = ctx["connector_registry"]
     log = logger.bind(sync_task_id=sync_task_id)
 
     async with session_factory() as session:
+        task: task_module.SyncTask | None = None
         try:
             task = await _load_task(session, sync_task_id)
             if task is None:
@@ -278,19 +191,41 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             )
             log.info("sync_range_started")
 
-            if connection.service_type == types_module.ServiceType.LISTENBRAINZ:
-                await _run_listenbrainz_range(
-                    session, task, connection, connector_registry, log
-                )
-            elif connection.service_type == types_module.ServiceType.SPOTIFY:
-                await _run_spotify_range(
-                    session, task, connection, connector_registry, settings, log
+            strategies: dict[types_module.ServiceType, sync_base.SyncStrategy] = ctx[
+                "strategies"
+            ]
+            strategy = strategies.get(connection.service_type)
+            connector = connector_registry.get(connection.service_type)
+            if strategy is None or connector is None:
+                raise RuntimeError(
+                    f"No strategy/connector for {connection.service_type.value}"
                 )
 
-            task.status = types_module.SyncStatus.COMPLETED
-            task.completed_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
-            log.info("sync_range_completed", result=task.result)
+            try:
+                result = await strategy.execute(session, task, connector)
+                task.status = types_module.SyncStatus.COMPLETED
+                task.result = result
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+                log.info("sync_range_completed", result=task.result)
+            except sync_base.DeferRequest as defer:
+                task.status = types_module.SyncStatus.DEFERRED
+                task.params = {**task.params, **defer.resume_params}
+                task.deferred_until = datetime.datetime.now(
+                    datetime.UTC
+                ) + datetime.timedelta(seconds=defer.retry_after)
+                await session.commit()
+                arq_redis_defer: arq.ArqRedis = ctx["redis"]
+                await arq_redis_defer.enqueue_job(
+                    "sync_range",
+                    str(task.id),
+                    _defer_by=datetime.timedelta(seconds=defer.retry_after),
+                )
+                log.info(
+                    "sync_range_deferred",
+                    retry_after=defer.retry_after,
+                    deferred_until=str(task.deferred_until),
+                )
 
         except Exception:
             log.exception("sync_range_failed")
@@ -306,199 +241,6 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
         if task is not None:
             arq_redis: arq.ArqRedis = ctx["redis"]
             await _check_parent_completion(session, task, arq_redis, log)
-
-
-# ---------------------------------------------------------------------------
-# Range runners (do the actual data fetching and upserting)
-# ---------------------------------------------------------------------------
-
-
-async def _run_listenbrainz_range(
-    session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
-    connection: user_models.ServiceConnection,
-    connector_registry: registry_module.ConnectorRegistry,
-    log: structlog.stdlib.BoundLogger,
-) -> None:
-    """Paginate through ListenBrainz listens and upsert into the database.
-
-    Uses max_ts/min_ts from task params to control pagination range.
-    Updates task.progress_current and commits per page.
-
-    Args:
-        session: Active database session.
-        task: The TIME_RANGE task being executed.
-        connection: The user's ListenBrainz service connection.
-        connector_registry: Registry to look up the LB connector.
-        log: Bound structured logger.
-    """
-    connector = connector_registry.get(types_module.ServiceType.LISTENBRAINZ)
-    if connector is None:
-        raise RuntimeError("ListenBrainz connector not registered")
-
-    lb_connector: listenbrainz_module.ListenBrainzConnector = connector  # type: ignore[assignment]
-    username: str = str(task.params.get("username", connection.external_user_id))
-    min_ts_param = task.params.get("min_ts")
-    min_ts: int | None = int(str(min_ts_param)) if min_ts_param is not None else None
-    max_ts: int | None = None
-    items_created = 0
-    page = 0
-
-    while True:
-        listens = await lb_connector.get_listens(
-            username, max_ts=max_ts, min_ts=min_ts, count=100
-        )
-        if not listens:
-            break
-        page += 1
-
-        for listen in listens:
-            with session.no_autoflush:
-                await runner_module._upsert_artist_from_track(session, listen.track)
-                await session.flush()
-                await runner_module._upsert_track(session, listen.track)
-                await session.flush()
-                played_at = datetime.datetime.fromtimestamp(
-                    listen.listened_at, tz=datetime.UTC
-                ).isoformat()
-                await runner_module._upsert_listening_event(
-                    session, task.user_id, listen.track, played_at
-                )
-            items_created += 1
-
-        # Use the oldest listen's timestamp for next page
-        max_ts = listens[-1].listened_at
-        task.progress_current = items_created
-        await session.commit()
-        log.info(
-            "listenbrainz_page_synced",
-            page=page,
-            listens_in_page=len(listens),
-            total_created=items_created,
-            max_ts=max_ts,
-        )
-
-    task.result = {"items_created": items_created}
-
-
-async def _run_spotify_range(
-    session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
-    connection: user_models.ServiceConnection,
-    connector_registry: registry_module.ConnectorRegistry,
-    settings: config_module.Settings,
-    log: structlog.stdlib.BoundLogger,
-) -> None:
-    """Fetch Spotify data for a single data_type and upsert into the database.
-
-    Reads data_type and access_token from task params. Refreshes the token
-    if the connection has expired. Routes to the appropriate connector method.
-
-    Args:
-        session: Active database session.
-        task: The TIME_RANGE task being executed.
-        connection: The user's Spotify service connection.
-        connector_registry: Registry to look up the Spotify connector.
-        settings: Application settings (for token encryption key).
-        log: Bound structured logger.
-    """
-    connector = connector_registry.get(types_module.ServiceType.SPOTIFY)
-    if connector is None:
-        raise RuntimeError("Spotify connector not registered")
-
-    sp_connector: spotify_module.SpotifyConnector = connector  # type: ignore[assignment]
-    data_type: str = str(task.params.get("data_type", ""))
-    access_token: str = str(task.params.get("access_token", ""))
-
-    # Refresh token if expired
-    if (
-        connection.token_expires_at is not None
-        and connection.token_expires_at <= datetime.datetime.now(datetime.UTC)
-        and connection.encrypted_refresh_token is not None
-    ):
-        refresh_token = crypto_module.decrypt_token(
-            connection.encrypted_refresh_token, settings.token_encryption_key
-        )
-        token_response = await sp_connector.refresh_access_token(refresh_token)
-        access_token = token_response.access_token
-        connection.encrypted_access_token = crypto_module.encrypt_token(
-            access_token, settings.token_encryption_key
-        )
-        if token_response.expires_in is not None:
-            connection.token_expires_at = datetime.datetime.now(
-                datetime.UTC
-            ) + datetime.timedelta(seconds=token_response.expires_in)
-        await session.commit()
-        log.info("spotify_token_refreshed")
-
-    items_created = 0
-    items_updated = 0
-
-    if data_type == "followed_artists":
-        artists = await sp_connector.get_followed_artists(access_token)
-        log.info("spotify_artists_fetched", count=len(artists))
-        for artist_data in artists:
-            with session.no_autoflush:
-                created = await runner_module._upsert_artist(session, artist_data)
-                await session.flush()
-                if created:
-                    items_created += 1
-                else:
-                    items_updated += 1
-                await runner_module._upsert_user_artist_relation(
-                    session,
-                    task.user_id,
-                    artist_data,
-                    task.service_connection_id,
-                )
-
-    elif data_type == "saved_tracks":
-        tracks = await sp_connector.get_saved_tracks(access_token)
-        log.info("spotify_tracks_fetched", count=len(tracks))
-        for track_data in tracks:
-            with session.no_autoflush:
-                await runner_module._upsert_artist_from_track(session, track_data)
-                await session.flush()
-                created = await runner_module._upsert_track(session, track_data)
-                await session.flush()
-                if created:
-                    items_created += 1
-                else:
-                    items_updated += 1
-                await runner_module._upsert_user_track_relation(
-                    session,
-                    task.user_id,
-                    track_data,
-                    task.service_connection_id,
-                )
-
-    elif data_type == "recently_played":
-        played_items = await sp_connector.get_recently_played(access_token)
-        log.info("spotify_recent_fetched", count=len(played_items))
-        for played_item in played_items:
-            with session.no_autoflush:
-                await runner_module._upsert_artist_from_track(
-                    session, played_item.track
-                )
-                await session.flush()
-                await runner_module._upsert_track(session, played_item.track)
-                await session.flush()
-                await runner_module._upsert_listening_event(
-                    session,
-                    task.user_id,
-                    played_item.track,
-                    played_item.played_at,
-                )
-            items_created += 1
-
-    await session.commit()
-    task.result = {"items_created": items_created, "items_updated": items_updated}
-    log.info(
-        "spotify_range_completed",
-        data_type=data_type,
-        items_created=items_created,
-        items_updated=items_updated,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -616,51 +358,6 @@ async def _check_parent_completion(
 
 
 # ---------------------------------------------------------------------------
-# Watermark lookup (for incremental sync)
-# ---------------------------------------------------------------------------
-
-
-async def _get_watermark(
-    session: sa_async.AsyncSession,
-    connection_id: uuid.UUID,
-) -> int | None:
-    """Find the most recent completed TIME_RANGE task's max listened_at timestamp.
-
-    Used for incremental ListenBrainz sync — only fetches listens newer
-    than the watermark.
-
-    Args:
-        session: Active database session.
-        connection_id: The service connection ID.
-
-    Returns:
-        Unix timestamp (int) of the watermark, or None for full sync.
-    """
-    result = await session.execute(
-        sa.select(task_module.SyncTask)
-        .where(
-            task_module.SyncTask.service_connection_id == connection_id,
-            task_module.SyncTask.task_type == types_module.SyncTaskType.TIME_RANGE,
-            task_module.SyncTask.status == types_module.SyncStatus.COMPLETED,
-        )
-        .order_by(task_module.SyncTask.completed_at.desc())
-        .limit(1)
-    )
-    last_task = result.scalar_one_or_none()
-    if last_task is None:
-        return None
-
-    # The watermark is stored in the task's result as the last max_ts
-    # processed, or we can use progress_current as a proxy.  For now,
-    # we look for a "last_listened_at" key in result.
-    task_result = last_task.result or {}
-    watermark = task_result.get("last_listened_at")
-    if watermark is not None:
-        return int(str(watermark))
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -716,6 +413,12 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["engine"] = engine
     ctx["session_factory"] = session_factory
     ctx["connector_registry"] = connector_registry
+    ctx["strategies"] = {
+        types_module.ServiceType.SPOTIFY: spotify_sync.SpotifySyncStrategy(
+            token_encryption_key=settings.token_encryption_key
+        ),
+        types_module.ServiceType.LISTENBRAINZ: lb_sync.ListenBrainzSyncStrategy(),
+    }
 
     logger.info("worker_started")
 

@@ -1,5 +1,6 @@
 """Tests for the arq worker module."""
 
+import datetime
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -7,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import resonance.models.task as task_module
+import resonance.models.user as user_models
+import resonance.sync.base as sync_base
 import resonance.types as types_module
 import resonance.worker as worker_module
 
@@ -399,7 +402,8 @@ class TestPlanSync:
             "session_factory": _mock_session_factory(session),
             "settings": MagicMock(),
             "connector_registry": MagicMock(),
-            "arq_redis": AsyncMock(),
+            "strategies": {},
+            "redis": AsyncMock(),
         }
 
         await worker_module.plan_sync(ctx, str(uuid.uuid4()))
@@ -428,9 +432,152 @@ class TestSyncRange:
             "session_factory": _mock_session_factory(session),
             "settings": MagicMock(),
             "connector_registry": MagicMock(),
-            "arq_redis": AsyncMock(),
+            "strategies": {},
+            "redis": AsyncMock(),
         }
 
         await worker_module.sync_range(ctx, str(uuid.uuid4()))
 
         session.commit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Strategy dispatch tests
+# ---------------------------------------------------------------------------
+
+
+class TestPlanSyncStrategyDispatch:
+    """Tests for plan_sync strategy dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_no_strategy_marks_task_failed(self) -> None:
+        """When no strategy exists for the service type, task is FAILED."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            task_type=types_module.SyncTaskType.SYNC_JOB,
+            status=types_module.SyncStatus.PENDING,
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        session.execute.side_effect = [task_result, conn_result]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "strategies": {},  # Empty — no strategy for SPOTIFY
+            "connector_registry": MagicMock(),
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.plan_sync(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.FAILED
+        assert "No sync strategy" in str(task.error_message)
+        assert task.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Deferral tests
+# ---------------------------------------------------------------------------
+
+
+class TestSyncRangeDeferral:
+    """Tests for DeferRequest handling in sync_range."""
+
+    @pytest.mark.asyncio
+    async def test_defer_request_sets_deferred_status(self) -> None:
+        """When strategy raises DeferRequest, task becomes DEFERRED."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"data_type": "saved_tracks"},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        # 3. _check_parent_completion: pending count (DEFERRED is non-terminal)
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 1
+
+        # 4. next pending sibling -> None (only this deferred task is non-terminal)
+        next_result = MagicMock()
+        next_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            next_result,
+        ]
+
+        # Strategy that raises DeferRequest
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.side_effect = sync_base.DeferRequest(
+            retry_after=120.0,
+            resume_params={"data_type": "saved_tracks", "offset": 50},
+        )
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        arq_redis = AsyncMock()
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "redis": arq_redis,
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.DEFERRED
+        assert task.deferred_until is not None
+        assert task.params["offset"] == 50
+        # Should have enqueued a deferred re-run
+        arq_redis.enqueue_job.assert_any_call(
+            "sync_range",
+            str(task_id),
+            _defer_by=datetime.timedelta(seconds=120.0),
+        )
