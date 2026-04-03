@@ -581,3 +581,123 @@ class TestSyncRangeDeferral:
             str(task_id),
             _defer_by=datetime.timedelta(seconds=120.0),
         )
+
+
+# ---------------------------------------------------------------------------
+# Orphaned task re-enqueue tests
+# ---------------------------------------------------------------------------
+
+
+class TestReenqueueOrphanedTasks:
+    """Tests for _reenqueue_orphaned_tasks."""
+
+    @pytest.mark.asyncio
+    async def test_reenqueues_pending_sync_job(self) -> None:
+        """PENDING SYNC_JOB is re-enqueued as plan_sync."""
+        task = _make_task(
+            status=types_module.SyncStatus.PENDING,
+        )
+        task.task_type = types_module.SyncTaskType.SYNC_JOB
+
+        session = AsyncMock()
+        # 1. PENDING tasks query
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = [task]
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        # 2. DEFERRED tasks query
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        arq_redis.enqueue_job.assert_called_once_with("plan_sync", str(task.id))
+
+    @pytest.mark.asyncio
+    async def test_reenqueues_pending_time_range(self) -> None:
+        """PENDING TIME_RANGE is re-enqueued as sync_range."""
+        task = _make_task(
+            status=types_module.SyncStatus.PENDING,
+        )
+        # _make_task already sets task_type to TIME_RANGE
+
+        session = AsyncMock()
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = [task]
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+
+    @pytest.mark.asyncio
+    async def test_reenqueues_expired_deferred_task(self) -> None:
+        """DEFERRED task with past deferred_until is reset and re-enqueued."""
+        task = _make_task(
+            status=types_module.SyncStatus.DEFERRED,
+        )
+        task.deferred_until = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
+
+        session = AsyncMock()
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = [task]
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        assert task.status == types_module.SyncStatus.PENDING
+        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+        session.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_no_orphans_does_nothing(self) -> None:
+        """No orphaned tasks means no enqueue calls."""
+        session = AsyncMock()
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        session.execute.side_effect = [pending_result, deferred_result]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        arq_redis.enqueue_job.assert_not_called()

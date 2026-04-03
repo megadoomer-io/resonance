@@ -390,6 +390,65 @@ async def _load_task(
     return result.scalar_one_or_none()
 
 
+async def _reenqueue_orphaned_tasks(
+    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
+    arq_redis: arq.ArqRedis,
+) -> None:
+    """Re-enqueue PENDING and expired DEFERRED tasks on worker startup.
+
+    arq jobs in Redis expire after ~1 day. If the worker was down during
+    that window, the SyncTask row remains PENDING/DEFERRED but the arq
+    job is gone. This function finds those orphaned tasks and re-enqueues
+    them.
+    """
+    async with session_factory() as session:
+        now = datetime.datetime.now(datetime.UTC)
+
+        # Find PENDING tasks (orphaned — their arq job likely expired)
+        pending_result = await session.execute(
+            sa.select(task_module.SyncTask).where(
+                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
+                task_module.SyncTask.task_type.in_(
+                    [
+                        types_module.SyncTaskType.SYNC_JOB,
+                        types_module.SyncTaskType.TIME_RANGE,
+                    ]
+                ),
+            )
+        )
+        pending_tasks = list(pending_result.scalars().all())
+
+        # Find DEFERRED tasks whose deferred_until has passed
+        deferred_result = await session.execute(
+            sa.select(task_module.SyncTask).where(
+                task_module.SyncTask.status == types_module.SyncStatus.DEFERRED,
+                sa.or_(
+                    task_module.SyncTask.deferred_until <= now,
+                    task_module.SyncTask.deferred_until.is_(None),
+                ),
+            )
+        )
+        deferred_tasks = list(deferred_result.scalars().all())
+
+        # Reset deferred tasks back to PENDING before re-enqueueing
+        for task in deferred_tasks:
+            task.status = types_module.SyncStatus.PENDING
+        if deferred_tasks:
+            await session.commit()
+
+        all_tasks = pending_tasks + deferred_tasks
+        if not all_tasks:
+            return
+
+        for task in all_tasks:
+            if task.task_type == types_module.SyncTaskType.SYNC_JOB:
+                await arq_redis.enqueue_job("plan_sync", str(task.id))
+            else:
+                await arq_redis.enqueue_job("sync_range", str(task.id))
+
+        logger.info("reenqueued_orphaned_tasks", count=len(all_tasks))
+
+
 # ---------------------------------------------------------------------------
 # arq startup / shutdown hooks
 # ---------------------------------------------------------------------------
@@ -426,6 +485,9 @@ async def startup(ctx: dict[str, Any]) -> None:
         ),
         types_module.ServiceType.LISTENBRAINZ: lb_sync.ListenBrainzSyncStrategy(),
     }
+
+    # Re-enqueue orphaned tasks that lost their arq jobs
+    await _reenqueue_orphaned_tasks(session_factory, ctx["redis"])
 
     logger.info("worker_started")
 
