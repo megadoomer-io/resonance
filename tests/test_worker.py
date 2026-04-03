@@ -450,6 +450,58 @@ class TestPlanSyncStrategyDispatch:
     """Tests for plan_sync strategy dispatch."""
 
     @pytest.mark.asyncio
+    async def test_empty_plan_marks_task_completed(self) -> None:
+        """When strategy.plan() returns [], task is COMPLETED with zero counts."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            task_type=types_module.SyncTaskType.SYNC_JOB,
+            status=types_module.SyncStatus.PENDING,
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        session.execute.side_effect = [task_result, conn_result]
+
+        # Strategy returns empty plan
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.plan.return_value = []
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "connector_registry": mock_connector_registry,
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.plan_sync(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result == {"items_created": 0, "items_updated": 0}
+        assert task.completed_at is not None
+
+    @pytest.mark.asyncio
     async def test_no_strategy_marks_task_failed(self) -> None:
         """When no strategy exists for the service type, task is FAILED."""
         task_id = uuid.uuid4()

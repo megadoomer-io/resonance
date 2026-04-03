@@ -277,6 +277,97 @@ class TestExecute:
         assert "max_ts" in exc_info.value.resume_params
         assert "items_so_far" in exc_info.value.resume_params
 
+    @pytest.mark.asyncio
+    async def test_deferral_resume_preserves_watermark(self) -> None:
+        """Full deferral cycle: execute -> DeferRequest -> resume with watermark.
+
+        Verifies that last_listened_at survives the deferral cycle: the first
+        execute captures it from page 1, the DeferRequest includes it in
+        resume_params, and a resumed execute uses the preserved value rather
+        than re-deriving it from a later page.
+        """
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+
+        # Phase 1: First execute fetches page 1, then hits rate limit on page 2
+        task_phase1 = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+        listen2 = _make_listen(1700000050, "Song B", "Artist B")
+
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                [listen1, listen2],
+                connector_base.RateLimitExceededError(
+                    retry_after=300.0, max_wait=120.0
+                ),
+            ]
+        )
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(sync_base.DeferRequest) as exc_info,
+        ):
+            await strategy.execute(session, task_phase1, connector)
+
+        defer = exc_info.value
+        assert defer.resume_params["last_listened_at"] == 1700000100
+        assert defer.resume_params["items_so_far"] == 2
+        assert defer.resume_params["max_ts"] == 1700000050
+
+        # Phase 2: Simulate the worker merging resume_params into task.params,
+        # then re-executing. The resumed execute should preserve last_listened_at
+        # from phase 1 even though page 2's listens are older.
+        merged_params = {**task_phase1.params, **defer.resume_params}
+        task_phase2 = _make_task(params=merged_params)
+
+        listen3 = _make_listen(1700000020, "Song C", "Artist C")
+
+        connector2 = _make_lb_connector()
+        connector2.get_listens = AsyncMock(side_effect=[[listen3], []])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task_phase2, connector2)
+
+        # last_listened_at should be from phase 1 (1700000100), not page 2 (1700000020)
+        assert result["last_listened_at"] == 1700000100
+        # items_created should include both phases: 2 from phase 1 + 1 from phase 2
+        assert result["items_created"] == 3
+
 
 # ---------------------------------------------------------------------------
 # _get_watermark tests

@@ -127,6 +127,25 @@ class TestSpotifyExecute:
         assert result["items_updated"] == 1
 
     @pytest.mark.asyncio
+    async def test_unknown_data_type_returns_zero_counts(self) -> None:
+        """Unknown data_type logs a warning and returns zero counts."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "nonexistent_type"})
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+
+        with patch.object(
+            strategy,
+            "_get_access_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["items_created"] == 0
+        assert result["items_updated"] == 0
+
+    @pytest.mark.asyncio
     async def test_rate_limit_raises_defer_request(self) -> None:
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
         session = AsyncMock()
