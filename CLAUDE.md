@@ -7,6 +7,7 @@ Personal media discovery platform — aggregates music data from external servic
 - **Stack:** Python 3.14, FastAPI, SQLAlchemy 2.0 (async), PostgreSQL, Redis, Jinja2, HTMX
 - **Package manager:** uv
 - **Design doc:** [docs/design.md](docs/design.md)
+- **Spotify API constraints:** [docs/spotify-api-constraints.md](docs/spotify-api-constraints.md) — Dev mode rate limits, removed endpoints, sync implications
 - **Deployment:** ArgoCD on megadoomer-do K8s cluster; config in `megadoomer-config` repo
 
 ## Development Commands
