@@ -81,12 +81,33 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         connector: connector_base.BaseConnector,
     ) -> list[sync_base.SyncTaskDescriptor]:
         """Create descriptors for followed_artists, saved_tracks, recently_played."""
+        watermarks = connection.sync_watermark
         descriptors: list[sync_base.SyncTaskDescriptor] = []
-        for data_type, description in _DATA_TYPE_DESCRIPTIONS.items():
+
+        for data_type, base_description in _DATA_TYPE_DESCRIPTIONS.items():
+            wm = watermarks.get(data_type, {})
+            params: dict[str, object] = {"data_type": data_type}
+
+            if data_type == "recently_played":
+                params["last_played_at"] = wm.get("last_played_at")
+            elif data_type == "saved_tracks":
+                params["last_saved_at"] = wm.get("last_saved_at")
+            elif data_type == "followed_artists":
+                params["after_cursor"] = wm.get("after_cursor")
+
+            has_watermark = any(
+                v is not None for k, v in params.items() if k != "data_type"
+            )
+            description = (
+                f"Fetching new {data_type.replace('_', ' ')}"
+                if has_watermark
+                else base_description
+            )
+
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
                     task_type=types_module.SyncTaskType.TIME_RANGE,
-                    params={"data_type": data_type},
+                    params=params,
                     description=description,
                 )
             )

@@ -17,7 +17,10 @@ import resonance.types as types_module
 _TEST_ENCRYPTION_KEY = "pVnp8Zq06TgKRtq3xvI5zouN1E84mlTsX1V9UhMwJuI="
 
 
-def _make_connection(access_token: str = "test-token") -> MagicMock:
+def _make_connection(
+    access_token: str = "test-token",
+    sync_watermark: dict[str, dict[str, object]] | None = None,
+) -> MagicMock:
     """Create a mock ServiceConnection with an encrypted access token."""
     conn = MagicMock()
     conn.id = uuid.uuid4()
@@ -25,6 +28,7 @@ def _make_connection(access_token: str = "test-token") -> MagicMock:
         access_token, _TEST_ENCRYPTION_KEY
     )
     conn.service_type = types_module.ServiceType.SPOTIFY
+    conn.sync_watermark = sync_watermark or {}
     return conn
 
 
@@ -90,6 +94,62 @@ class TestSpotifyPlan:
 
         for desc in descriptors:
             assert "access_token" not in desc.params
+
+    @pytest.mark.asyncio
+    async def test_passes_watermarks_to_params(self) -> None:
+        """Watermarks from connection are passed into descriptor params."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        connector = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "recently_played": {"last_played_at": "2026-04-05T12:00:00Z"},
+                "saved_tracks": {"last_saved_at": "2026-04-05T12:00:00Z"},
+                "followed_artists": {"after_cursor": "abc123"},
+            }
+        )
+        descriptors = await strategy.plan(session, connection, connector)
+        by_type = {d.params["data_type"]: d for d in descriptors}
+        assert (
+            by_type["recently_played"].params["last_played_at"]
+            == "2026-04-05T12:00:00Z"
+        )
+        assert by_type["saved_tracks"].params["last_saved_at"] == "2026-04-05T12:00:00Z"
+        assert by_type["followed_artists"].params["after_cursor"] == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_no_watermarks_passes_none(self) -> None:
+        """Without watermarks, params contain None for watermark fields."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        connector = AsyncMock()
+        connection = _make_connection()
+        descriptors = await strategy.plan(session, connection, connector)
+        by_type = {d.params["data_type"]: d for d in descriptors}
+        assert by_type["recently_played"].params.get("last_played_at") is None
+        assert by_type["saved_tracks"].params.get("last_saved_at") is None
+        assert by_type["followed_artists"].params.get("after_cursor") is None
+
+    @pytest.mark.asyncio
+    async def test_incremental_description(self) -> None:
+        """Descriptions mention 'new' for incremental sync."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        connector = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "recently_played": {"last_played_at": "2026-04-05T12:00:00Z"}
+            }
+        )
+        descriptors = await strategy.plan(session, connection, connector)
+        by_type = {d.params["data_type"]: d for d in descriptors}
+        assert "new" in by_type["recently_played"].description.lower()
+        # followed_artists and saved_tracks have no watermark,
+        # so keep original description
+        assert (
+            by_type["followed_artists"].description == "Fetching your followed artists"
+        )
+        assert by_type["saved_tracks"].description == "Fetching your saved tracks"
 
     def test_concurrency_is_sequential(self) -> None:
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
