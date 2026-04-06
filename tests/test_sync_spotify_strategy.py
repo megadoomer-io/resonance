@@ -177,7 +177,7 @@ class TestSpotifyExecute:
                 sync_spotify_module,
                 "_sync_followed_artists",
                 new_callable=AsyncMock,
-                return_value=(2, 1),
+                return_value=(2, 1, {"after_cursor": "abc"}),
             ) as mock_sync,
         ):
             result = await strategy.execute(session, task, connector)
@@ -185,6 +185,7 @@ class TestSpotifyExecute:
         mock_sync.assert_awaited_once()
         assert result["items_created"] == 2
         assert result["items_updated"] == 1
+        assert result["watermark"] == {"after_cursor": "abc"}
 
     @pytest.mark.asyncio
     async def test_unknown_data_type_returns_zero_counts(self) -> None:
@@ -204,6 +205,7 @@ class TestSpotifyExecute:
 
         assert result["items_created"] == 0
         assert result["items_updated"] == 0
+        assert result["watermark"] == {}
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises_defer_request(self) -> None:
@@ -233,6 +235,340 @@ class TestSpotifyExecute:
 
         assert exc_info.value.retry_after == 300.0
         assert exc_info.value.resume_params["data_type"] == "followed_artists"
+
+
+class TestSpotifyWatermarkOutput:
+    """Tests for watermark values in execute() results."""
+
+    @pytest.mark.asyncio
+    async def test_followed_artists_watermark(self) -> None:
+        """followed_artists returns after_cursor in watermark."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "followed_artists"})
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+
+        with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
+            patch.object(
+                sync_spotify_module,
+                "_sync_followed_artists",
+                new_callable=AsyncMock,
+                return_value=(3, 0, {"after_cursor": "artist-xyz"}),
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["watermark"] == {"after_cursor": "artist-xyz"}
+
+    @pytest.mark.asyncio
+    async def test_saved_tracks_watermark(self) -> None:
+        """saved_tracks returns last_saved_at in watermark."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "saved_tracks"})
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+
+        with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
+            patch.object(
+                sync_spotify_module,
+                "_sync_saved_tracks",
+                new_callable=AsyncMock,
+                return_value=(10, 5, {"last_saved_at": "2026-04-06T12:00:00Z"}),
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["watermark"] == {"last_saved_at": "2026-04-06T12:00:00Z"}
+
+    @pytest.mark.asyncio
+    async def test_recently_played_watermark(self) -> None:
+        """recently_played returns last_played_at in watermark."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "recently_played"})
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+
+        with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
+            patch.object(
+                sync_spotify_module,
+                "_sync_recently_played",
+                new_callable=AsyncMock,
+                return_value=(7, {"last_played_at": "2026-04-06T10:00:00Z"}),
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["watermark"] == {"last_played_at": "2026-04-06T10:00:00Z"}
+
+    @pytest.mark.asyncio
+    async def test_empty_watermark_when_no_data(self) -> None:
+        """When helper returns empty watermark, result contains empty dict."""
+        strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "followed_artists"})
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+
+        with (
+            patch.object(
+                strategy,
+                "_get_access_token",
+                new_callable=AsyncMock,
+                return_value="tok",
+            ),
+            patch.object(
+                sync_spotify_module,
+                "_sync_followed_artists",
+                new_callable=AsyncMock,
+                return_value=(0, 0, {}),
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["watermark"] == {}
+
+
+class TestSavedTracksStopEarly:
+    """Tests for saved_tracks stop-early and fast-finish behavior."""
+
+    @pytest.mark.asyncio
+    async def test_stop_early_when_all_duplicates(self) -> None:
+        """Pagination stops when all items on a page are duplicates."""
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "saved_tracks"})
+
+        # Create two pages: first has some new, second is all duplicates
+        track1 = connector_base.TrackData(
+            external_id="t1",
+            title="Track 1",
+            artist_external_id="a1",
+            artist_name="Artist 1",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        track2 = connector_base.TrackData(
+            external_id="t2",
+            title="Track 2",
+            artist_external_id="a1",
+            artist_name="Artist 1",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        page1 = spotify_module.SavedTrackPage(
+            items=[
+                spotify_module.SavedTrackItem(
+                    track=track1, added_at="2026-04-06T12:00:00Z"
+                ),
+            ],
+            total=2,
+            next_url="https://api.spotify.com/v1/me/tracks?offset=1",
+        )
+        page2 = spotify_module.SavedTrackPage(
+            items=[
+                spotify_module.SavedTrackItem(
+                    track=track2, added_at="2026-04-05T12:00:00Z"
+                ),
+            ],
+            total=2,
+            next_url=None,
+        )
+
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+        connector.get_saved_tracks_page = AsyncMock(side_effect=[page1, page2])
+
+        # Mock existing count to not trigger fast-finish (different from total)
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 0
+        session.execute = AsyncMock(return_value=count_result)
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch(
+                "resonance.sync.runner._upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "resonance.sync.runner._upsert_track",
+                new_callable=AsyncMock,
+                # Page 1: track is new (True), Page 2: track is duplicate (False)
+                side_effect=[True, False],
+            ),
+            patch(
+                "resonance.sync.runner._upsert_user_track_relation",
+                new_callable=AsyncMock,
+            ),
+        ):
+            created, updated, watermark = await sync_spotify_module._sync_saved_tracks(
+                session, task, connector, "tok"
+            )
+
+        assert created == 1
+        assert updated == 1
+        assert watermark == {"last_saved_at": "2026-04-06T12:00:00Z"}
+        # Should have fetched 2 pages (stopped after page 2 because all duplicates)
+        assert connector.get_saved_tracks_page.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fast_finish_when_total_matches_existing(self) -> None:
+        """Fast-finish skips processing when total matches existing count."""
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "saved_tracks"})
+
+        track1 = connector_base.TrackData(
+            external_id="t1",
+            title="Track 1",
+            artist_external_id="a1",
+            artist_name="Artist 1",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        page1 = spotify_module.SavedTrackPage(
+            items=[
+                spotify_module.SavedTrackItem(
+                    track=track1, added_at="2026-04-06T12:00:00Z"
+                ),
+            ],
+            total=5,
+            next_url="https://api.spotify.com/v1/me/tracks?offset=1",
+        )
+
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+        connector.get_saved_tracks_page = AsyncMock(return_value=page1)
+
+        # Existing count matches total -> fast-finish
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 5
+        session.execute = AsyncMock(return_value=count_result)
+
+        created, updated, watermark = await sync_spotify_module._sync_saved_tracks(
+            session, task, connector, "tok"
+        )
+
+        assert created == 0
+        assert updated == 0
+        assert watermark == {"last_saved_at": "2026-04-06T12:00:00Z"}
+        # Only fetched one page (fast-finish)
+        assert connector.get_saved_tracks_page.await_count == 1
+        # Progress should be set to total
+        assert task.progress_total == 5
+        assert task.progress_current == 5
+
+    @pytest.mark.asyncio
+    async def test_processes_all_pages_when_no_duplicates(self) -> None:
+        """All pages are processed when tracks are new."""
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "saved_tracks"})
+
+        track1 = connector_base.TrackData(
+            external_id="t1",
+            title="Track 1",
+            artist_external_id="a1",
+            artist_name="Artist 1",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        track2 = connector_base.TrackData(
+            external_id="t2",
+            title="Track 2",
+            artist_external_id="a1",
+            artist_name="Artist 1",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        page1 = spotify_module.SavedTrackPage(
+            items=[
+                spotify_module.SavedTrackItem(
+                    track=track1, added_at="2026-04-06T12:00:00Z"
+                ),
+            ],
+            total=2,
+            next_url="https://api.spotify.com/v1/me/tracks?offset=1",
+        )
+        page2 = spotify_module.SavedTrackPage(
+            items=[
+                spotify_module.SavedTrackItem(
+                    track=track2, added_at="2026-04-05T12:00:00Z"
+                ),
+            ],
+            total=2,
+            next_url=None,
+        )
+
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+        connector.get_saved_tracks_page = AsyncMock(side_effect=[page1, page2])
+
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 0
+        session.execute = AsyncMock(return_value=count_result)
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch(
+                "resonance.sync.runner._upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "resonance.sync.runner._upsert_track",
+                new_callable=AsyncMock,
+                return_value=True,  # All tracks are new
+            ),
+            patch(
+                "resonance.sync.runner._upsert_user_track_relation",
+                new_callable=AsyncMock,
+            ),
+        ):
+            created, updated, _watermark = await sync_spotify_module._sync_saved_tracks(
+                session, task, connector, "tok"
+            )
+
+        assert created == 2
+        assert updated == 0
+        # Both pages fetched
+        assert connector.get_saved_tracks_page.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_page_stops_iteration(self) -> None:
+        """An empty page stops the pagination loop."""
+        session = AsyncMock()
+        task = _make_task(params={"data_type": "saved_tracks"})
+
+        page1 = spotify_module.SavedTrackPage(
+            items=[],
+            total=0,
+            next_url=None,
+        )
+
+        connector = MagicMock(spec=spotify_module.SpotifyConnector)
+        connector.get_saved_tracks_page = AsyncMock(return_value=page1)
+
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 5  # Different from total=0
+        session.execute = AsyncMock(return_value=count_result)
+
+        created, updated, watermark = await sync_spotify_module._sync_saved_tracks(
+            session, task, connector, "tok"
+        )
+
+        assert created == 0
+        assert updated == 0
+        assert watermark == {}
 
 
 class TestCastConnector:

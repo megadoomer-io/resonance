@@ -12,6 +12,7 @@ import resonance.connectors.base as connector_base
 import resonance.connectors.spotify as spotify_module
 import resonance.crypto as crypto_module
 import resonance.models.task as task_module
+import resonance.models.taste as taste_module
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.sync.runner as runner_module
@@ -135,18 +136,19 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
 
         items_created = 0
         items_updated = 0
+        watermark: dict[str, object] = {}
 
         try:
             if data_type == "followed_artists":
-                items_created, items_updated = await _sync_followed_artists(
+                items_created, items_updated, watermark = await _sync_followed_artists(
                     session, task, sp_connector, access_token
                 )
             elif data_type == "saved_tracks":
-                items_created, items_updated = await _sync_saved_tracks(
+                items_created, items_updated, watermark = await _sync_saved_tracks(
                     session, task, sp_connector, access_token
                 )
             elif data_type == "recently_played":
-                items_created = await _sync_recently_played(
+                items_created, watermark = await _sync_recently_played(
                     session, task, sp_connector, access_token
                 )
         except connector_base.RateLimitExceededError as exc:
@@ -163,6 +165,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         result: dict[str, object] = {
             "items_created": items_created,
             "items_updated": items_updated,
+            "watermark": watermark,
         }
         logger.info(
             "spotify_range_completed",
@@ -188,12 +191,15 @@ async def _sync_followed_artists(
     task: task_module.SyncTask,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, object]]:
     """Fetch followed artists and upsert into the database."""
-    artists = await connector.get_followed_artists(access_token)
+    after_cursor = task.params.get("after_cursor")
+    after = str(after_cursor) if after_cursor is not None else None
+    artists = await connector.get_followed_artists(access_token, after=after)
     logger.info("spotify_artists_fetched", count=len(artists))
     created = 0
     updated = 0
+    last_cursor: str | None = None
     for artist_data in artists:
         with session.no_autoflush:
             was_created = await runner_module._upsert_artist(session, artist_data)
@@ -205,7 +211,12 @@ async def _sync_followed_artists(
             await runner_module._upsert_user_artist_relation(
                 session, task.user_id, artist_data, task.service_connection_id
             )
-    return created, updated
+        if artist_data.external_id:
+            last_cursor = artist_data.external_id
+    watermark: dict[str, object] = {}
+    if last_cursor is not None:
+        watermark["after_cursor"] = last_cursor
+    return created, updated, watermark
 
 
 async def _sync_saved_tracks(
@@ -213,26 +224,70 @@ async def _sync_saved_tracks(
     task: task_module.SyncTask,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
-) -> tuple[int, int]:
-    """Fetch saved tracks and upsert into the database."""
-    tracks = await connector.get_saved_tracks(access_token)
-    logger.info("spotify_tracks_fetched", count=len(tracks))
+) -> tuple[int, int, dict[str, object]]:
+    """Fetch saved tracks page-by-page with stop-early and fast-finish."""
     created = 0
     updated = 0
-    for track_data in tracks:
-        with session.no_autoflush:
-            await runner_module._upsert_artist_from_track(session, track_data)
-            await session.flush()
-            was_created = await runner_module._upsert_track(session, track_data)
-            await session.flush()
-            if was_created:
-                created += 1
-            else:
-                updated += 1
-            await runner_module._upsert_user_track_relation(
-                session, task.user_id, track_data, task.service_connection_id
+    watermark: dict[str, object] = {}
+    next_url: str | None = None
+    first_page = True
+
+    while True:
+        page = await connector.get_saved_tracks_page(access_token, url=next_url)
+
+        if first_page and page.items:
+            watermark["last_saved_at"] = page.items[0].added_at
+
+        if first_page:
+            first_page = False
+            # Fast-finish check: if total matches existing count, skip sync
+            existing_count_result = await session.execute(
+                sa.select(sa.func.count()).where(
+                    taste_module.UserTrackRelation.source_connection_id
+                    == task.service_connection_id,
+                    taste_module.UserTrackRelation.relation_type
+                    == types_module.TrackRelationType.LIKE,
+                )
             )
-    return created, updated
+            existing_count = existing_count_result.scalar_one()
+            if page.total == existing_count:
+                logger.info("saved_tracks_fast_finish", total=page.total)
+                task.progress_total = page.total
+                task.progress_current = page.total
+                return created, updated, watermark
+            task.progress_total = page.total
+
+        if not page.items:
+            break
+
+        page_all_duplicates = True
+        for item in page.items:
+            with session.no_autoflush:
+                await runner_module._upsert_artist_from_track(session, item.track)
+                await session.flush()
+                was_created = await runner_module._upsert_track(session, item.track)
+                await session.flush()
+                if was_created:
+                    created += 1
+                    page_all_duplicates = False
+                else:
+                    updated += 1
+                await runner_module._upsert_user_track_relation(
+                    session, task.user_id, item.track, task.service_connection_id
+                )
+
+        task.progress_current = created + updated
+        await session.commit()
+
+        if page_all_duplicates:
+            logger.info("saved_tracks_stop_early", created=created, updated=updated)
+            break
+
+        next_url = page.next_url
+        if next_url is None:
+            break
+
+    return created, updated, watermark
 
 
 async def _sync_recently_played(
@@ -240,11 +295,16 @@ async def _sync_recently_played(
     task: task_module.SyncTask,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
-) -> int:
+) -> tuple[int, dict[str, object]]:
     """Fetch recently played tracks and upsert into the database."""
-    played_items = await connector.get_recently_played(access_token)
+    after_param = task.params.get("last_played_at")
+    after = str(after_param) if after_param is not None else None
+    played_items = await connector.get_recently_played(access_token, after=after)
     logger.info("spotify_recent_fetched", count=len(played_items))
     created = 0
+    watermark: dict[str, object] = {}
+    if played_items:
+        watermark["last_played_at"] = played_items[0].played_at
     for played_item in played_items:
         with session.no_autoflush:
             await runner_module._upsert_artist_from_track(session, played_item.track)
@@ -255,4 +315,4 @@ async def _sync_recently_played(
                 session, task.user_id, played_item.track, played_item.played_at
             )
         created += 1
-    return created
+    return created, watermark
