@@ -123,7 +123,9 @@ async def trigger_sync(
 
     # Enqueue arq job for background processing
     arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job("plan_sync", str(task.id))
+    await arq_redis.enqueue_job(
+        "plan_sync", str(task.id), _job_id=f"plan_sync:{task.id}"
+    )
 
     return {"status": "started", "sync_task_id": str(task.id)}
 

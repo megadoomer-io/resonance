@@ -141,11 +141,19 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Enqueue based on concurrency policy
             if strategy.concurrency == "parallel":
                 for child in children:
-                    await arq_redis.enqueue_job("sync_range", str(child.id))
+                    await arq_redis.enqueue_job(
+                        "sync_range",
+                        str(child.id),
+                        _job_id=f"sync_range:{child.id}",
+                    )
                     log.info("child_enqueued", child_id=str(child.id))
             else:
                 # Sequential: enqueue only the first
-                await arq_redis.enqueue_job("sync_range", str(children[0].id))
+                await arq_redis.enqueue_job(
+                    "sync_range",
+                    str(children[0].id),
+                    _job_id=f"sync_range:{children[0].id}",
+                )
                 log.info(
                     "child_enqueued",
                     child_id=str(children[0].id),
@@ -247,6 +255,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await arq_redis_defer.enqueue_job(
                     "sync_range",
                     str(task.id),
+                    _job_id=f"sync_range:{task.id}",
                     _defer_by=datetime.timedelta(seconds=defer.retry_after),
                 )
                 log.info(
@@ -332,7 +341,11 @@ async def _check_parent_completion(
         )
         next_pending = next_pending_result.scalar_one_or_none()
         if next_pending is not None:
-            await arq_redis.enqueue_job("sync_range", str(next_pending.id))
+            await arq_redis.enqueue_job(
+                "sync_range",
+                str(next_pending.id),
+                _job_id=f"sync_range:{next_pending.id}",
+            )
             log.info(
                 "next_sibling_enqueued",
                 next_task_id=str(next_pending.id),
@@ -565,9 +578,17 @@ async def _reenqueue_orphaned_tasks(
                         task_id=str(task.id),
                     )
                     continue
-                await arq_redis.enqueue_job("plan_sync", str(task.id))
+                await arq_redis.enqueue_job(
+                    "plan_sync",
+                    str(task.id),
+                    _job_id=f"plan_sync:{task.id}",
+                )
             else:
-                await arq_redis.enqueue_job("sync_range", str(task.id))
+                await arq_redis.enqueue_job(
+                    "sync_range",
+                    str(task.id),
+                    _job_id=f"sync_range:{task.id}",
+                )
             enqueued += 1
 
         if enqueued:

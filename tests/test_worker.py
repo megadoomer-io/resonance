@@ -147,7 +147,9 @@ class TestCheckParentCompletion:
         await worker_module._check_parent_completion(session, task, arq_redis, log)
 
         # Should enqueue the next sibling, not update parent
-        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(next_task.id))
+        arq_redis.enqueue_job.assert_called_once_with(
+            "sync_range", str(next_task.id), _job_id=f"sync_range:{next_task.id}"
+        )
         session.commit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -652,6 +654,7 @@ class TestSyncRangeDeferral:
         arq_redis.enqueue_job.assert_any_call(
             "sync_range",
             str(task_id),
+            _job_id=f"sync_range:{task_id}",
             _defer_by=datetime.timedelta(seconds=120.0),
         )
 
@@ -1056,7 +1059,9 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with("plan_sync", str(task.id))
+        arq_redis.enqueue_job.assert_called_once_with(
+            "plan_sync", str(task.id), _job_id=f"plan_sync:{task.id}"
+        )
 
     @pytest.mark.asyncio
     async def test_reenqueues_pending_time_range(self) -> None:
@@ -1101,7 +1106,9 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+        arq_redis.enqueue_job.assert_called_once_with(
+            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+        )
 
     @pytest.mark.asyncio
     async def test_reenqueues_expired_deferred_task(self) -> None:
@@ -1147,7 +1154,9 @@ class TestReenqueueOrphanedTasks:
         )
 
         assert task.status == types_module.SyncStatus.PENDING
-        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+        arq_redis.enqueue_job.assert_called_once_with(
+            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+        )
         session.commit.assert_called()
 
     @pytest.mark.asyncio
@@ -1255,7 +1264,9 @@ class TestReenqueueOrphanedTasks:
         assert task.status == types_module.SyncStatus.PENDING
         assert task.started_at is None
         # Should be re-enqueued as sync_range (TIME_RANGE task)
-        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+        arq_redis.enqueue_job.assert_called_once_with(
+            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+        )
         session.commit.assert_called()
 
     @pytest.mark.asyncio
