@@ -26,4 +26,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8000
 USER nobody
 
-CMD ["uvicorn", "resonance.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "resonance.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "30"]
