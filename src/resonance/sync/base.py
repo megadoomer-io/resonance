@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import threading
 from typing import TYPE_CHECKING, Any, Literal
 
 import pydantic
@@ -26,6 +27,9 @@ class SyncTaskDescriptor(pydantic.BaseModel):
     description: str = ""
 
 
+shutdown_requested = threading.Event()
+
+
 class DeferRequest(Exception):  # noqa: N818 — not an error; a control-flow signal
     """Raised by execute() when a rate limit exceeds acceptable wait time."""
 
@@ -33,6 +37,14 @@ class DeferRequest(Exception):  # noqa: N818 — not an error; a control-flow si
         self.retry_after = retry_after
         self.resume_params = resume_params
         super().__init__(f"Sync deferred for {retry_after:.0f}s")
+
+
+class ShutdownRequest(Exception):  # noqa: N818 — not an error; a control-flow signal
+    """Raised by execute() when a graceful shutdown has been requested."""
+
+    def __init__(self, resume_params: dict[str, Any]) -> None:
+        self.resume_params = resume_params
+        super().__init__("Sync interrupted by shutdown request")
 
 
 class SyncStrategy(abc.ABC):

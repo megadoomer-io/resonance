@@ -86,6 +86,61 @@ class TestDeferRequest:
 
 
 # ---------------------------------------------------------------------------
+# ShutdownRequest
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownRequest:
+    """Tests for the ShutdownRequest exception."""
+
+    def test_is_exception(self) -> None:
+        sr = sync_base.ShutdownRequest(resume_params={"offset": 50})
+        assert isinstance(sr, Exception)
+
+    def test_stores_resume_params(self) -> None:
+        sr = sync_base.ShutdownRequest(resume_params={"offset": 50, "page": 2})
+        assert sr.resume_params == {"offset": 50, "page": 2}
+
+    def test_empty_resume_params(self) -> None:
+        sr = sync_base.ShutdownRequest(resume_params={})
+        assert sr.resume_params == {}
+
+    def test_can_be_raised_and_caught(self) -> None:
+        with pytest.raises(sync_base.ShutdownRequest) as exc_info:
+            raise sync_base.ShutdownRequest(resume_params={"page": 5})
+        assert exc_info.value.resume_params == {"page": 5}
+
+
+# ---------------------------------------------------------------------------
+# shutdown_requested event
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownRequestedEvent:
+    """Tests for the module-level shutdown_requested threading.Event."""
+
+    def test_is_threading_event(self) -> None:
+        import threading
+
+        assert isinstance(sync_base.shutdown_requested, threading.Event)
+
+    def test_not_set_by_default(self) -> None:
+        # Ensure clean state
+        sync_base.shutdown_requested.clear()
+        assert not sync_base.shutdown_requested.is_set()
+
+    def test_can_be_set_and_cleared(self) -> None:
+        sync_base.shutdown_requested.clear()
+        assert not sync_base.shutdown_requested.is_set()
+
+        sync_base.shutdown_requested.set()
+        assert sync_base.shutdown_requested.is_set()
+
+        sync_base.shutdown_requested.clear()
+        assert not sync_base.shutdown_requested.is_set()
+
+
+# ---------------------------------------------------------------------------
 # SyncStrategy
 # ---------------------------------------------------------------------------
 
