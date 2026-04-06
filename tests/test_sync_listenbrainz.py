@@ -25,12 +25,14 @@ def _make_connection(
     *,
     connection_id: uuid.UUID | None = None,
     external_user_id: str = "testuser",
+    sync_watermark: dict[str, dict[str, object]] | None = None,
 ) -> MagicMock:
     """Create a mock ServiceConnection."""
     conn = MagicMock()
     conn.id = connection_id or uuid.uuid4()
     conn.external_user_id = external_user_id
     conn.service_type = types_module.ServiceType.LISTENBRAINZ
+    conn.sync_watermark = sync_watermark or {}
     return conn
 
 
@@ -106,11 +108,6 @@ class TestPlan:
         connection = _make_connection()
         connector = _make_lb_connector()
 
-        # No watermark: mock query returning no previous task
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        session.execute = AsyncMock(return_value=mock_result)
-
         descriptors = await strategy.plan(session, connection, connector)
 
         assert len(descriptors) == 1
@@ -125,39 +122,27 @@ class TestPlan:
         """Uses watermark for incremental sync (min_ts set)."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()
         session = AsyncMock()
-        connection = _make_connection()
+        connection = _make_connection(
+            sync_watermark={"listens": {"last_listened_at": 1700000000}},
+        )
         connector = _make_lb_connector()
-
-        # Simulate a previous completed task with last_listened_at
-        watermark_ts = 1700000000
-        last_task = MagicMock()
-        last_task.result = {"last_listened_at": watermark_ts}
-
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = last_task
-        session.execute = AsyncMock(return_value=mock_result)
 
         descriptors = await strategy.plan(session, connection, connector)
 
         assert len(descriptors) == 1
         desc = descriptors[0]
-        assert desc.params["min_ts"] == watermark_ts
+        assert desc.params["min_ts"] == 1700000000
 
     @pytest.mark.asyncio
     async def test_incremental_description_says_since(self) -> None:
         """Description mentions 'since' for incremental sync."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()
         session = AsyncMock()
-        connection = _make_connection()
-        connector = _make_lb_connector()
-
         watermark_ts = 1700000000
-        last_task = MagicMock()
-        last_task.result = {"last_listened_at": watermark_ts}
-
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = last_task
-        session.execute = AsyncMock(return_value=mock_result)
+        connection = _make_connection(
+            sync_watermark={"listens": {"last_listened_at": watermark_ts}},
+        )
+        connector = _make_lb_connector()
 
         descriptors = await strategy.plan(session, connection, connector)
 
@@ -179,10 +164,6 @@ class TestPlan:
         connection = _make_connection()
         connector = _make_lb_connector()
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        session.execute = AsyncMock(return_value=mock_result)
-
         descriptors = await strategy.plan(session, connection, connector)
 
         assert descriptors[0].description == "Syncing listening history"
@@ -195,10 +176,6 @@ class TestPlan:
         connection = _make_connection()
         connector = _make_lb_connector()
         connector.get_listen_count = AsyncMock(side_effect=httpx.HTTPError("API error"))
-
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        session.execute = AsyncMock(return_value=mock_result)
 
         descriptors = await strategy.plan(session, connection, connector)
 
@@ -441,49 +418,6 @@ class TestExecute:
         assert result["last_listened_at"] == 1700000100
         # items_created should include both phases: 2 from phase 1 + 1 from phase 2
         assert result["items_created"] == 3
-
-
-# ---------------------------------------------------------------------------
-# _get_watermark tests
-# ---------------------------------------------------------------------------
-
-
-class TestGetWatermark:
-    """Tests for the _get_watermark helper."""
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_no_tasks(self) -> None:
-        session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await lb_sync_module._get_watermark(session, uuid.uuid4())
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_watermark_from_result(self) -> None:
-        session = AsyncMock()
-        last_task = MagicMock()
-        last_task.result = {"last_listened_at": 1700000000}
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = last_task
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await lb_sync_module._get_watermark(session, uuid.uuid4())
-        assert result == 1700000000
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_result_has_no_watermark(self) -> None:
-        session = AsyncMock()
-        last_task = MagicMock()
-        last_task.result = {"items_created": 42}
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = last_task
-        session.execute = AsyncMock(return_value=mock_result)
-
-        result = await lb_sync_module._get_watermark(session, uuid.uuid4())
-        assert result is None
 
 
 # ---------------------------------------------------------------------------

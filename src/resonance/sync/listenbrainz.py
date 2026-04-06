@@ -6,8 +6,6 @@ import datetime
 from typing import TYPE_CHECKING
 
 import httpx
-import sqlalchemy as sa
-import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
 import resonance.connectors.base as connector_base
@@ -18,7 +16,7 @@ import resonance.sync.runner as runner_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
-    import uuid
+    import sqlalchemy.ext.asyncio as sa_async
 
     import resonance.models.user as user_models
 
@@ -58,11 +56,15 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         progress_total: int | None = None
         try:
             progress_total = await lb_connector.get_listen_count(username)
-        except httpx.HTTPError, connector_base.RateLimitExceededError:
+        except (httpx.HTTPError, connector_base.RateLimitExceededError):  # fmt: skip
             logger.warning("could_not_fetch_listen_count", username=username)
 
-        # Check for watermark (incremental sync)
-        watermark = await _get_watermark(session, connection.id)
+        # Read watermark from connection
+        listens_watermark = connection.sync_watermark.get("listens", {})
+        watermark: int | None = None
+        raw = listens_watermark.get("last_listened_at")
+        if raw is not None:
+            watermark = int(str(raw))
 
         if watermark is not None:
             listened_at_dt = datetime.datetime.fromtimestamp(watermark, tz=datetime.UTC)
@@ -215,40 +217,3 @@ def _cast_connector(
         msg = f"Expected ListenBrainzConnector, got {type(connector).__name__}"
         raise TypeError(msg)
     return connector
-
-
-async def _get_watermark(
-    session: sa_async.AsyncSession,
-    connection_id: uuid.UUID,
-) -> int | None:
-    """Find the most recent completed TIME_RANGE task's last_listened_at.
-
-    Used for incremental ListenBrainz sync -- only fetches listens newer
-    than the watermark.
-
-    Args:
-        session: Active database session.
-        connection_id: The service connection ID.
-
-    Returns:
-        Unix timestamp (int) of the watermark, or None for full sync.
-    """
-    result = await session.execute(
-        sa.select(task_module.SyncTask)
-        .where(
-            task_module.SyncTask.service_connection_id == connection_id,
-            task_module.SyncTask.task_type == types_module.SyncTaskType.TIME_RANGE,
-            task_module.SyncTask.status == types_module.SyncStatus.COMPLETED,
-        )
-        .order_by(task_module.SyncTask.completed_at.desc())
-        .limit(1)
-    )
-    last_task = result.scalar_one_or_none()
-    if last_task is None:
-        return None
-
-    task_result = last_task.result or {}
-    watermark = task_result.get("last_listened_at")
-    if watermark is not None:
-        return int(str(watermark))
-    return None
