@@ -205,6 +205,57 @@ class TestGetFollowedArtists:
         assert result[1].name == "Artist Two"
 
     @pytest.mark.anyio()
+    async def test_passes_after_param_when_provided(self) -> None:
+        api_response = {
+            "artists": {
+                "items": [{"id": "art2", "name": "Artist Two"}],
+                "cursors": {"after": None},
+                "total": 1,
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "after=cursor-start" in str(request.url)
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_followed_artists(
+            access_token="token", after="cursor-start"
+        )
+
+        assert len(result) == 1
+        assert result[0].external_id == "art2"
+
+    @pytest.mark.anyio()
+    async def test_works_without_after_param(self) -> None:
+        api_response = {
+            "artists": {
+                "items": [{"id": "art1", "name": "Artist One"}],
+                "cursors": {"after": None},
+                "total": 1,
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "after=" not in str(request.url)
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_followed_artists(access_token="token")
+
+        assert len(result) == 1
+
+    @pytest.mark.anyio()
     async def test_paginates_through_results(self) -> None:
         page1 = {
             "artists": {
@@ -338,6 +389,182 @@ class TestGetRecentlyPlayed:
         assert result[1].track.external_id == "track2"
         assert result[1].played_at == "2024-01-15T09:15:00.000Z"
 
+    @pytest.mark.anyio()
+    async def test_passes_after_param_when_provided(self) -> None:
+        api_response = {
+            "items": [
+                {
+                    "track": {
+                        "id": "track1",
+                        "name": "Song One",
+                        "artists": [{"id": "art1", "name": "Artist One"}],
+                    },
+                    "played_at": "2024-01-15T10:30:00.000Z",
+                },
+            ],
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "after=1705312200000" in str(request.url)
+            assert "limit=50" in str(request.url)
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_recently_played(
+            access_token="token", after="1705312200000"
+        )
+
+        assert len(result) == 1
+        assert result[0].track.external_id == "track1"
+
+    @pytest.mark.anyio()
+    async def test_works_without_after_param(self) -> None:
+        api_response = {
+            "items": [
+                {
+                    "track": {
+                        "id": "track1",
+                        "name": "Song One",
+                        "artists": [{"id": "art1", "name": "Artist One"}],
+                    },
+                    "played_at": "2024-01-15T10:30:00.000Z",
+                },
+            ],
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "after=" not in str(request.url)
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_recently_played(access_token="token")
+
+        assert len(result) == 1
+
+
+class TestGetSavedTracksPage:
+    """Tests for get_saved_tracks_page."""
+
+    @pytest.mark.anyio()
+    async def test_returns_saved_track_page(self) -> None:
+        api_response = {
+            "items": [
+                {
+                    "track": {
+                        "id": "track1",
+                        "name": "Song One",
+                        "artists": [{"id": "art1", "name": "Artist One"}],
+                    },
+                    "added_at": "2024-01-10T08:00:00Z",
+                },
+                {
+                    "track": {
+                        "id": "track2",
+                        "name": "Song Two",
+                        "artists": [{"id": "art2", "name": "Artist Two"}],
+                    },
+                    "added_at": "2024-01-11T09:00:00Z",
+                },
+            ],
+            "total": 100,
+            "next": "https://api.spotify.com/v1/me/tracks?offset=50&limit=50",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/me/tracks"
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_saved_tracks_page(access_token="token")
+
+        assert isinstance(result, spotify_module.SavedTrackPage)
+        assert result.total == 100
+        assert (
+            result.next_url == "https://api.spotify.com/v1/me/tracks?offset=50&limit=50"
+        )
+        assert len(result.items) == 2
+        assert isinstance(result.items[0], spotify_module.SavedTrackItem)
+        assert result.items[0].track.external_id == "track1"
+        assert result.items[0].track.title == "Song One"
+        assert result.items[0].added_at == "2024-01-10T08:00:00Z"
+        assert result.items[1].track.external_id == "track2"
+        assert result.items[1].added_at == "2024-01-11T09:00:00Z"
+
+    @pytest.mark.anyio()
+    async def test_accepts_url_parameter_for_pagination(self) -> None:
+        api_response = {
+            "items": [
+                {
+                    "track": {
+                        "id": "track3",
+                        "name": "Song Three",
+                        "artists": [{"id": "art3", "name": "Artist Three"}],
+                    },
+                    "added_at": "2024-01-12T10:00:00Z",
+                },
+            ],
+            "total": 100,
+            "next": None,
+        }
+        custom_url = "https://api.spotify.com/v1/me/tracks?offset=50&limit=50"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "offset=50" in str(request.url)
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_saved_tracks_page(
+            access_token="token", url=custom_url
+        )
+
+        assert isinstance(result, spotify_module.SavedTrackPage)
+        assert result.next_url is None
+        assert len(result.items) == 1
+        assert result.items[0].track.external_id == "track3"
+
+    @pytest.mark.anyio()
+    async def test_last_page_has_no_next_url(self) -> None:
+        api_response = {
+            "items": [],
+            "total": 0,
+            "next": None,
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=api_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = spotify_module.SpotifyConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.get_saved_tracks_page(access_token="token")
+
+        assert result.next_url is None
+        assert result.items == []
+        assert result.total == 0
+
 
 class TestPlayedTrackItem:
     """Tests for PlayedTrackItem model."""
@@ -355,3 +582,55 @@ class TestPlayedTrackItem:
         )
         assert item.track.external_id == "t1"
         assert item.played_at == "2024-01-15T10:30:00.000Z"
+
+
+class TestSavedTrackItem:
+    """Tests for SavedTrackItem model."""
+
+    def test_creation(self) -> None:
+        track = base_module.TrackData(
+            external_id="t1",
+            title="Song",
+            artist_external_id="a1",
+            artist_name="Artist",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        item = spotify_module.SavedTrackItem(
+            track=track, added_at="2024-01-10T08:00:00Z"
+        )
+        assert item.track.external_id == "t1"
+        assert item.added_at == "2024-01-10T08:00:00Z"
+
+
+class TestSavedTrackPage:
+    """Tests for SavedTrackPage model."""
+
+    def test_creation_with_next_url(self) -> None:
+        track = base_module.TrackData(
+            external_id="t1",
+            title="Song",
+            artist_external_id="a1",
+            artist_name="Artist",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        item = spotify_module.SavedTrackItem(
+            track=track, added_at="2024-01-10T08:00:00Z"
+        )
+        page = spotify_module.SavedTrackPage(
+            items=[item],
+            total=50,
+            next_url="https://api.spotify.com/v1/me/tracks?offset=50",
+        )
+        assert len(page.items) == 1
+        assert page.total == 50
+        assert page.next_url == "https://api.spotify.com/v1/me/tracks?offset=50"
+
+    def test_creation_with_no_next_url(self) -> None:
+        page = spotify_module.SavedTrackPage(
+            items=[],
+            total=0,
+            next_url=None,
+        )
+        assert page.items == []
+        assert page.total == 0
+        assert page.next_url is None

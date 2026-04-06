@@ -32,6 +32,21 @@ class PlayedTrackItem(pydantic.BaseModel):
     played_at: str
 
 
+class SavedTrackItem(pydantic.BaseModel):
+    """A saved track with its added_at timestamp."""
+
+    track: base_module.TrackData
+    added_at: str
+
+
+class SavedTrackPage(pydantic.BaseModel):
+    """A page of saved tracks with total count."""
+
+    items: list[SavedTrackItem]
+    total: int
+    next_url: str | None
+
+
 class SpotifyConnector(base_module.BaseConnector):
     """Connector for the Spotify Web API."""
 
@@ -116,12 +131,11 @@ class SpotifyConnector(base_module.BaseConnector):
         return {"id": data["id"], "display_name": data["display_name"]}
 
     async def get_followed_artists(
-        self, access_token: str
+        self, access_token: str, *, after: str | None = None
     ) -> list[base_module.ArtistData]:
         """Paginate through followed artists."""
         logger.info("Fetching followed artists")
         artists: list[base_module.ArtistData] = []
-        after: str | None = None
         headers = {"Authorization": f"Bearer {access_token}"}
 
         while True:
@@ -188,14 +202,63 @@ class SpotifyConnector(base_module.BaseConnector):
         logger.info("Fetched %d saved tracks", len(tracks))
         return tracks
 
-    async def get_recently_played(self, access_token: str) -> list[PlayedTrackItem]:
-        """Get recently played tracks."""
+    async def get_saved_tracks_page(
+        self,
+        access_token: str,
+        *,
+        url: str | None = None,
+        limit: int = 50,
+    ) -> SavedTrackPage:
+        """Fetch one page of saved tracks."""
+        target_url = url or f"{SPOTIFY_API_BASE}/me/tracks"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        params: dict[str, str | int] | None = (
+            None if url is not None else {"limit": limit}
+        )
+        response = await self._request(
+            "GET",
+            target_url,
+            headers=headers,
+            params=params,
+        )
+        data = response.json()
+
+        items: list[SavedTrackItem] = []
+        for item in data["items"]:
+            track = item["track"]
+            primary_artist = track["artists"][0]
+            items.append(
+                SavedTrackItem(
+                    track=base_module.TrackData(
+                        external_id=track["id"],
+                        title=track["name"],
+                        artist_external_id=primary_artist["id"],
+                        artist_name=primary_artist["name"],
+                        service=types_module.ServiceType.SPOTIFY,
+                    ),
+                    added_at=item["added_at"],
+                )
+            )
+
+        return SavedTrackPage(
+            items=items,
+            total=data["total"],
+            next_url=data.get("next"),
+        )
+
+    async def get_recently_played(
+        self, access_token: str, *, after: str | None = None
+    ) -> list[PlayedTrackItem]:
+        """Get recently played tracks, optionally only after a timestamp."""
         logger.info("Fetching recently played tracks")
+        params: dict[str, str | int] = {"limit": 50}
+        if after is not None:
+            params["after"] = after
         response = await self._request(
             "GET",
             f"{SPOTIFY_API_BASE}/me/player/recently-played",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"limit": 50},
+            params=params,
         )
         data = response.json()
 
