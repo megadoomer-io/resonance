@@ -7,6 +7,7 @@ import uuid  # noqa: TC003 - runtime import required for FastAPI dependency reso
 from typing import Annotated, Any
 
 import fastapi
+import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
@@ -19,6 +20,15 @@ import resonance.types as types_module
 logger = structlog.get_logger()
 
 router = fastapi.APIRouter(prefix="/sync", tags=["sync"])
+
+
+class SyncRequest(pydantic.BaseModel):
+    """Optional body for POST /sync/{service}."""
+
+    sync_from: str | None = None
+    """ISO 8601 date/datetime or unix timestamp. Overrides the watermark
+    so the sync fetches data from this point forward. If set to the
+    empty string or "full", clears all watermarks for a full re-sync."""
 
 
 def _parse_service_type(service: str) -> types_module.ServiceType:
@@ -37,14 +47,20 @@ async def trigger_sync(
     request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    body: SyncRequest | None = None,
 ) -> dict[str, str]:
-    """Trigger a full data sync for the given service.
+    """Trigger a data sync for the given service.
+
+    Optionally accepts a JSON body with ``sync_from`` to override the
+    stored watermark.  Pass ``"full"`` or ``""`` to clear all watermarks
+    and force a complete re-sync.
 
     Args:
         service: The service name (e.g., "spotify").
         request: The FastAPI request object.
         user_id: The authenticated user's ID.
         db: The async database session.
+        body: Optional sync request body with watermark override.
 
     Returns:
         A dict with status and sync_task_id.
@@ -91,6 +107,10 @@ async def trigger_sync(
             detail="A sync is already running for this service",
         )
 
+    # Handle watermark override
+    if body is not None and body.sync_from is not None:
+        _apply_watermark_override(connection, body.sync_from)
+
     # Create SyncTask
     task = task_models.SyncTask(
         user_id=user_id,
@@ -106,6 +126,63 @@ async def trigger_sync(
     await arq_redis.enqueue_job("plan_sync", str(task.id))
 
     return {"status": "started", "sync_task_id": str(task.id)}
+
+
+def _apply_watermark_override(
+    connection: user_models.ServiceConnection, sync_from: str
+) -> None:
+    """Clear or override the connection's sync watermark.
+
+    Args:
+        connection: The service connection to modify.
+        sync_from: Either "full"/"" for a complete reset, or an ISO 8601
+            date/datetime/unix timestamp to set as the new watermark.
+    """
+    if sync_from in ("", "full"):
+        connection.sync_watermark = {}
+        logger.info(
+            "watermark_cleared",
+            connection_id=str(connection.id),
+        )
+        return
+
+    # Parse as unix timestamp or ISO 8601
+    watermark_ts: int | None = None
+    try:
+        watermark_ts = int(sync_from)
+    except ValueError:
+        try:
+            dt = datetime.datetime.fromisoformat(sync_from)
+            watermark_ts = int(dt.timestamp())
+        except ValueError:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail=f"Invalid sync_from value: {sync_from!r}. "
+                "Use ISO 8601 date, unix timestamp, or 'full'.",
+            ) from None
+
+    # Build service-appropriate watermark
+    if connection.service_type == types_module.ServiceType.LISTENBRAINZ:
+        connection.sync_watermark = {
+            "listens": {"last_listened_at": watermark_ts},
+        }
+    elif connection.service_type == types_module.ServiceType.SPOTIFY:
+        iso_str = datetime.datetime.fromtimestamp(
+            watermark_ts, tz=datetime.UTC
+        ).isoformat()
+        connection.sync_watermark = {
+            "recently_played": {"last_played_at": iso_str},
+            "saved_tracks": {"last_saved_at": iso_str},
+            # followed_artists intentionally omitted — always full-fetches
+        }
+    else:
+        connection.sync_watermark = {}
+
+    logger.info(
+        "watermark_overridden",
+        connection_id=str(connection.id),
+        sync_from=sync_from,
+    )
 
 
 @router.post("/cancel/{job_id}")

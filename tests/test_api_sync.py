@@ -327,6 +327,197 @@ class TestSyncTrigger:
         assert "already running" in response.json()["detail"].lower()
 
 
+class TestSyncWatermarkOverride:
+    """Tests for POST /api/v1/sync/{service} with sync_from body."""
+
+    async def test_full_resync_clears_watermark(self) -> None:
+        """sync_from='full' clears all watermarks."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.LISTENBRAINZ
+        fake_conn.sync_watermark = {"listens": {"last_listened_at": 1700000000}}
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post(
+                "/api/v1/sync/listenbrainz", json={"sync_from": "full"}
+            )
+
+        assert response.status_code == 200
+        assert fake_conn.sync_watermark == {}
+
+    async def test_empty_string_clears_watermark(self) -> None:
+        """sync_from='' clears all watermarks."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.sync_watermark = {
+            "saved_tracks": {"last_saved_at": "2026-04-05T12:00:00Z"}
+        }
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post("/api/v1/sync/spotify", json={"sync_from": ""})
+
+        assert response.status_code == 200
+        assert fake_conn.sync_watermark == {}
+
+    async def test_unix_timestamp_overrides_listenbrainz(self) -> None:
+        """Unix timestamp sets ListenBrainz watermark."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.LISTENBRAINZ
+        fake_conn.sync_watermark = {"listens": {"last_listened_at": 1700000000}}
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post(
+                "/api/v1/sync/listenbrainz", json={"sync_from": "1680000000"}
+            )
+
+        assert response.status_code == 200
+        assert fake_conn.sync_watermark == {"listens": {"last_listened_at": 1680000000}}
+
+    async def test_iso_date_overrides_spotify(self) -> None:
+        """ISO 8601 date sets Spotify watermarks."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.sync_watermark = {}
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post(
+                "/api/v1/sync/spotify",
+                json={"sync_from": "2025-01-01T00:00:00+00:00"},
+            )
+
+        assert response.status_code == 200
+        wm = fake_conn.sync_watermark
+        assert "recently_played" in wm
+        assert "saved_tracks" in wm
+        assert "followed_artists" not in wm  # always full-fetches
+
+    async def test_invalid_sync_from_returns_400(self) -> None:
+        """Invalid sync_from value returns 400."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.sync_watermark = {}
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post(
+                "/api/v1/sync/spotify", json={"sync_from": "not-a-date"}
+            )
+
+        assert response.status_code == 400
+        assert "Invalid sync_from" in response.json()["detail"]
+
+    async def test_no_body_is_normal_sync(self) -> None:
+        """POST without body triggers normal incremental sync."""
+        user_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+
+        fake_conn = MagicMock(spec=user_models.ServiceConnection)
+        fake_conn.id = conn_id
+        fake_conn.user_id = user_id
+        fake_conn.service_type = types_module.ServiceType.SPOTIFY
+        fake_conn.sync_watermark = {
+            "saved_tracks": {"last_saved_at": "2026-04-05T12:00:00Z"}
+        }
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(fake_conn), FakeScalarResult(None)]
+        )
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.post("/api/v1/sync/spotify")
+
+        assert response.status_code == 200
+        # Watermark should be unchanged
+        assert fake_conn.sync_watermark == {
+            "saved_tracks": {"last_saved_at": "2026-04-05T12:00:00Z"}
+        }
+
+
 class TestSyncStatus:
     """Tests for GET /api/v1/sync/status."""
 
