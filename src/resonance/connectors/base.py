@@ -148,6 +148,17 @@ class BaseConnector(abc.ABC):
                     )
                 await asyncio.sleep(interval)
 
+            # Check rolling window budget (safety net)
+            budget_wait = self._budget.check_window_budget()
+            if budget_wait > 0:
+                logger.warning(
+                    "request_budget_throttled",
+                    window_used=self._budget.window_used,
+                    window_ceiling=self._budget.window_ceiling,
+                    wait_seconds=round(budget_wait, 1),
+                )
+                await asyncio.sleep(budget_wait)
+
             try:
                 response = await self.http_client.request(method, url, **kwargs)
             except self._TRANSIENT_ERRORS as exc:
@@ -177,6 +188,15 @@ class BaseConnector(abc.ABC):
             # Reset transient counter on successful response (even if 429)
             transient_attempt = 0
             self._budget.update_from_headers(dict(response.headers))
+            self._budget.record_request()
+            window_used = self._budget.window_used
+            if window_used is not None:
+                logger.info(
+                    "request_budget_status",
+                    window_used=window_used,
+                    window_ceiling=self._budget.window_ceiling,
+                    window_seconds=self._budget.window_seconds,
+                )
 
             if response.status_code != 429:
                 response.raise_for_status()

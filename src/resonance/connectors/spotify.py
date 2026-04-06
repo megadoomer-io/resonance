@@ -65,7 +65,11 @@ class SpotifyConnector(base_module.BaseConnector):
         self._client_secret = settings.spotify_client_secret
         self._redirect_uri = settings.spotify_redirect_uri
         self._http_client = None
-        self._budget = ratelimit_module.RateLimitBudget(default_interval=0.2)
+        self._budget = ratelimit_module.RateLimitBudget(
+            default_interval=5.0,
+            window_seconds=30,
+            window_ceiling=10,
+        )
 
     def get_auth_url(self, state: str) -> str:
         """Build Spotify OAuth authorization URL."""

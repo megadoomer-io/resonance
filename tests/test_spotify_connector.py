@@ -45,6 +45,22 @@ class TestSpotifyConnectorProperties:
         assert isinstance(connector, base_module.BaseConnector)
 
 
+class TestSpotifyBudgetConfig:
+    """Tests for SpotifyConnector rate limit budget configuration."""
+
+    def test_default_interval_is_5_seconds(self) -> None:
+        connector = spotify_module.SpotifyConnector(settings=_make_settings())
+        assert connector._budget._default_interval == 5.0
+
+    def test_window_ceiling_is_10(self) -> None:
+        connector = spotify_module.SpotifyConnector(settings=_make_settings())
+        assert connector._budget.window_ceiling == 10
+
+    def test_window_seconds_is_30(self) -> None:
+        connector = spotify_module.SpotifyConnector(settings=_make_settings())
+        assert connector._budget.window_seconds == 30
+
+
 class TestGetAuthUrl:
     """Tests for get_auth_url."""
 

@@ -13,13 +13,25 @@ class RateLimitBudget:
     Args:
         default_interval: Fallback delay between requests when no rate
             limit data is available.
+        window_seconds: Rolling window duration for budget tracking.
+            None disables window tracking.
+        window_ceiling: Maximum requests allowed within the rolling window.
+            None disables window tracking.
     """
 
-    def __init__(self, default_interval: float = 0.2) -> None:
+    def __init__(
+        self,
+        default_interval: float = 0.2,
+        window_seconds: float | None = None,
+        window_ceiling: int | None = None,
+    ) -> None:
         self._default_interval = default_interval
         self._remaining: int | None = None
         self._reset_in: float | None = None
         self._last_update: float | None = None
+        self._window_seconds = window_seconds
+        self._window_ceiling = window_ceiling
+        self._request_timestamps: list[float] = []
 
     @property
     def remaining(self) -> int | None:
@@ -36,6 +48,53 @@ class RateLimitBudget:
             return None
         elapsed = time.monotonic() - self._last_update
         return max(0.0, self._reset_in - elapsed)
+
+    @property
+    def window_ceiling(self) -> int | None:
+        """Configured window ceiling, or None if tracking disabled."""
+        return self._window_ceiling
+
+    @property
+    def window_seconds(self) -> float | None:
+        """Configured window duration in seconds, or None if tracking disabled."""
+        return self._window_seconds
+
+    @property
+    def window_used(self) -> int | None:
+        """Current requests in window, or None if tracking disabled."""
+        if self._window_seconds is None:
+            return None
+        self._prune_window(time.monotonic())
+        return len(self._request_timestamps)
+
+    def record_request(self) -> None:
+        """Record that a request was made. Prunes old timestamps."""
+        if self._window_seconds is None:
+            return
+        now = time.monotonic()
+        self._request_timestamps.append(now)
+        self._prune_window(now)
+
+    def check_window_budget(self) -> float:
+        """Return seconds to wait if at window ceiling, else 0."""
+        if self._window_seconds is None or self._window_ceiling is None:
+            return 0.0
+        now = time.monotonic()
+        self._prune_window(now)
+        if len(self._request_timestamps) < self._window_ceiling:
+            return 0.0
+        # At ceiling — wait until oldest request ages out
+        oldest = self._request_timestamps[0]
+        return max(0.0, self._window_seconds - (now - oldest))
+
+    def _prune_window(self, now: float) -> None:
+        """Remove timestamps older than window_seconds."""
+        if self._window_seconds is None:
+            return
+        cutoff = now - self._window_seconds
+        self._request_timestamps = [
+            ts for ts in self._request_timestamps if ts >= cutoff
+        ]
 
     def update(self, remaining: int, reset_in: float) -> None:
         """Update budget from known values.
