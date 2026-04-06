@@ -730,6 +730,275 @@ class TestSyncRangeShutdown:
 
 
 # ---------------------------------------------------------------------------
+# Watermark write-back tests
+# ---------------------------------------------------------------------------
+
+
+class TestSyncRangeWatermarkWrite:
+    """Tests for watermark write-back after successful sync_range."""
+
+    @pytest.mark.asyncio
+    async def test_writes_watermark_to_connection(self) -> None:
+        """On success, watermark from result is saved to connection.sync_watermark."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"data_type": "saved_tracks"},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+        connection.sync_watermark = {}
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        # 3. _check_parent_completion: pending count
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        # 4. load parent task
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        # 5. failed count
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        # 6. children
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        watermark_data = {"last_offset": 100, "snapshot_id": "abc123"}
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.return_value = {
+            "items_created": 50,
+            "items_updated": 10,
+            "watermark": watermark_data,
+        }
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        assert connection.sync_watermark == {"saved_tracks": watermark_data}
+
+    @pytest.mark.asyncio
+    async def test_no_watermark_in_result_skips_write(self) -> None:
+        """When result has no 'watermark' key, connection is not modified."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"data_type": "saved_tracks"},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+        connection.sync_watermark = {}
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        # 3. _check_parent_completion: pending count
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        # 4. load parent task
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        # 5. failed count
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        # 6. children
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.return_value = {
+            "items_created": 50,
+            "items_updated": 10,
+        }
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        # sync_watermark should remain empty — no watermark in result
+        assert connection.sync_watermark == {}
+
+    @pytest.mark.asyncio
+    async def test_listenbrainz_uses_listens_key(self) -> None:
+        """ListenBrainz tasks write watermark under 'listens' key."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={},  # ListenBrainz tasks have no data_type param
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.LISTENBRAINZ
+        connection.id = conn_id
+        connection.sync_watermark = {}
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        # 3. _check_parent_completion: pending count
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        # 4. load parent task
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        # 5. failed count
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        # 6. children
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        watermark_data = {"max_ts": 1700000000}
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.return_value = {
+            "items_created": 100,
+            "items_updated": 0,
+            "watermark": watermark_data,
+        }
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {types_module.ServiceType.LISTENBRAINZ: mock_strategy},
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        assert connection.sync_watermark == {"listens": watermark_data}
+
+
+# ---------------------------------------------------------------------------
 # Orphaned task re-enqueue tests
 # ---------------------------------------------------------------------------
 

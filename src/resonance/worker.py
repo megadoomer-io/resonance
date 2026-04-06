@@ -221,6 +221,19 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 task.status = types_module.SyncStatus.COMPLETED
                 task.result = result
                 task.completed_at = datetime.datetime.now(datetime.UTC)
+
+                # Write watermark back to connection
+                watermark = result.get("watermark")
+                if watermark and isinstance(watermark, dict):
+                    data_type = str(task.params.get("data_type", ""))
+                    if connection.service_type == types_module.ServiceType.LISTENBRAINZ:
+                        data_type_key = "listens"
+                    else:
+                        data_type_key = data_type
+                    updated_watermarks = dict(connection.sync_watermark)
+                    updated_watermarks[data_type_key] = watermark
+                    connection.sync_watermark = updated_watermarks
+
                 await session.commit()
                 log.info("sync_range_completed", result=task.result)
             except sync_base.DeferRequest as defer:
