@@ -411,12 +411,12 @@ async def _reenqueue_orphaned_tasks(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     arq_redis: arq.ArqRedis,
 ) -> None:
-    """Re-enqueue PENDING and expired DEFERRED tasks on worker startup.
+    """Re-enqueue orphaned tasks on worker startup.
 
-    arq jobs in Redis expire after ~1 day. If the worker was down during
-    that window, the SyncTask row remains PENDING/DEFERRED but the arq
-    job is gone. This function finds those orphaned tasks and re-enqueues
-    them.
+    Finds tasks stuck in PENDING, expired DEFERRED, or RUNNING status
+    (from crashes or ungraceful shutdowns) and re-enqueues them. arq jobs
+    in Redis expire after ~1 day, so if the worker was down during that
+    window the SyncTask row remains but the arq job is gone.
     """
     async with session_factory() as session:
         now = datetime.datetime.now(datetime.UTC)
@@ -490,13 +490,49 @@ async def _reenqueue_orphaned_tasks(
             await session.commit()
             logger.info("cleaned_stale_orphans", count=len(stale_tasks))
 
+        # Find RUNNING tasks (interrupted by crash/restart)
+        running_result = await session.execute(
+            sa.select(task_module.SyncTask)
+            .outerjoin(
+                parent_alias,
+                task_module.SyncTask.parent_id == parent_alias.id,
+            )
+            .where(
+                task_module.SyncTask.status == types_module.SyncStatus.RUNNING,
+                task_module.SyncTask.task_type.in_(
+                    [
+                        types_module.SyncTaskType.SYNC_JOB,
+                        types_module.SyncTaskType.TIME_RANGE,
+                    ]
+                ),
+                sa.or_(
+                    task_module.SyncTask.parent_id.is_(None),
+                    parent_alias.status.notin_(
+                        [
+                            types_module.SyncStatus.COMPLETED,
+                            types_module.SyncStatus.FAILED,
+                        ]
+                    ),
+                ),
+            )
+        )
+        running_tasks = list(running_result.scalars().all())
+
         # Reset deferred tasks back to PENDING before re-enqueueing
         for task in deferred_tasks:
             task.status = types_module.SyncStatus.PENDING
         if deferred_tasks:
             await session.commit()
 
-        all_tasks = pending_tasks + deferred_tasks
+        # Reset RUNNING tasks back to PENDING
+        for task in running_tasks:
+            task.status = types_module.SyncStatus.PENDING
+            task.started_at = None
+        if running_tasks:
+            await session.commit()
+            logger.info("reset_running_orphans", count=len(running_tasks))
+
+        all_tasks = pending_tasks + deferred_tasks + running_tasks
         if not all_tasks:
             return
 

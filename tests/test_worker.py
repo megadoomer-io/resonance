@@ -763,7 +763,13 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        # 4. Children count for SYNC_JOB -> 0 (no children yet)
+        # 4. RUNNING tasks query — none
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        # 5. Children count for SYNC_JOB -> 0 (no children yet)
         children_count_result = MagicMock()
         children_count_result.scalar_one.return_value = 0
 
@@ -771,6 +777,7 @@ class TestReenqueueOrphanedTasks:
             pending_result,
             deferred_result,
             stale_result,
+            running_result,
             children_count_result,
         ]
 
@@ -806,7 +813,18 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result, stale_result]
+        # 4. RUNNING tasks query — none
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+        ]
 
         arq_redis = AsyncMock()
 
@@ -840,7 +858,18 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result, stale_result]
+        # 4. RUNNING tasks query — none
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+        ]
 
         arq_redis = AsyncMock()
 
@@ -878,7 +907,13 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        # 4. Children check for the SYNC_JOB — returns count=1
+        # 4. RUNNING tasks query — none
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        # 5. Children check for the SYNC_JOB — returns count=1
         children_count_result = MagicMock()
         children_count_result.scalar_one.return_value = 1
 
@@ -886,6 +921,7 @@ class TestReenqueueOrphanedTasks:
             pending_result,
             deferred_result,
             stale_result,
+            running_result,
             children_count_result,
         ]
 
@@ -897,6 +933,61 @@ class TestReenqueueOrphanedTasks:
 
         # Should NOT re-enqueue the parent (it already has children)
         arq_redis.enqueue_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reenqueues_running_task(self) -> None:
+        """RUNNING tasks should be reset to PENDING and re-enqueued."""
+        task = _make_task(
+            status=types_module.SyncStatus.RUNNING,
+        )
+        # _make_task sets task_type to TIME_RANGE by default
+        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+
+        session = AsyncMock()
+
+        # 1. PENDING tasks query — none
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+
+        # 2. DEFERRED tasks query — none
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+
+        # 3. Stale tasks query — none
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        # 4. RUNNING tasks query — returns the stuck task
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = [task]
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        # Task should be reset to PENDING with started_at cleared
+        assert task.status == types_module.SyncStatus.PENDING
+        assert task.started_at is None
+        # Should be re-enqueued as sync_range (TIME_RANGE task)
+        arq_redis.enqueue_job.assert_called_once_with("sync_range", str(task.id))
+        session.commit.assert_called()
 
     @pytest.mark.asyncio
     async def test_no_orphans_does_nothing(self) -> None:
@@ -917,7 +1008,18 @@ class TestReenqueueOrphanedTasks:
         stale_result = MagicMock()
         stale_result.scalars.return_value = stale_scalars
 
-        session.execute.side_effect = [pending_result, deferred_result, stale_result]
+        # 4. RUNNING tasks query — none
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+        ]
 
         arq_redis = AsyncMock()
 
