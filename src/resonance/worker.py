@@ -241,6 +241,16 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                     retry_after=defer.retry_after,
                     deferred_until=str(task.deferred_until),
                 )
+            except sync_base.ShutdownRequest as shutdown_req:
+                task.status = types_module.SyncStatus.PENDING
+                task.params = {**task.params, **shutdown_req.resume_params}
+                task.started_at = None
+                await session.commit()
+                log.info(
+                    "sync_range_shutdown_checkpoint",
+                    resume_params=shutdown_req.resume_params,
+                )
+                return
 
         except Exception:
             log.exception("sync_range_failed")

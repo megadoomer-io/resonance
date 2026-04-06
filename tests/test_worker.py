@@ -657,6 +657,79 @@ class TestSyncRangeDeferral:
 
 
 # ---------------------------------------------------------------------------
+# ShutdownRequest tests
+# ---------------------------------------------------------------------------
+
+
+class TestSyncRangeShutdown:
+    """Tests for ShutdownRequest handling in sync_range."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_request_checkpoints_task_as_pending(self) -> None:
+        """ShutdownRequest reverts task to PENDING with resume params."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"data_type": "saved_tracks"},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+
+        session = AsyncMock()
+
+        # 1. _load_task returns the task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        session.execute.side_effect = [task_result, conn_result]
+
+        # Strategy that raises ShutdownRequest
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.side_effect = sync_base.ShutdownRequest(
+            resume_params={"data_type": "saved_tracks", "offset": 50},
+        )
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        arq_redis = AsyncMock()
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "redis": arq_redis,
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.PENDING
+        assert task.params["offset"] == 50
+        assert task.params["data_type"] == "saved_tracks"
+        assert task.started_at is None
+        session.commit.assert_called()
+        # Should NOT enqueue anything — task stays PENDING for next worker startup
+        arq_redis.enqueue_job.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Orphaned task re-enqueue tests
 # ---------------------------------------------------------------------------
 
