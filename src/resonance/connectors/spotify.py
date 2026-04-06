@@ -168,40 +168,6 @@ class SpotifyConnector(base_module.BaseConnector):
         logger.info("Fetched %d followed artists", len(artists))
         return artists
 
-    async def get_saved_tracks(self, access_token: str) -> list[base_module.TrackData]:
-        """Paginate through saved (liked) tracks."""
-        logger.info("Fetching saved tracks")
-        tracks: list[base_module.TrackData] = []
-        url: str | None = f"{SPOTIFY_API_BASE}/me/tracks"
-        headers = {"Authorization": f"Bearer {access_token}"}
-
-        while url is not None:
-            response = await self._request(
-                "GET",
-                url,
-                headers=headers,
-                params={"limit": 50},
-            )
-            data = response.json()
-
-            for item in data["items"]:
-                track = item["track"]
-                primary_artist = track["artists"][0]
-                tracks.append(
-                    base_module.TrackData(
-                        external_id=track["id"],
-                        title=track["name"],
-                        artist_external_id=primary_artist["id"],
-                        artist_name=primary_artist["name"],
-                        service=types_module.ServiceType.SPOTIFY,
-                    )
-                )
-
-            url = data.get("next")
-
-        logger.info("Fetched %d saved tracks", len(tracks))
-        return tracks
-
     async def get_saved_tracks_page(
         self,
         access_token: str,

@@ -292,57 +292,6 @@ class TestGetFollowedArtists:
         assert call_count == 2
 
 
-class TestGetSavedTracks:
-    """Tests for get_saved_tracks."""
-
-    @pytest.mark.anyio()
-    async def test_parses_spotify_response(self) -> None:
-        api_response = {
-            "items": [
-                {
-                    "track": {
-                        "id": "track1",
-                        "name": "Song One",
-                        "artists": [{"id": "art1", "name": "Artist One"}],
-                    }
-                },
-                {
-                    "track": {
-                        "id": "track2",
-                        "name": "Song Two",
-                        "artists": [
-                            {"id": "art2", "name": "Artist Two"},
-                            {"id": "art3", "name": "Feat Artist"},
-                        ],
-                    }
-                },
-            ],
-            "next": None,
-            "total": 2,
-        }
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json=api_response)
-
-        transport = httpx.MockTransport(handler)
-        settings = _make_settings()
-        connector = spotify_module.SpotifyConnector(settings=settings)
-        connector._http_client = httpx.AsyncClient(transport=transport)
-        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
-
-        result = await connector.get_saved_tracks(access_token="token")
-
-        assert len(result) == 2
-        assert isinstance(result[0], base_module.TrackData)
-        assert result[0].external_id == "track1"
-        assert result[0].title == "Song One"
-        assert result[0].artist_external_id == "art1"
-        assert result[0].artist_name == "Artist One"
-        # Uses first artist (primary) even when multiple are present
-        assert result[1].artist_external_id == "art2"
-        assert result[1].artist_name == "Artist Two"
-
-
 class TestGetRecentlyPlayed:
     """Tests for get_recently_played."""
 
