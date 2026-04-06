@@ -301,6 +301,36 @@ class TestExecute:
         assert result.get("page_limit_reached") is True
 
     @pytest.mark.asyncio
+    async def test_shutdown_request_raises_with_resume_params(self) -> None:
+        """ShutdownRequest raised immediately when shutdown_requested is set."""
+        sync_base.shutdown_requested.set()
+        try:
+            strategy = lb_sync_module.ListenBrainzSyncStrategy()
+            session = AsyncMock()
+            task = _make_task(
+                params={
+                    "username": "testuser",
+                    "max_ts": 99999,
+                    "items_so_far": 42,
+                    "pages_fetched": 3,
+                    "last_listened_at": 1700000100,
+                },
+            )
+            connector = _make_lb_connector()
+
+            with pytest.raises(sync_base.ShutdownRequest) as exc_info:
+                await strategy.execute(session, task, connector)
+
+            assert exc_info.value.resume_params["max_ts"] == 99999
+            assert exc_info.value.resume_params["items_so_far"] == 42
+            assert exc_info.value.resume_params["pages_fetched"] == 3
+            assert exc_info.value.resume_params["last_listened_at"] == 1700000100
+            # Shutdown check fires before the API call
+            connector.get_listens.assert_not_called()
+        finally:
+            sync_base.shutdown_requested.clear()
+
+    @pytest.mark.asyncio
     async def test_rate_limit_raises_defer_request(self) -> None:
         """RateLimitExceededError raises DeferRequest with resume params."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()

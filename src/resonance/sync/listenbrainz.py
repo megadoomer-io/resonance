@@ -125,6 +125,17 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         page_limit_reached = False
 
         while True:
+            # Check for graceful shutdown between pages
+            if sync_base.shutdown_requested.is_set():
+                raise sync_base.ShutdownRequest(
+                    resume_params={
+                        "max_ts": max_ts,
+                        "items_so_far": items_created,
+                        "pages_fetched": pages_fetched,
+                        "last_listened_at": last_listened_at,
+                    }
+                )
+
             if pages_fetched >= MAX_PAGES:
                 page_limit_reached = True
                 logger.warning(
