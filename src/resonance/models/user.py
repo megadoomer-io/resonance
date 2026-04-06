@@ -74,5 +74,27 @@ class ServiceConnection(base_module.TimestampMixin, base_module.Base):
     last_used_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None
     )
+    sync_watermark: orm.Mapped[dict[str, dict[str, object]]] = orm.mapped_column(
+        sa.JSON, nullable=False, server_default="{}", insert_default=dict
+    )
 
     user: orm.Mapped[User] = orm.relationship(back_populates="connections")
+
+
+# Python-side defaults for mutable fields applied via init event.
+_SERVICE_CONNECTION_DEFAULTS: dict[str, object] = {
+    "sync_watermark": dict,
+}
+
+
+@sa.event.listens_for(ServiceConnection, "init")
+def _set_python_defaults(
+    target: ServiceConnection,
+    _args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """Apply Python-side defaults for fields that need them at construction."""
+    for attr, default in _SERVICE_CONNECTION_DEFAULTS.items():
+        if attr not in kwargs:
+            value = default() if callable(default) else default
+            setattr(target, attr, value)

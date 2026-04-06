@@ -137,6 +137,7 @@ class TestServiceConnectionModel:
             "scopes",
             "connected_at",
             "last_used_at",
+            "sync_watermark",
             "created_at",
             "updated_at",
         }
@@ -148,6 +149,28 @@ class TestServiceConnectionModel:
             "service_type",
         )
         assert isinstance(col.type, sa.Enum)
+
+    def test_sync_watermark_defaults_to_empty_dict(self) -> None:
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SPOTIFY,
+            external_user_id="test",
+            encrypted_access_token="enc",
+        )
+        assert conn.sync_watermark == {}
+
+    def test_sync_watermark_stores_dict(self) -> None:
+        watermark = {"listens": {"last_listened_at": 1700000000}}
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SPOTIFY,
+            external_user_id="test",
+            encrypted_access_token="enc",
+            sync_watermark=watermark,
+        )
+        assert conn.sync_watermark == watermark
 
     def test_unique_constraint_exists(self) -> None:
         table: sa.Table = user_module.ServiceConnection.__table__  # type: ignore[assignment]
