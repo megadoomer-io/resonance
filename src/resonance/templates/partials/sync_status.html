@@ -28,7 +28,6 @@
                 </td>
                 <td>
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
-                        {% set active_children = job.children | selectattr('status.value', 'ne', 'pending') | list %}
                         {% set done_count = job.children | selectattr('status.value', 'eq', 'completed') | list | length %}
                         {% set total_count = job.children | length %}
                         {% if total_count > 1 %}
@@ -36,7 +35,7 @@
                             <small>Phase {{ [done_count + 1, total_count] | min }}/{{ total_count }}</small>
                         </div>
                         {% endif %}
-                        {% for child in active_children %}
+                        {% for child in job.children %}
                             {% if child.status.value == 'running' %}
                             <div style="margin-bottom: 0.25rem;">
                                 <small><strong>{{ child.description or 'Processing...' }}</strong></small>
@@ -61,10 +60,6 @@
                             {% elif child.status.value == 'deferred' %}
                             <div style="margin-bottom: 0.25rem;">
                                 <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ (child.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}</small>
-                            </div>
-                            {% elif child.status.value == 'completed' %}
-                            <div style="margin-bottom: 0.25rem;">
-                                <small>{{ child.description or 'Done' }} — {{ child.result.get('items_created', 0) }} new, {{ child.result.get('items_updated', 0) }} updated</small>
                             </div>
                             {% endif %}
                         {% endfor %}
