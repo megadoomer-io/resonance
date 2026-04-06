@@ -7,6 +7,20 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     {% block head %}{% endblock %}
+    {% if user_id and not user_tz %}
+    <script>
+    (function() {
+        var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (tz) {
+            fetch('/api/v1/account/timezone', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({timezone: tz})
+            });
+        }
+    })();
+    </script>
+    {% endif %}
 </head>
 <body>
     {% if user_id %}

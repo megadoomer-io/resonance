@@ -234,6 +234,14 @@ async def auth_callback(
     # Set session
     session["user_id"] = str(user_id)
 
+    # Load timezone preference into session for templates.
+    tz_result = await db.execute(
+        sa.select(user_models.User.timezone).where(user_models.User.id == user_id)
+    )
+    user_tz = tz_result.scalar_one_or_none()
+    if user_tz:
+        session["user_tz"] = user_tz
+
     # Clear OAuth state
     session["oauth_state"] = None
     session["oauth_service"] = None

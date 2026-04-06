@@ -19,7 +19,7 @@
                 <td>{{ job.service_connection.service_type.value | capitalize }}</td>
                 <td>
                     {% if job.status.value == 'deferred' %}
-                    Deferred{% if job.deferred_until %} until {{ job.deferred_until.strftime('%H:%M') }}{% endif %}
+                    Deferred{% if job.deferred_until %} until {{ (job.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}
                     {% elif job.status.value in ('pending', 'running') %}
                     <span aria-busy="true">{{ job.status.value | capitalize }}</span>
                     {% else %}
@@ -60,7 +60,7 @@
                             </div>
                             {% elif child.status.value == 'deferred' %}
                             <div style="margin-bottom: 0.25rem;">
-                                <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ child.deferred_until.strftime('%H:%M') }}{% endif %}</small>
+                                <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ (child.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}</small>
                             </div>
                             {% elif child.status.value == 'completed' %}
                             <div style="margin-bottom: 0.25rem;">
@@ -82,11 +82,11 @@
                 </td>
                 <td>
                     {% if job.completed_at %}
-                    {{ job.completed_at.strftime('%H:%M:%S') }}
+                    {{ (job.completed_at | localtime(user_tz)).strftime('%H:%M:%S') }}
                     {% elif job.started_at %}
-                    Started {{ job.started_at.strftime('%H:%M:%S') }}
+                    Started {{ (job.started_at | localtime(user_tz)).strftime('%H:%M:%S') }}
                     {% else %}
-                    {{ job.created_at.strftime('%H:%M') }}
+                    {{ (job.created_at | localtime(user_tz)).strftime('%H:%M') }}
                     {% endif %}
                 </td>
                 <td>

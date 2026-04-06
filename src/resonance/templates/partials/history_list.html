@@ -14,7 +14,7 @@
             <tr>
                 <td>{{ event.track.title }}</td>
                 <td>{{ event.track.artist.name }}</td>
-                <td>{{ event.listened_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ (event.listened_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>{{ event.source_service.value }}</td>
             </tr>
             {% endfor %}

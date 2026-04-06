@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import uuid  # noqa: TC003 - runtime import required for FastAPI dependency resolution
+import zoneinfo
 from typing import Annotated
 
 import fastapi
+import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
@@ -93,3 +95,42 @@ async def unlink_connection(
     await db.commit()
 
     return {"status": "unlinked"}
+
+
+class TimezoneUpdate(pydantic.BaseModel):
+    """Request body for timezone update."""
+
+    timezone: str
+
+    @pydantic.field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str) -> str:
+        try:
+            zoneinfo.ZoneInfo(v)
+        except (KeyError, zoneinfo.ZoneInfoNotFoundError) as exc:
+            msg = f"Invalid timezone: {v}"
+            raise ValueError(msg) from exc
+        return v
+
+
+@router.put("/timezone")
+async def update_timezone(
+    body: TimezoneUpdate,
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Update the authenticated user's timezone preference."""
+    stmt = sa.select(user_models.User).where(user_models.User.id == user_id)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise fastapi.HTTPException(status_code=404, detail="User not found")
+
+    user.timezone = body.timezone
+    await db.commit()
+
+    # Cache in session so templates can use it without a DB query.
+    request.state.session["user_tz"] = body.timezone
+
+    return {"timezone": body.timezone}

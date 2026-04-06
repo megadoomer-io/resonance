@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import pathlib
 import uuid
+import zoneinfo
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,25 @@ _PAGE_SIZE = 50
 
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent.parent / "templates"
 templates = fastapi.templating.Jinja2Templates(directory=str(_TEMPLATE_DIR))
+
+
+def _localtime(
+    value: datetime.datetime | None,
+    tz_name: str | None,
+) -> datetime.datetime | None:
+    """Convert a UTC datetime to the user's local timezone."""
+    if value is None:
+        return None
+    if tz_name is None:
+        return value
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except KeyError, zoneinfo.ZoneInfoNotFoundError:
+        return value
+    return value.astimezone(tz)
+
+
+templates.env.filters["localtime"] = _localtime
 
 router = fastapi.APIRouter(tags=["ui"])
 
@@ -55,6 +75,11 @@ async def _count(
         stmt = stmt.where(f)
     result = await db.execute(stmt)
     return int(result.scalar_one())
+
+
+def _user_tz(request: fastapi.Request) -> str | None:
+    """Return the user's timezone from session, or None."""
+    return request.state.session.get("user_tz")  # type: ignore[no-any-return]
 
 
 @router.get("/login", response_class=fastapi.responses.HTMLResponse)
@@ -130,6 +155,7 @@ async def dashboard(
         "dashboard.html",
         {
             "user_id": user_id,
+            "user_tz": _user_tz(request),
             "artist_count": artist_count,
             "track_count": track_count,
             "event_count": event_count,
@@ -166,6 +192,7 @@ async def artists_page(
 
     context = {
         "user_id": user_id,
+        "user_tz": _user_tz(request),
         "artists": artists,
         "page": page,
         "has_next": has_next,
@@ -205,6 +232,7 @@ async def tracks_page(
 
     context = {
         "user_id": user_id,
+        "user_tz": _user_tz(request),
         "tracks": tracks,
         "page": page,
         "has_next": has_next,
@@ -249,6 +277,7 @@ async def history_page(
 
     context = {
         "user_id": user_id,
+        "user_tz": _user_tz(request),
         "events": events,
         "page": page,
         "has_next": has_next,
@@ -297,7 +326,12 @@ async def account_page(
     return templates.TemplateResponse(
         request,
         "account.html",
-        {"user_id": user_id, "user": user, "connections": connections},
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user": user,
+            "connections": connections,
+        },
     )
 
 
@@ -358,6 +392,7 @@ async def sync_status_partial(
         request,
         "partials/sync_status.html",
         {
+            "user_tz": _user_tz(request),
             "sync_jobs": sync_jobs,
             "has_active_sync": has_active_sync,
             "now": datetime.datetime.now(datetime.UTC),
@@ -390,6 +425,7 @@ async def merge_page(
         "merge.html",
         {
             "user_id": user_id,
+            "user_tz": _user_tz(request),
             "source_summary": source_summary,
             "service_type": service_type,
         },

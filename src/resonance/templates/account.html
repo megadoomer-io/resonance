@@ -11,7 +11,7 @@
     {% if user.email %}
     <p><strong>Email:</strong> {{ user.email }}</p>
     {% endif %}
-    <p><strong>Member Since:</strong> {{ user.created_at.strftime('%Y-%m-%d') }}</p>
+    <p><strong>Member Since:</strong> {{ (user.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</p>
 </article>
 
 <h2>Connected Services</h2>
@@ -31,7 +31,7 @@
             <tr id="connection-{{ conn.id }}">
                 <td>{{ conn.service_type.value | capitalize }}</td>
                 <td>{{ conn.external_user_id }}</td>
-                <td>{{ conn.connected_at.strftime('%Y-%m-%d') }}</td>
+                <td>{{ (conn.connected_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
                 <td>
                     {% if connections | length > 1 %}
                     <button
@@ -51,6 +51,39 @@
 {% else %}
 <p>No services connected.</p>
 {% endif %}
+
+<h2>Preferences</h2>
+<article>
+    <header>Timezone</header>
+    <form id="tz-form" hx-put="/api/v1/account/timezone" hx-swap="none"
+          hx-headers='{"Content-Type": "application/json"}'
+          hx-vals="js:{timezone: document.getElementById('tz-select').value}">
+        <select id="tz-select" name="timezone">
+            <option value="">Auto-detect from browser</option>
+        </select>
+        <button type="submit">Save</button>
+    </form>
+    <script>
+    (function() {
+        const select = document.getElementById('tz-select');
+        const current = {{ (user.timezone | tojson) if user.timezone else 'null' }};
+        const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const zones = Intl.supportedValuesOf('timeZone');
+        zones.forEach(function(tz) {
+            const opt = document.createElement('option');
+            opt.value = tz;
+            opt.textContent = tz.replace(/_/g, ' ');
+            if (tz === detected) opt.textContent += ' (detected)';
+            select.appendChild(opt);
+        });
+        if (current) {
+            select.value = current;
+        } else if (detected) {
+            select.value = detected;
+        }
+    })();
+    </script>
+</article>
 
 <h2>Connect Another Service</h2>
 <p>

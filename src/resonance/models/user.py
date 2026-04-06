@@ -24,6 +24,9 @@ class User(base_module.TimestampMixin, base_module.Base):
     email: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(255), nullable=True, default=None
     )
+    timezone: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(63), nullable=True, default=None
+    )
 
     connections: orm.Mapped[list[ServiceConnection]] = orm.relationship(
         back_populates="user", cascade="all, delete-orphan"
