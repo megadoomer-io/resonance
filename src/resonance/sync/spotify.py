@@ -192,14 +192,16 @@ async def _sync_followed_artists(
     connector: spotify_module.SpotifyConnector,
     access_token: str,
 ) -> tuple[int, int, dict[str, object]]:
-    """Fetch followed artists and upsert into the database."""
-    after_cursor = task.params.get("after_cursor")
-    after = str(after_cursor) if after_cursor is not None else None
-    artists = await connector.get_followed_artists(access_token, after=after)
+    """Fetch all followed artists and upsert into the database.
+
+    Always does a full fetch (no cursor resume) because the list is
+    typically small (1-3 API calls) and Spotify's cursor ordering
+    doesn't guarantee new follows appear after the stored cursor.
+    """
+    artists = await connector.get_followed_artists(access_token)
     logger.info("spotify_artists_fetched", count=len(artists))
     created = 0
     updated = 0
-    last_cursor: str | None = None
     for artist_data in artists:
         with session.no_autoflush:
             was_created = await runner_module._upsert_artist(session, artist_data)
@@ -211,12 +213,7 @@ async def _sync_followed_artists(
             await runner_module._upsert_user_artist_relation(
                 session, task.user_id, artist_data, task.service_connection_id
             )
-        if artist_data.external_id:
-            last_cursor = artist_data.external_id
-    watermark: dict[str, object] = {}
-    if last_cursor is not None:
-        watermark["after_cursor"] = last_cursor
-    return created, updated, watermark
+    return created, updated, {}
 
 
 async def _sync_saved_tracks(

@@ -177,7 +177,7 @@ class TestSpotifyExecute:
                 sync_spotify_module,
                 "_sync_followed_artists",
                 new_callable=AsyncMock,
-                return_value=(2, 1, {"after_cursor": "abc"}),
+                return_value=(2, 1, {}),
             ) as mock_sync,
         ):
             result = await strategy.execute(session, task, connector)
@@ -185,7 +185,7 @@ class TestSpotifyExecute:
         mock_sync.assert_awaited_once()
         assert result["items_created"] == 2
         assert result["items_updated"] == 1
-        assert result["watermark"] == {"after_cursor": "abc"}
+        assert result["watermark"] == {}
 
     @pytest.mark.asyncio
     async def test_unknown_data_type_returns_zero_counts(self) -> None:
@@ -241,8 +241,8 @@ class TestSpotifyWatermarkOutput:
     """Tests for watermark values in execute() results."""
 
     @pytest.mark.asyncio
-    async def test_followed_artists_watermark(self) -> None:
-        """followed_artists returns after_cursor in watermark."""
+    async def test_followed_artists_empty_watermark(self) -> None:
+        """followed_artists always full-fetches and returns empty watermark."""
         strategy = sync_spotify_module.SpotifySyncStrategy(_TEST_ENCRYPTION_KEY)
         session = AsyncMock()
         task = _make_task(params={"data_type": "followed_artists"})
@@ -259,12 +259,12 @@ class TestSpotifyWatermarkOutput:
                 sync_spotify_module,
                 "_sync_followed_artists",
                 new_callable=AsyncMock,
-                return_value=(3, 0, {"after_cursor": "artist-xyz"}),
+                return_value=(3, 0, {}),
             ),
         ):
             result = await strategy.execute(session, task, connector)
 
-        assert result["watermark"] == {"after_cursor": "artist-xyz"}
+        assert result["watermark"] == {}
 
     @pytest.mark.asyncio
     async def test_saved_tracks_watermark(self) -> None:
