@@ -570,13 +570,17 @@ async def startup(ctx: dict[str, Any]) -> None:
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
-    """Dispose of the database engine.
+    """Signal graceful shutdown, then dispose of resources.
 
-    Called by arq when the worker process shuts down.
+    Called by arq when the worker process shuts down. Sets the
+    shutdown_requested event so in-flight sync tasks can checkpoint
+    their progress before the process exits.
 
     Args:
         ctx: arq worker context dict.
     """
+    sync_base.shutdown_requested.set()
+
     wctx = typing.cast("WorkerContext", ctx)
     engine = wctx["engine"]
     await engine.dispose()

@@ -926,3 +926,36 @@ class TestReenqueueOrphanedTasks:
         )
 
         arq_redis.enqueue_job.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Worker shutdown tests
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerShutdown:
+    """Tests for worker shutdown hook."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_sets_event(self) -> None:
+        """Shutdown sets the shutdown_requested event."""
+        sync_base.shutdown_requested.clear()
+        try:
+            mock_engine = AsyncMock()
+            ctx: dict[str, Any] = {"engine": mock_engine}
+            await worker_module.shutdown(ctx)
+            assert sync_base.shutdown_requested.is_set()
+        finally:
+            sync_base.shutdown_requested.clear()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_disposes_engine(self) -> None:
+        """Shutdown disposes the database engine."""
+        sync_base.shutdown_requested.clear()
+        try:
+            mock_engine = AsyncMock()
+            ctx: dict[str, Any] = {"engine": mock_engine}
+            await worker_module.shutdown(ctx)
+            mock_engine.dispose.assert_awaited_once()
+        finally:
+            sync_base.shutdown_requested.clear()
