@@ -194,6 +194,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
+            result["watermark"] = {"last_listened_at": last_listened_at}
         if page_limit_reached:
             result["page_limit_reached"] = True
         return result

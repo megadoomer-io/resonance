@@ -419,6 +419,52 @@ class TestExecute:
         # items_created should include both phases: 2 from phase 1 + 1 from phase 2
         assert result["items_created"] == 3
 
+    @pytest.mark.asyncio
+    async def test_result_includes_watermark_dict(self) -> None:
+        """Result includes a 'watermark' dict for the worker to write back."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+        connector.get_listens = AsyncMock(side_effect=[[listen1], []])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module, "_upsert_track", new_callable=AsyncMock
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        assert result["watermark"] == {"last_listened_at": 1700000100}
+
+    @pytest.mark.asyncio
+    async def test_result_no_watermark_when_no_listens(self) -> None:
+        """Result has no 'watermark' key when no listens were processed."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+        connector.get_listens = AsyncMock(return_value=[])
+
+        result = await strategy.execute(session, task, connector)
+
+        assert "watermark" not in result
+
 
 # ---------------------------------------------------------------------------
 # _cast_connector tests
