@@ -15,6 +15,7 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
 import resonance.merge as merge_module
+import resonance.middleware.session as session_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
@@ -278,6 +279,12 @@ async def account_page(
         )
         user = user_result.scalar_one_or_none()
 
+        if user is None:
+            # User was deleted (e.g., merged into another account).
+            # Clear the stale session and redirect to login.
+            request.state.session.clear()
+            return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
         connections_result = await db.execute(
             sa.select(user_models.ServiceConnection).where(
                 user_models.ServiceConnection.user_id == user_uuid
@@ -408,6 +415,11 @@ async def merge_confirm(
             db, uuid.UUID(user_id), uuid.UUID(source_user_id)
         )
         await db.commit()
+
+    # Invalidate all sessions belonging to the deleted source user so other
+    # devices aren't left with a dangling user_id reference.
+    redis: session_module.RedisClient = request.app.state.redis
+    await session_module.invalidate_user_sessions(redis, source_user_id)
 
     session["merge_source_user_id"] = None
     session["merge_service_type"] = None

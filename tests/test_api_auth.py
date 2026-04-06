@@ -36,6 +36,7 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+        self._sets: dict[str, set[str]] = {}
 
     async def get(self, key: str) -> str | None:
         return self._store.get(key)
@@ -43,8 +44,26 @@ class FakeRedis:
     async def setex(self, key: str, ttl: int, value: str) -> None:
         self._store[key] = value
 
-    async def delete(self, key: str) -> None:
-        self._store.pop(key, None)
+    async def delete(self, *keys: str) -> int:
+        deleted = 0
+        for key in keys:
+            if self._store.pop(key, None) is not None:
+                deleted += 1
+            if self._sets.pop(key, None) is not None:
+                deleted += 1
+        return deleted
+
+    async def sadd(self, key: str, *values: str) -> int:
+        if key not in self._sets:
+            self._sets[key] = set()
+        self._sets[key].update(values)
+        return len(values)
+
+    async def smembers(self, key: str) -> set[bytes]:
+        return {v.encode() for v in self._sets.get(key, set())}
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        return key in self._store or key in self._sets
 
     async def aclose(self) -> None:
         pass

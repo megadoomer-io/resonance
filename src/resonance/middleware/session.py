@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import itsdangerous
 import redis.asyncio as aioredis
@@ -117,6 +117,13 @@ class SessionMiddleware(base_middleware.BaseHTTPMiddleware):
         key = f"session:{session.session_id}"
         await self.redis.setex(key, self.max_age, json.dumps(session.data))
 
+        # Maintain reverse index so we can invalidate all sessions for a user.
+        user_id = session.data.get("user_id")
+        if user_id:
+            user_key = f"user_sessions:{user_id}"
+            await cast("Any", self.redis.sadd(user_key, session.session_id))
+            await cast("Any", self.redis.expire(user_key, self.max_age))
+
         signed = self.signer.sign(session.session_id).decode("utf-8")
         response.set_cookie(
             key=self.cookie_name,
@@ -137,3 +144,24 @@ async def destroy_session(
     session: SessionData = request.state.session
     await redis.delete(f"session:{session.session_id}")
     response.delete_cookie(key=cookie_name)
+
+
+async def invalidate_user_sessions(redis: RedisClient, user_id: str) -> int:
+    """Delete all sessions belonging to a user.
+
+    Args:
+        redis: The Redis client.
+        user_id: The user whose sessions should be invalidated.
+
+    Returns:
+        The number of sessions deleted.
+    """
+    user_key = f"user_sessions:{user_id}"
+    session_ids: set[bytes] = await cast("Any", redis.smembers(user_key))
+    if not session_ids:
+        return 0
+
+    session_keys = [f"session:{sid.decode()}" for sid in session_ids]
+    deleted: int = await cast("Any", redis.delete(*session_keys))
+    await cast("Any", redis.delete(user_key))
+    return deleted
