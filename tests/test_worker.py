@@ -570,6 +570,208 @@ class TestPlanSyncStrategyDispatch:
 
 
 # ---------------------------------------------------------------------------
+# sync_range watermark resume on retry
+# ---------------------------------------------------------------------------
+
+
+class TestSyncRangeWatermarkResume:
+    """Tests for watermark resume when sync_range retries a RUNNING task."""
+
+    @pytest.mark.asyncio
+    async def test_retry_injects_watermark_before_execute(self) -> None:
+        """RUNNING task (arq retry) gets max_ts from watermark."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        # Task is already RUNNING — simulates arq retry after crash
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.RUNNING,
+            params={"username": "testuser", "min_ts": 1700000000},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.LISTENBRAINZ
+        connection.id = conn_id
+        connection.sync_watermark = {
+            "listens": {
+                "newest_synced_at": 1712000000,
+                "oldest_synced_at": 1700500000,
+            }
+        }
+
+        session = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load connection
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        # 3-6. _check_parent_completion mocks
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_task = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        # Capture what params the strategy sees at execute time
+        captured_params: dict[str, object] = {}
+
+        async def capture_execute(
+            _session: Any,
+            _task: Any,
+            _connector: Any,
+            _connection: Any,
+        ) -> dict[str, object]:
+            captured_params.update(_task.params)
+            return {"items_created": 0, "items_updated": 0}
+
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "parallel"
+        mock_strategy.execute.side_effect = capture_execute
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {
+                types_module.ServiceType.LISTENBRAINZ: mock_strategy,
+            },
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        # Strategy should have received max_ts from watermark
+        assert captured_params["max_ts"] == 1700500000
+        assert captured_params["username"] == "testuser"
+        assert captured_params["min_ts"] == 1700000000
+
+    @pytest.mark.asyncio
+    async def test_pending_task_does_not_inject_watermark(self) -> None:
+        """PENDING task (normal first run) does not get watermark."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        # Task is PENDING — normal first execution
+        task = task_module.SyncTask(
+            id=task_id,
+            user_id=user_id,
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.SyncTaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"username": "testuser", "min_ts": 1700000000},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.LISTENBRAINZ
+        connection.id = conn_id
+        connection.sync_watermark = {
+            "listens": {
+                "newest_synced_at": 1712000000,
+                "oldest_synced_at": 1700500000,
+            }
+        }
+
+        session = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_task = _make_task(
+            task_id=parent_id,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            conn_result,
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        captured_params: dict[str, object] = {}
+
+        async def capture_execute(
+            _session: Any,
+            _task: Any,
+            _connector: Any,
+            _connection: Any,
+        ) -> dict[str, object]:
+            captured_params.update(_task.params)
+            return {"items_created": 0, "items_updated": 0}
+
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "parallel"
+        mock_strategy.execute.side_effect = capture_execute
+
+        mock_connector = MagicMock()
+        mock_connector_registry = MagicMock()
+        mock_connector_registry.get.return_value = mock_connector
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_connector_registry,
+            "strategies": {
+                types_module.ServiceType.LISTENBRAINZ: mock_strategy,
+            },
+            "redis": AsyncMock(),
+        }
+
+        await worker_module.sync_range(ctx, str(task_id))
+
+        # Should NOT have max_ts — this is a fresh execution
+        assert "max_ts" not in captured_params
+
+
+# ---------------------------------------------------------------------------
 # Deferral tests
 # ---------------------------------------------------------------------------
 

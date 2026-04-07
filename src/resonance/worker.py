@@ -200,6 +200,9 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 log.error("sync_range_task_not_found")
                 return
 
+            # Detect retry: task is still RUNNING from a previous crashed attempt
+            is_retry = task.status == types_module.SyncStatus.RUNNING
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -215,6 +218,11 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 service=connection.service_type.value,
                 user_id=str(task.user_id),
             )
+
+            # On retry, resume from watermark to avoid re-processing pages
+            if is_retry:
+                _apply_watermark_resume(task, connection)
+
             log.info("sync_range_started")
 
             strategy = wctx["strategies"].get(connection.service_type)
