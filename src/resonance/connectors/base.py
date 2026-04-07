@@ -105,6 +105,7 @@ class BaseConnector(abc.ABC):
         url: str,
         *,
         high_priority: bool = False,
+        max_retries: int | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
         """Make an HTTP request with rate limit pacing and automatic retry.
@@ -130,6 +131,9 @@ class BaseConnector(abc.ABC):
             httpx.RemoteProtocolError: After exhausting transient retries.
             httpx.ConnectError: After exhausting transient retries.
         """
+        effective_max_retries = (
+            max_retries if max_retries is not None else self._MAX_TRANSIENT_RETRIES
+        )
         transient_attempt = 0
 
         while True:
@@ -163,7 +167,7 @@ class BaseConnector(abc.ABC):
                 response = await self.http_client.request(method, url, **kwargs)
             except self._TRANSIENT_ERRORS as exc:
                 transient_attempt += 1
-                if transient_attempt > self._MAX_TRANSIENT_RETRIES:
+                if transient_attempt > effective_max_retries:
                     logger.error(
                         "transient_retries_exhausted",
                         method=method,

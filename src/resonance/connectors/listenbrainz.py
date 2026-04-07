@@ -108,6 +108,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
         max_ts: int | None = None,
         min_ts: int | None = None,
         count: int = 100,
+        max_retries: int | None = None,
     ) -> list[ListenBrainzListenItem]:
         """Fetch listening history for a ListenBrainz user.
 
@@ -131,6 +132,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
             "GET",
             f"{LISTENBRAINZ_API_BASE}/user/{username}/listens",
             params=params,
+            max_retries=max_retries,
         )
         data = response.json()
 

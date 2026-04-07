@@ -557,6 +557,7 @@ class TestAdaptivePageSize:
         )
 
         with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
             patch.object(
                 lb_sync_module.runner_module,
                 "bulk_fetch_artists",
@@ -609,7 +610,7 @@ class TestAdaptivePageSize:
 
         listen1 = _make_listen(1700000100, "Song A", "Artist A")
 
-        # Timeout at 1000, 500, 250 — success at 100
+        # Timeout at 1000, 500, 250 — success at 125
         connector.get_listens = AsyncMock(
             side_effect=[
                 httpx.RemoteProtocolError("timeout"),
@@ -621,6 +622,7 @@ class TestAdaptivePageSize:
         )
 
         with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
             patch.object(
                 lb_sync_module.runner_module,
                 "bulk_fetch_artists",
@@ -672,7 +674,10 @@ class TestAdaptivePageSize:
             side_effect=httpx.RemoteProtocolError("Server disconnected")
         )
 
-        with pytest.raises(httpx.RemoteProtocolError):
+        with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(httpx.RemoteProtocolError),
+        ):
             await strategy.execute(session, task, connector)
 
         # Should have tried 1000, 500, 250, 125, 100, then raised at 100
@@ -702,6 +707,7 @@ class TestAdaptivePageSize:
         )
 
         with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
             patch.object(
                 lb_sync_module.runner_module,
                 "bulk_fetch_artists",
@@ -736,6 +742,67 @@ class TestAdaptivePageSize:
         assert calls[0].kwargs["count"] == 1000
         assert calls[1].kwargs["count"] == 500
         assert result["items_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_backoff_increases_with_reduction_depth(self) -> None:
+        """Backoff delay scales with number of reductions."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                httpx.RemoteProtocolError("timeout"),
+                httpx.RemoteProtocolError("timeout"),
+                [listen1],
+                [],
+            ]
+        )
+
+        with (
+            patch(
+                "resonance.sync.listenbrainz.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await strategy.execute(session, task, connector)
+
+        # Backoff: 5s * depth (5, 10)
+        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert sleep_calls == [5.0, 10.0]
 
 
 # ---------------------------------------------------------------------------

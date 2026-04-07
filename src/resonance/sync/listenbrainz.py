@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ logger = structlog.get_logger()
 MAX_PAGES = 5000
 _DEFAULT_PAGE_SIZE = 1000
 _MIN_PAGE_SIZE = 100
+_ADAPTIVE_BACKOFF_BASE = 5.0  # seconds — scales with reduction depth
 
 
 class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
@@ -152,29 +154,13 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                 break
 
             try:
-                listens = await lb_connector.get_listens(
-                    username, max_ts=max_ts, min_ts=min_ts, count=page_size
-                )
-            except (httpx.RemoteProtocolError, httpx.ReadTimeout):  # fmt: skip
-                # Server timed out — likely scanning a sparse time range.
-                # Halve the page size and retry the same cursor.
-                if page_size > _MIN_PAGE_SIZE:
-                    page_size = max(_MIN_PAGE_SIZE, page_size // 2)
-                    logger.warning(
-                        "adaptive_page_size_reduced",
-                        page_size=page_size,
-                        max_ts=max_ts,
-                        username=username,
-                    )
-                    continue
-                # Already at minimum — give up on this page
-                logger.error(
-                    "adaptive_page_size_exhausted",
-                    page_size=page_size,
+                listens, page_size = await _adaptive_fetch(
+                    lb_connector,
+                    username,
                     max_ts=max_ts,
-                    username=username,
+                    min_ts=min_ts,
+                    page_size=page_size,
                 )
-                raise
             except connector_base.RateLimitExceededError as exc:
                 raise sync_base.DeferRequest(
                     retry_after=exc.retry_after,
@@ -190,16 +176,6 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                 break
 
             pages_fetched += 1
-
-            # Grow page size back toward default after a successful fetch
-            if page_size < _DEFAULT_PAGE_SIZE:
-                old_size = page_size
-                page_size = min(_DEFAULT_PAGE_SIZE, page_size * 2)
-                logger.info(
-                    "adaptive_page_size_increased",
-                    old_size=old_size,
-                    new_size=page_size,
-                )
 
             # Track last_listened_at from the first page's first listen
             if last_listened_at is None:
@@ -262,6 +238,89 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         if page_limit_reached:
             result["page_limit_reached"] = True
         return result
+
+
+async def _adaptive_fetch(
+    connector: listenbrainz_module.ListenBrainzConnector,
+    username: str,
+    *,
+    max_ts: int | None,
+    min_ts: int | None,
+    page_size: int,
+) -> tuple[list[listenbrainz_module.ListenBrainzListenItem], int]:
+    """Fetch listens with adaptive page size and unified backoff.
+
+    Tries the request at the current page_size. On timeout or server
+    disconnect, halves the page size and waits before retrying. On
+    success, grows the page size back toward the default.
+
+    Uses max_retries=1 on the connector so each attempt fails fast,
+    letting this function control the backoff with page size reduction.
+
+    Args:
+        connector: The ListenBrainz connector.
+        username: ListenBrainz username.
+        max_ts: Upper bound timestamp for pagination.
+        min_ts: Lower bound timestamp (watermark).
+        page_size: Current page size to try.
+
+    Returns:
+        Tuple of (listens, updated_page_size) for the caller to use
+        on the next iteration.
+
+    Raises:
+        httpx.RemoteProtocolError: If fetch fails at minimum page size.
+        httpx.ReadTimeout: If fetch fails at minimum page size.
+        connector_base.RateLimitExceededError: Propagated for deferral.
+    """
+    current_size = page_size
+    reduction_depth = 0
+
+    while True:
+        try:
+            listens = await connector.get_listens(
+                username,
+                max_ts=max_ts,
+                min_ts=min_ts,
+                count=current_size,
+                max_retries=1,
+            )
+        except (httpx.RemoteProtocolError, httpx.ReadTimeout):  # fmt: skip
+            if current_size <= _MIN_PAGE_SIZE:
+                logger.error(
+                    "adaptive_page_size_exhausted",
+                    page_size=current_size,
+                    max_ts=max_ts,
+                    username=username,
+                )
+                raise
+
+            old_size = current_size
+            current_size = max(_MIN_PAGE_SIZE, current_size // 2)
+            reduction_depth += 1
+            backoff = _ADAPTIVE_BACKOFF_BASE * reduction_depth
+            logger.warning(
+                "adaptive_page_size_reduced",
+                old_size=old_size,
+                new_size=current_size,
+                backoff_seconds=round(backoff, 1),
+                max_ts=max_ts,
+                username=username,
+            )
+            await asyncio.sleep(backoff)
+            continue
+
+        # Success — grow page size back toward default for next call
+        next_page_size = current_size
+        if current_size < _DEFAULT_PAGE_SIZE:
+            next_page_size = min(_DEFAULT_PAGE_SIZE, current_size * 2)
+            logger.info(
+                "adaptive_page_size_increased",
+                old_size=current_size,
+                new_size=next_page_size,
+            )
+
+        return listens, next_page_size
 
 
 def _cast_connector(
