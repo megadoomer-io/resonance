@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 MAX_PAGES = 5000
+_DEFAULT_PAGE_SIZE = 1000
+_MIN_PAGE_SIZE = 100
 
 
 class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
@@ -125,6 +127,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             else None
         )
         page_limit_reached = False
+        page_size = _DEFAULT_PAGE_SIZE
 
         while True:
             # Check for graceful shutdown between pages
@@ -150,8 +153,28 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
 
             try:
                 listens = await lb_connector.get_listens(
-                    username, max_ts=max_ts, min_ts=min_ts, count=1000
+                    username, max_ts=max_ts, min_ts=min_ts, count=page_size
                 )
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout):  # fmt: skip
+                # Server timed out — likely scanning a sparse time range.
+                # Halve the page size and retry the same cursor.
+                if page_size > _MIN_PAGE_SIZE:
+                    page_size = max(_MIN_PAGE_SIZE, page_size // 2)
+                    logger.warning(
+                        "adaptive_page_size_reduced",
+                        page_size=page_size,
+                        max_ts=max_ts,
+                        username=username,
+                    )
+                    continue
+                # Already at minimum — give up on this page
+                logger.error(
+                    "adaptive_page_size_exhausted",
+                    page_size=page_size,
+                    max_ts=max_ts,
+                    username=username,
+                )
+                raise
             except connector_base.RateLimitExceededError as exc:
                 raise sync_base.DeferRequest(
                     retry_after=exc.retry_after,
@@ -167,6 +190,16 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                 break
 
             pages_fetched += 1
+
+            # Grow page size back toward default after a successful fetch
+            if page_size < _DEFAULT_PAGE_SIZE:
+                old_size = page_size
+                page_size = min(_DEFAULT_PAGE_SIZE, page_size * 2)
+                logger.info(
+                    "adaptive_page_size_increased",
+                    old_size=old_size,
+                    new_size=page_size,
+                )
 
             # Track last_listened_at from the first page's first listen
             if last_listened_at is None:

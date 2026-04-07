@@ -527,6 +527,218 @@ class TestExecute:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive page size tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptivePageSize:
+    """Tests for adaptive page size on timeout."""
+
+    @pytest.mark.asyncio
+    async def test_halves_page_size_on_remote_protocol_error(self) -> None:
+        """Page size halves on RemoteProtocolError, retries same cursor."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+
+        # First call at 1000: timeout. Second call at 500: success. Third: empty.
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                httpx.RemoteProtocolError("Server disconnected"),
+                [listen1],
+                [],
+            ]
+        )
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        # Should have called get_listens 3 times:
+        # 1. count=1000 (failed), 2. count=500 (success), 3. count=1000 (empty)
+        calls = connector.get_listens.call_args_list
+        assert calls[0].kwargs["count"] == 1000
+        assert calls[1].kwargs["count"] == 500
+        # After success, grows back to 1000
+        assert calls[2].kwargs["count"] == 1000
+        assert result["items_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_multiple_halves_down_to_minimum(self) -> None:
+        """Page size halves multiple times down to _MIN_PAGE_SIZE."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+
+        # Timeout at 1000, 500, 250 — success at 100
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                httpx.RemoteProtocolError("timeout"),
+                httpx.RemoteProtocolError("timeout"),
+                httpx.RemoteProtocolError("timeout"),
+                [listen1],
+                [],
+            ]
+        )
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await strategy.execute(session, task, connector)
+
+        calls = connector.get_listens.call_args_list
+        assert calls[0].kwargs["count"] == 1000
+        assert calls[1].kwargs["count"] == 500
+        assert calls[2].kwargs["count"] == 250
+        assert calls[3].kwargs["count"] == 125
+        # Grows back: 125 → 250
+        assert calls[4].kwargs["count"] == 250
+
+    @pytest.mark.asyncio
+    async def test_raises_at_minimum_page_size(self) -> None:
+        """Raises RemoteProtocolError if it fails at minimum page size."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        # Timeout all the way down to min, then fail again at min
+        connector.get_listens = AsyncMock(
+            side_effect=httpx.RemoteProtocolError("Server disconnected")
+        )
+
+        with pytest.raises(httpx.RemoteProtocolError):
+            await strategy.execute(session, task, connector)
+
+        # Should have tried 1000, 500, 250, 125, 100, then raised at 100
+        calls = connector.get_listens.call_args_list
+        counts = [c.kwargs["count"] for c in calls]
+        assert counts == [1000, 500, 250, 125, 100]
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_also_triggers_adaptive(self) -> None:
+        """ReadTimeout triggers the same adaptive behavior."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                httpx.ReadTimeout("timeout"),
+                [listen1],
+                [],
+            ]
+        )
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector)
+
+        calls = connector.get_listens.call_args_list
+        assert calls[0].kwargs["count"] == 1000
+        assert calls[1].kwargs["count"] == 500
+        assert result["items_created"] == 1
+
+
+# ---------------------------------------------------------------------------
 # _cast_connector tests
 # ---------------------------------------------------------------------------
 
