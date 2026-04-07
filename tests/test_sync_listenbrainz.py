@@ -518,7 +518,10 @@ class TestExecute:
             connection = _make_connection()
             result = await strategy.execute(session, task, connector, connection)
 
-        assert result["watermark"] == {"last_listened_at": 1700000100}
+        assert result["watermark"] == {
+            "newest_synced_at": 1700000100,
+            "oldest_synced_at": 1700000100,
+        }
 
     @pytest.mark.asyncio
     async def test_result_no_watermark_when_no_listens(self) -> None:
@@ -533,6 +536,152 @@ class TestExecute:
         result = await strategy.execute(session, task, connector, connection)
 
         assert "watermark" not in result
+
+
+# ---------------------------------------------------------------------------
+# Incremental watermark tests
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalWatermark:
+    """Tests for per-page watermark updates during execute()."""
+
+    @pytest.mark.asyncio
+    async def test_watermark_updated_after_each_page(self) -> None:
+        """connection.sync_watermark is updated after each page commit."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+        connection = _make_connection()
+
+        # Page 1: listens at 1700000200 (newest) and 1700000100 (oldest)
+        page1 = [
+            _make_listen(1700000200, "Song A", "Artist A"),
+            _make_listen(1700000100, "Song B", "Artist B"),
+        ]
+        # Page 2: listens at 1700000050 and 1700000010
+        page2 = [
+            _make_listen(1700000050, "Song C", "Artist C"),
+            _make_listen(1700000010, "Song D", "Artist D"),
+        ]
+
+        connector.get_listens = AsyncMock(side_effect=[page1, page2, []])
+
+        # Track watermark values after each commit
+        watermarks_after_commit: list[dict[str, object]] = []
+
+        async def capture_watermark() -> None:
+            watermarks_after_commit.append(
+                dict(connection.sync_watermark.get("listens", {}))
+            )
+
+        session.commit = AsyncMock(side_effect=capture_watermark)
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await strategy.execute(session, task, connector, connection)
+
+        # After page 1: newest=1700000200, oldest=1700000100
+        assert watermarks_after_commit[0] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000100,
+        }
+        # After page 2: newest still 1700000200, oldest advances to 1700000010
+        assert watermarks_after_commit[1] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000010,
+        }
+
+    @pytest.mark.asyncio
+    async def test_result_watermark_uses_two_ended_structure(self) -> None:
+        """Final result has watermark with newest/oldest_synced_at."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+        connection = _make_connection()
+
+        page1 = [
+            _make_listen(1700000200, "Song A", "Artist A"),
+            _make_listen(1700000100, "Song B", "Artist B"),
+        ]
+        page2 = [
+            _make_listen(1700000050, "Song C", "Artist C"),
+        ]
+
+        connector.get_listens = AsyncMock(side_effect=[page1, page2, []])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector, connection)
+
+        assert result["watermark"] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000050,
+        }
+        # last_listened_at should still be present for backward compat
+        assert result["last_listened_at"] == 1700000200
 
 
 # ---------------------------------------------------------------------------

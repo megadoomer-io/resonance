@@ -97,15 +97,19 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
 
         Fetches listens page by page using max_ts/min_ts pagination. Upserts
         artists, tracks, and listening events for each listen. Commits per
-        page and updates task progress.
+        page, updates task progress, and writes the sync watermark
+        incrementally so crash recovery loses at most one page.
 
         Args:
             session: Active database session.
             task: The TIME_RANGE task being executed.
             connector: The ListenBrainz connector instance.
+            connection: The ServiceConnection whose sync_watermark is
+                updated incrementally after each page commit.
 
         Returns:
-            Dict with items_created count and last_listened_at timestamp.
+            Dict with items_created count, last_listened_at timestamp,
+            and watermark dict with newest_synced_at/oldest_synced_at.
 
         Raises:
             DeferRequest: When a RateLimitExceededError is encountered.
@@ -230,12 +234,24 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             # Use the oldest listen's timestamp for next page
             max_ts = listens[-1].listened_at
             task.progress_current = items_created
+
+            # Update watermark incrementally
+            updated_watermarks = dict(connection.sync_watermark)
+            updated_watermarks["listens"] = {
+                "newest_synced_at": last_listened_at,
+                "oldest_synced_at": max_ts,
+            }
+            connection.sync_watermark = updated_watermarks
+
             await session.commit()
 
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
-            result["watermark"] = {"last_listened_at": last_listened_at}
+            result["watermark"] = {
+                "newest_synced_at": last_listened_at,
+                "oldest_synced_at": max_ts if max_ts is not None else last_listened_at,
+            }
         if page_limit_reached:
             result["page_limit_reached"] = True
         return result
