@@ -150,7 +150,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
 
             try:
                 listens = await lb_connector.get_listens(
-                    username, max_ts=max_ts, min_ts=min_ts, count=100
+                    username, max_ts=max_ts, min_ts=min_ts, count=1000
                 )
             except connector_base.RateLimitExceededError as exc:
                 raise sync_base.DeferRequest(
@@ -172,18 +172,49 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             if last_listened_at is None:
                 last_listened_at = listens[0].listened_at
 
+            # Bulk pre-fetch existing records
+            service_key = types_module.ServiceType.LISTENBRAINZ.value
+            artist_ids = {
+                listen.track.artist_external_id
+                for listen in listens
+                if listen.track.artist_external_id
+            }
+            track_ids = {
+                listen.track.external_id
+                for listen in listens
+                if listen.track.external_id
+            }
+            artist_cache = await runner_module.bulk_fetch_artists(
+                session, service_key, artist_ids
+            )
+            track_cache = await runner_module.bulk_fetch_tracks(
+                session, service_key, track_ids
+            )
+
+            # Pass 1: artists
             for listen in listens:
                 with session.no_autoflush:
-                    await runner_module._upsert_artist_from_track(session, listen.track)
-                    await session.flush()
-                    await runner_module._upsert_track(session, listen.track)
-                    await session.flush()
-                    played_at = datetime.datetime.fromtimestamp(
-                        listen.listened_at, tz=datetime.UTC
-                    ).isoformat()
-                    await runner_module._upsert_listening_event(
-                        session, task.user_id, listen.track, played_at
+                    await runner_module._upsert_artist_from_track(
+                        session, listen.track, artist_cache=artist_cache
                     )
+            await session.flush()
+
+            # Pass 2: tracks
+            for listen in listens:
+                with session.no_autoflush:
+                    await runner_module._upsert_track(
+                        session, listen.track, track_cache=track_cache
+                    )
+            await session.flush()
+
+            # Pass 3: events
+            for listen in listens:
+                played_at = datetime.datetime.fromtimestamp(
+                    listen.listened_at, tz=datetime.UTC
+                ).isoformat()
+                await runner_module._upsert_listening_event(
+                    session, task.user_id, listen.track, played_at
+                )
                 items_created += 1
 
             # Use the oldest listen's timestamp for next page

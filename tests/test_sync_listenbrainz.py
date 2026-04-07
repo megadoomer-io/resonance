@@ -210,6 +210,18 @@ class TestExecute:
         with (
             patch.object(
                 lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
                 "_upsert_artist_from_track",
                 new_callable=AsyncMock,
             ) as mock_upsert_artist,
@@ -249,6 +261,18 @@ class TestExecute:
         connector.get_listens = AsyncMock(return_value=[listen])
 
         with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
             patch.object(
                 lb_sync_module.runner_module,
                 "_upsert_artist_from_track",
@@ -362,6 +386,18 @@ class TestExecute:
         with (
             patch.object(
                 lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
                 "_upsert_artist_from_track",
                 new_callable=AsyncMock,
             ),
@@ -396,6 +432,18 @@ class TestExecute:
         connector2.get_listens = AsyncMock(side_effect=[[listen3], []])
 
         with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
             patch.object(
                 lb_sync_module.runner_module,
                 "_upsert_artist_from_track",
@@ -434,6 +482,18 @@ class TestExecute:
         connector.get_listens = AsyncMock(side_effect=[[listen1], []])
 
         with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
             patch.object(
                 lb_sync_module.runner_module,
                 "_upsert_artist_from_track",

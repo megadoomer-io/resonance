@@ -401,6 +401,16 @@ class TestSavedTracksStopEarly:
 
         with (
             patch(
+                "resonance.sync.runner.bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "resonance.sync.runner.bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
                 "resonance.sync.runner._upsert_artist_from_track",
                 new_callable=AsyncMock,
             ),
@@ -520,6 +530,16 @@ class TestSavedTracksStopEarly:
         session.no_autoflush.__exit__ = MagicMock(return_value=False)
 
         with (
+            patch(
+                "resonance.sync.runner.bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "resonance.sync.runner.bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
             patch(
                 "resonance.sync.runner._upsert_artist_from_track",
                 new_callable=AsyncMock,

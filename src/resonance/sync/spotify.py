@@ -202,17 +202,31 @@ async def _sync_followed_artists(
     logger.info("spotify_artists_fetched", count=len(artists))
     created = 0
     updated = 0
+
+    # Bulk pre-fetch existing artists
+    service_key = types_module.ServiceType.SPOTIFY.value
+    artist_ids = {a.external_id for a in artists if a.external_id}
+    artist_cache = await runner_module.bulk_fetch_artists(
+        session, service_key, artist_ids
+    )
+
+    # Pass 1: upsert artists
     for artist_data in artists:
         with session.no_autoflush:
-            was_created = await runner_module._upsert_artist(session, artist_data)
-            await session.flush()
+            was_created = await runner_module._upsert_artist(
+                session, artist_data, artist_cache=artist_cache
+            )
             if was_created:
                 created += 1
             else:
                 updated += 1
-            await runner_module._upsert_user_artist_relation(
-                session, task.user_id, artist_data, task.service_connection_id
-            )
+    await session.flush()
+
+    # Pass 2: user-artist relations
+    for artist_data in artists:
+        await runner_module._upsert_user_artist_relation(
+            session, task.user_id, artist_data, task.service_connection_id
+        )
     return created, updated, {}
 
 
@@ -257,21 +271,50 @@ async def _sync_saved_tracks(
         if not page.items:
             break
 
+        # Bulk pre-fetch existing records for this page
+        service_key = types_module.ServiceType.SPOTIFY.value
+        artist_ids = {
+            item.track.artist_external_id
+            for item in page.items
+            if item.track.artist_external_id
+        }
+        track_ids = {
+            item.track.external_id for item in page.items if item.track.external_id
+        }
+        artist_cache = await runner_module.bulk_fetch_artists(
+            session, service_key, artist_ids
+        )
+        track_cache = await runner_module.bulk_fetch_tracks(
+            session, service_key, track_ids
+        )
+
+        # Pass 1: artists
+        for item in page.items:
+            with session.no_autoflush:
+                await runner_module._upsert_artist_from_track(
+                    session, item.track, artist_cache=artist_cache
+                )
+        await session.flush()
+
+        # Pass 2: tracks
         page_all_duplicates = True
         for item in page.items:
             with session.no_autoflush:
-                await runner_module._upsert_artist_from_track(session, item.track)
-                await session.flush()
-                was_created = await runner_module._upsert_track(session, item.track)
-                await session.flush()
+                was_created = await runner_module._upsert_track(
+                    session, item.track, track_cache=track_cache
+                )
                 if was_created:
                     created += 1
                     page_all_duplicates = False
                 else:
                     updated += 1
-                await runner_module._upsert_user_track_relation(
-                    session, task.user_id, item.track, task.service_connection_id
-                )
+        await session.flush()
+
+        # Pass 3: user-track relations
+        for item in page.items:
+            await runner_module._upsert_user_track_relation(
+                session, task.user_id, item.track, task.service_connection_id
+            )
 
         task.progress_current = created + updated
         await session.commit()
@@ -302,14 +345,46 @@ async def _sync_recently_played(
     watermark: dict[str, object] = {}
     if played_items:
         watermark["last_played_at"] = played_items[0].played_at
-    for played_item in played_items:
-        with session.no_autoflush:
-            await runner_module._upsert_artist_from_track(session, played_item.track)
-            await session.flush()
-            await runner_module._upsert_track(session, played_item.track)
-            await session.flush()
+
+    if played_items:
+        # Bulk pre-fetch existing records
+        service_key = types_module.ServiceType.SPOTIFY.value
+        artist_ids = {
+            item.track.artist_external_id
+            for item in played_items
+            if item.track.artist_external_id
+        }
+        track_ids = {
+            item.track.external_id for item in played_items if item.track.external_id
+        }
+        artist_cache = await runner_module.bulk_fetch_artists(
+            session, service_key, artist_ids
+        )
+        track_cache = await runner_module.bulk_fetch_tracks(
+            session, service_key, track_ids
+        )
+
+        # Pass 1: artists
+        for played_item in played_items:
+            with session.no_autoflush:
+                await runner_module._upsert_artist_from_track(
+                    session, played_item.track, artist_cache=artist_cache
+                )
+        await session.flush()
+
+        # Pass 2: tracks
+        for played_item in played_items:
+            with session.no_autoflush:
+                await runner_module._upsert_track(
+                    session, played_item.track, track_cache=track_cache
+                )
+        await session.flush()
+
+        # Pass 3: events
+        for played_item in played_items:
             await runner_module._upsert_listening_event(
                 session, task.user_id, played_item.track, played_item.played_at
             )
-        created += 1
+            created += 1
+
     return created, watermark

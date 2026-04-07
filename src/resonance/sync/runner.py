@@ -20,8 +20,75 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+async def bulk_fetch_artists(
+    session: AsyncSession,
+    service_key: str,
+    external_ids: set[str],
+) -> dict[str, models_module.Artist]:
+    """Fetch all artists matching service_links IDs in one query.
+
+    Args:
+        session: The async database session.
+        service_key: The service type value (e.g., "listenbrainz").
+        external_ids: Set of external IDs to look up.
+
+    Returns:
+        A dict mapping external_id -> Artist for items found.
+    """
+    if not external_ids:
+        return {}
+    valid_ids = {eid for eid in external_ids if eid}
+    if not valid_ids:
+        return {}
+    stmt = sa.select(models_module.Artist).where(
+        models_module.Artist.service_links[service_key].as_string().in_(valid_ids)
+    )
+    result = await session.execute(stmt)
+    artists = result.scalars().all()
+    return {
+        a.service_links.get(service_key, ""): a
+        for a in artists
+        if a.service_links and service_key in a.service_links
+    }
+
+
+async def bulk_fetch_tracks(
+    session: AsyncSession,
+    service_key: str,
+    external_ids: set[str],
+) -> dict[str, models_module.Track]:
+    """Fetch all tracks matching service_links IDs in one query.
+
+    Args:
+        session: The async database session.
+        service_key: The service type value (e.g., "listenbrainz").
+        external_ids: Set of external IDs to look up.
+
+    Returns:
+        A dict mapping external_id -> Track for items found.
+    """
+    if not external_ids:
+        return {}
+    valid_ids = {eid for eid in external_ids if eid}
+    if not valid_ids:
+        return {}
+    stmt = sa.select(models_module.Track).where(
+        models_module.Track.service_links[service_key].as_string().in_(valid_ids)
+    )
+    result = await session.execute(stmt)
+    tracks = result.scalars().all()
+    return {
+        t.service_links.get(service_key, ""): t
+        for t in tracks
+        if t.service_links and service_key in t.service_links
+    }
+
+
 async def _upsert_artist(
-    session: AsyncSession, artist_data: base_module.ArtistData
+    session: AsyncSession,
+    artist_data: base_module.ArtistData,
+    *,
+    artist_cache: dict[str, models_module.Artist] | None = None,
 ) -> bool:
     """Find artist by service_links JSON lookup, create if not found.
 
@@ -37,6 +104,16 @@ async def _upsert_artist(
         True if created, False if existing artist was found/updated.
     """
     service_key = artist_data.service.value
+
+    # 0. Check bulk-prefetch cache (fast path, avoids per-item DB query)
+    if (
+        artist_cache is not None
+        and artist_data.external_id
+        and artist_data.external_id in artist_cache
+    ):
+        cached = artist_cache[artist_data.external_id]
+        cached.name = artist_data.name
+        return False
 
     # 1. Check service-specific ID in service_links (existing behavior)
     if artist_data.external_id:
@@ -97,24 +174,31 @@ async def _upsert_artist(
 
 
 async def _upsert_artist_from_track(
-    session: AsyncSession, track_data: base_module.TrackData
+    session: AsyncSession,
+    track_data: base_module.TrackData,
+    *,
+    artist_cache: dict[str, models_module.Artist] | None = None,
 ) -> None:
     """Ensure the artist from a track exists in the database.
 
     Args:
         session: The async database session.
         track_data: Track data containing artist information.
+        artist_cache: Optional pre-fetched artist cache to avoid per-item queries.
     """
     artist_data = base_module.ArtistData(
         external_id=track_data.artist_external_id,
         name=track_data.artist_name,
         service=track_data.service,
     )
-    await _upsert_artist(session, artist_data)
+    await _upsert_artist(session, artist_data, artist_cache=artist_cache)
 
 
 async def _upsert_track(
-    session: AsyncSession, track_data: base_module.TrackData
+    session: AsyncSession,
+    track_data: base_module.TrackData,
+    *,
+    track_cache: dict[str, models_module.Track] | None = None,
 ) -> bool:
     """Find track by service_links, create if not found.
 
@@ -129,6 +213,14 @@ async def _upsert_track(
         True if created, False if existing track was found.
     """
     service_key = track_data.service.value
+
+    # 0. Check bulk-prefetch cache (fast path, avoids per-item DB query)
+    if (
+        track_cache is not None
+        and track_data.external_id
+        and track_data.external_id in track_cache
+    ):
+        return False
 
     # 1. Check service-specific ID in service_links
     if track_data.external_id:

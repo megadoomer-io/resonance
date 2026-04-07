@@ -311,3 +311,186 @@ class TestListeningEventUpsert:
 
         # Track lookups (2) + insert (1) = 3
         assert session.execute.call_count == 3
+
+
+class TestBulkFetchArtists:
+    """Tests for bulk_fetch_artists."""
+
+    @pytest.mark.anyio()
+    async def test_returns_empty_dict_for_empty_ids(self) -> None:
+        """Returns empty dict when no IDs are provided."""
+        session = AsyncMock()
+        result = await runner_module.bulk_fetch_artists(session, "listenbrainz", set())
+        assert result == {}
+        session.execute.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_filters_out_empty_ids(self) -> None:
+        """Returns empty dict when all IDs are empty strings."""
+        session = AsyncMock()
+        result = await runner_module.bulk_fetch_artists(session, "listenbrainz", {""})
+        assert result == {}
+        session.execute.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_returns_mapping_for_found_artists(self) -> None:
+        """Returns external_id -> Artist mapping for found records."""
+        session = AsyncMock()
+        artist1 = MagicMock()
+        artist1.service_links = {"listenbrainz": "mbid-1"}
+        artist2 = MagicMock()
+        artist2.service_links = {"listenbrainz": "mbid-2"}
+
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = [artist1, artist2]
+        result_mock = MagicMock()
+        result_mock.scalars.return_value = scalars_mock
+        session.execute.return_value = result_mock
+
+        result = await runner_module.bulk_fetch_artists(
+            session, "listenbrainz", {"mbid-1", "mbid-2"}
+        )
+
+        assert result == {"mbid-1": artist1, "mbid-2": artist2}
+        session.execute.assert_called_once()
+
+
+class TestBulkFetchTracks:
+    """Tests for bulk_fetch_tracks."""
+
+    @pytest.mark.anyio()
+    async def test_returns_empty_dict_for_empty_ids(self) -> None:
+        """Returns empty dict when no IDs are provided."""
+        session = AsyncMock()
+        result = await runner_module.bulk_fetch_tracks(session, "listenbrainz", set())
+        assert result == {}
+        session.execute.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_returns_mapping_for_found_tracks(self) -> None:
+        """Returns external_id -> Track mapping for found records."""
+        session = AsyncMock()
+        track1 = MagicMock()
+        track1.service_links = {"spotify": "sp-1"}
+        track2 = MagicMock()
+        track2.service_links = {"spotify": "sp-2"}
+
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = [track1, track2]
+        result_mock = MagicMock()
+        result_mock.scalars.return_value = scalars_mock
+        session.execute.return_value = result_mock
+
+        result = await runner_module.bulk_fetch_tracks(
+            session, "spotify", {"sp-1", "sp-2"}
+        )
+
+        assert result == {"sp-1": track1, "sp-2": track2}
+        session.execute.assert_called_once()
+
+
+class TestArtistCachePassthrough:
+    """Tests for artist_cache parameter on _upsert_artist."""
+
+    @pytest.mark.anyio()
+    async def test_cache_hit_skips_db_query(self) -> None:
+        """When artist is in cache, no DB query is made."""
+        session = AsyncMock()
+        cached_artist = MagicMock()
+        cached_artist.name = "Old Name"
+        artist_cache = {"art1": cached_artist}
+
+        artist_data = _make_artist_data(
+            external_id="art1",
+            name="New Name",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        created = await runner_module._upsert_artist(
+            session, artist_data, artist_cache=artist_cache
+        )
+
+        assert created is False
+        assert cached_artist.name == "New Name"
+        session.execute.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_cache_miss_falls_through_to_db(self) -> None:
+        """When artist is not in cache, falls through to DB query."""
+        session = AsyncMock()
+        existing_artist = MagicMock()
+        existing_artist.name = "Existing"
+        existing_artist.service_links = {"spotify": "art2"}
+
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = existing_artist
+        session.execute.side_effect = [match_result]
+
+        artist_cache: dict[str, object] = {"other-id": MagicMock()}
+
+        artist_data = _make_artist_data(
+            external_id="art2",
+            name="Updated Name",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        created = await runner_module._upsert_artist(
+            session,
+            artist_data,
+            artist_cache=artist_cache,  # type: ignore[arg-type]
+        )
+
+        assert created is False
+        session.execute.assert_called_once()
+
+
+class TestTrackCachePassthrough:
+    """Tests for track_cache parameter on _upsert_track."""
+
+    @pytest.mark.anyio()
+    async def test_cache_hit_skips_db_query(self) -> None:
+        """When track is in cache, no DB query is made."""
+        session = AsyncMock()
+        cached_track = MagicMock()
+        track_cache = {"track1": cached_track}
+
+        track_data = _make_track_data(
+            external_id="track1",
+            title="Song One",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        created = await runner_module._upsert_track(
+            session, track_data, track_cache=track_cache
+        )
+
+        assert created is False
+        session.execute.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_cache_miss_falls_through_to_db(self) -> None:
+        """When track is not in cache, falls through to DB query."""
+        session = AsyncMock()
+        existing_track = MagicMock()
+        existing_track.service_links = {"spotify": "track2"}
+
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = existing_track
+        session.execute.side_effect = [match_result]
+
+        track_cache: dict[str, object] = {"other-id": MagicMock()}
+
+        track_data = _make_track_data(
+            external_id="track2",
+            title="Song Two",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        created = await runner_module._upsert_track(
+            session,
+            track_data,
+            track_cache=track_cache,  # type: ignore[arg-type]
+        )
+
+        assert created is False
+        session.execute.assert_called_once()
