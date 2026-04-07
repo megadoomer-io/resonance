@@ -119,6 +119,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         session: sa_async.AsyncSession,
         task: task_module.SyncTask,
         connector: connector_base.BaseConnector,
+        connection: user_models.ServiceConnection,
     ) -> dict[str, object]:
         """Execute a Spotify sync child task.
 

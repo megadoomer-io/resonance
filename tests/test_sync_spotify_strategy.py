@@ -180,7 +180,8 @@ class TestSpotifyExecute:
                 return_value=(2, 1, {}),
             ) as mock_sync,
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         mock_sync.assert_awaited_once()
         assert result["items_created"] == 2
@@ -201,7 +202,8 @@ class TestSpotifyExecute:
             new_callable=AsyncMock,
             return_value="tok",
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["items_created"] == 0
         assert result["items_updated"] == 0
@@ -231,7 +233,8 @@ class TestSpotifyExecute:
             ),
             pytest.raises(sync_base.DeferRequest) as exc_info,
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         assert exc_info.value.retry_after == 300.0
         assert exc_info.value.resume_params["data_type"] == "followed_artists"
@@ -262,7 +265,8 @@ class TestSpotifyWatermarkOutput:
                 return_value=(3, 0, {}),
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["watermark"] == {}
 
@@ -288,7 +292,8 @@ class TestSpotifyWatermarkOutput:
                 return_value=(10, 5, {"last_saved_at": "2026-04-06T12:00:00Z"}),
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["watermark"] == {"last_saved_at": "2026-04-06T12:00:00Z"}
 
@@ -314,7 +319,8 @@ class TestSpotifyWatermarkOutput:
                 return_value=(7, {"last_played_at": "2026-04-06T10:00:00Z"}),
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["watermark"] == {"last_played_at": "2026-04-06T10:00:00Z"}
 
@@ -340,7 +346,8 @@ class TestSpotifyWatermarkOutput:
                 return_value=(0, 0, {}),
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["watermark"] == {}
 

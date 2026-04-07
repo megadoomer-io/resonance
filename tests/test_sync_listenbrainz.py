@@ -236,7 +236,8 @@ class TestExecute:
                 new_callable=AsyncMock,
             ) as mock_upsert_event,
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["items_created"] == 2
         assert result["last_listened_at"] == 1700000100
@@ -294,7 +295,8 @@ class TestExecute:
                 3,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         # Should have fetched exactly MAX_PAGES pages
         assert connector.get_listens.call_count == 3
@@ -319,8 +321,9 @@ class TestExecute:
             )
             connector = _make_lb_connector()
 
+            connection = _make_connection()
             with pytest.raises(sync_base.ShutdownRequest) as exc_info:
-                await strategy.execute(session, task, connector)
+                await strategy.execute(session, task, connector, connection)
 
             assert exc_info.value.resume_params["max_ts"] == 99999
             assert exc_info.value.resume_params["items_so_far"] == 42
@@ -345,8 +348,9 @@ class TestExecute:
             )
         )
 
+        connection = _make_connection()
         with pytest.raises(sync_base.DeferRequest) as exc_info:
-            await strategy.execute(session, task, connector)
+            await strategy.execute(session, task, connector, connection)
 
         assert exc_info.value.retry_after == 300.0
         assert "max_ts" in exc_info.value.resume_params
@@ -413,7 +417,8 @@ class TestExecute:
             ),
             pytest.raises(sync_base.DeferRequest) as exc_info,
         ):
-            await strategy.execute(session, task_phase1, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task_phase1, connector, connection)
 
         defer = exc_info.value
         assert defer.resume_params["last_listened_at"] == 1700000100
@@ -460,7 +465,9 @@ class TestExecute:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task_phase2, connector2)
+            result = await strategy.execute(
+                session, task_phase2, connector2, connection
+            )
 
         # last_listened_at should be from phase 1 (1700000100), not page 2 (1700000020)
         assert result["last_listened_at"] == 1700000100
@@ -508,7 +515,8 @@ class TestExecute:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["watermark"] == {"last_listened_at": 1700000100}
 
@@ -521,7 +529,8 @@ class TestExecute:
         connector = _make_lb_connector()
         connector.get_listens = AsyncMock(return_value=[])
 
-        result = await strategy.execute(session, task, connector)
+        connection = _make_connection()
+        result = await strategy.execute(session, task, connector, connection)
 
         assert "watermark" not in result
 
@@ -586,7 +595,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         # Should have called get_listens 3 times:
         # 1. count=1000 (failed), 2. count=500 (success), 3. count=1000 (empty)
@@ -651,7 +661,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         calls = connector.get_listens.call_args_list
         assert calls[0].kwargs["count"] == 1000
@@ -678,7 +689,8 @@ class TestAdaptivePageSize:
             patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
             pytest.raises(httpx.RemoteProtocolError),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         # Should have tried 1000, 500, 250, 125, 100, then raised at 100
         calls = connector.get_listens.call_args_list
@@ -736,7 +748,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         calls = connector.get_listens.call_args_list
         assert calls[0].kwargs["count"] == 1000
@@ -798,7 +811,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         # Backoff: 5s * depth (5, 10)
         sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
