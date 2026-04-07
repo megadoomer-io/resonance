@@ -462,11 +462,17 @@ def _apply_watermark_resume(
     listens_watermark = connection.sync_watermark.get("listens", {})
     oldest_synced_at = listens_watermark.get("oldest_synced_at")
     if oldest_synced_at is not None:
-        task.params = {**task.params, "max_ts": int(str(oldest_synced_at))}
+        items_so_far = int(task.progress_current or 0)
+        task.params = {
+            **task.params,
+            "max_ts": int(str(oldest_synced_at)),
+            "items_so_far": items_so_far,
+        }
         logger.info(
             "watermark_resume_applied",
             task_id=str(task.id),
             max_ts=oldest_synced_at,
+            items_so_far=items_so_far,
         )
 
 
@@ -587,10 +593,10 @@ async def _reenqueue_orphaned_tasks(
         if deferred_tasks:
             await session.commit()
 
-        # Reset RUNNING tasks back to PENDING, with watermark resume
+        # Reset RUNNING tasks back to PENDING, with watermark resume.
+        # Preserve started_at so the UI shows continuous elapsed time.
         for task in running_tasks:
             task.status = types_module.SyncStatus.PENDING
-            task.started_at = None
 
             # Attempt watermark-based resume for TIME_RANGE tasks
             if task.task_type == types_module.SyncTaskType.TIME_RANGE:

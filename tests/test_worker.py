@@ -594,6 +594,7 @@ class TestSyncRangeWatermarkResume:
             task_type=types_module.SyncTaskType.TIME_RANGE,
             status=types_module.SyncStatus.RUNNING,
             params={"username": "testuser", "min_ts": 1700000000},
+            progress_current=15000,
         )
 
         connection = MagicMock(spec=user_models.ServiceConnection)
@@ -672,8 +673,9 @@ class TestSyncRangeWatermarkResume:
 
         await worker_module.sync_range(ctx, str(task_id))
 
-        # Strategy should have received max_ts from watermark
+        # Strategy should have received max_ts and items_so_far
         assert captured_params["max_ts"] == 1700500000
+        assert captured_params["items_so_far"] == 15000
         assert captured_params["username"] == "testuser"
         assert captured_params["min_ts"] == 1700000000
 
@@ -1470,9 +1472,9 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        # Task should be reset to PENDING with started_at cleared
+        # Task should be reset to PENDING with started_at preserved
         assert task.status == types_module.SyncStatus.PENDING
-        assert task.started_at is None
+        assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
         # Should be re-enqueued as sync_range (TIME_RANGE task)
         arq_redis.enqueue_job.assert_called_once_with(
             "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
@@ -1481,13 +1483,14 @@ class TestReenqueueOrphanedTasks:
 
     @pytest.mark.asyncio
     async def test_running_listenbrainz_task_resumes_from_watermark(self) -> None:
-        """RUNNING ListenBrainz task gets max_ts injected from watermark."""
+        """RUNNING ListenBrainz task gets max_ts and items_so_far injected."""
         conn_id = uuid.uuid4()
         task = _make_task(
             status=types_module.SyncStatus.RUNNING,
         )
         task.service_connection_id = conn_id
         task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task.progress_current = 29000
         task.params = {"username": "testuser", "min_ts": 1700000000}
 
         session = AsyncMock()
@@ -1540,10 +1543,14 @@ class TestReenqueueOrphanedTasks:
 
         # max_ts should be injected from watermark's oldest_synced_at
         assert task.params["max_ts"] == 1700500000
+        # items_so_far should be injected from progress_current
+        assert task.params["items_so_far"] == 29000
         # Original params preserved
         assert task.params["username"] == "testuser"
         assert task.params["min_ts"] == 1700000000
         assert task.status == types_module.SyncStatus.PENDING
+        # started_at preserved for UI continuity
+        assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
 
     @pytest.mark.asyncio
     async def test_running_listenbrainz_task_without_watermark_unchanged(self) -> None:
