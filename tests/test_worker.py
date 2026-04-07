@@ -1247,11 +1247,19 @@ class TestReenqueueOrphanedTasks:
         running_result = MagicMock()
         running_result.scalars.return_value = running_scalars
 
+        # 5. Connection query for watermark resume — no watermark
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.sync_watermark = {}
+        conn_result = MagicMock()
+        conn_result.scalar_one_or_none.return_value = connection
+
         session.execute.side_effect = [
             pending_result,
             deferred_result,
             stale_result,
             running_result,
+            conn_result,
         ]
 
         arq_redis = AsyncMock()
@@ -1268,6 +1276,181 @@ class TestReenqueueOrphanedTasks:
             "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
         )
         session.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_running_listenbrainz_task_resumes_from_watermark(self) -> None:
+        """RUNNING ListenBrainz task gets max_ts injected from watermark."""
+        conn_id = uuid.uuid4()
+        task = _make_task(
+            status=types_module.SyncStatus.RUNNING,
+        )
+        task.service_connection_id = conn_id
+        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task.params = {"username": "testuser", "min_ts": 1700000000}
+
+        session = AsyncMock()
+
+        # 1-3: empty queries for PENDING, DEFERRED, stale
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        # 4. RUNNING tasks query — returns the stuck task
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = [task]
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        # 5. Connection query — ListenBrainz with watermark showing page 29
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.LISTENBRAINZ
+        connection.sync_watermark = {
+            "listens": {
+                "newest_synced_at": 1712000000,
+                "oldest_synced_at": 1700500000,
+            }
+        }
+        conn_result = MagicMock()
+        conn_result.scalar_one_or_none.return_value = connection
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+            conn_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        # max_ts should be injected from watermark's oldest_synced_at
+        assert task.params["max_ts"] == 1700500000
+        # Original params preserved
+        assert task.params["username"] == "testuser"
+        assert task.params["min_ts"] == 1700000000
+        assert task.status == types_module.SyncStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_running_listenbrainz_task_without_watermark_unchanged(self) -> None:
+        """RUNNING ListenBrainz task with no watermark keeps original params."""
+        conn_id = uuid.uuid4()
+        task = _make_task(
+            status=types_module.SyncStatus.RUNNING,
+        )
+        task.service_connection_id = conn_id
+        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task.params = {"username": "testuser", "min_ts": None}
+
+        session = AsyncMock()
+
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = [task]
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        # Connection with empty watermark
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.LISTENBRAINZ
+        connection.sync_watermark = {}
+        conn_result = MagicMock()
+        conn_result.scalar_one_or_none.return_value = connection
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+            conn_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        # Params should be unchanged — no watermark to inject
+        assert "max_ts" not in task.params
+        assert task.params == {"username": "testuser", "min_ts": None}
+
+    @pytest.mark.asyncio
+    async def test_running_task_connection_not_found_still_reenqueues(self) -> None:
+        """Connection not found still re-enqueues without watermark."""
+        task = _make_task(
+            status=types_module.SyncStatus.RUNNING,
+        )
+        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task.params = {"username": "testuser", "min_ts": None}
+
+        session = AsyncMock()
+
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = [task]
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        # Connection not found
+        conn_result = MagicMock()
+        conn_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+            conn_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        # Should still be re-enqueued, just without watermark injection
+        assert task.status == types_module.SyncStatus.PENDING
+        arq_redis.enqueue_job.assert_called_once_with(
+            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+        )
 
     @pytest.mark.asyncio
     async def test_no_orphans_does_nothing(self) -> None:

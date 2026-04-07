@@ -433,6 +433,35 @@ async def _load_task(
     return result.scalar_one_or_none()
 
 
+def _apply_watermark_resume(
+    task: task_module.SyncTask,
+    connection: user_models.ServiceConnection,
+) -> None:
+    """Inject watermark position into task params for crash recovery.
+
+    For ListenBrainz TIME_RANGE tasks, reads ``oldest_synced_at`` from
+    the connection's sync watermark and sets it as ``max_ts`` so the
+    task resumes from where the previous run left off instead of
+    re-processing all pages.
+
+    Args:
+        task: The orphaned task being re-enqueued.
+        connection: The task's ServiceConnection with current watermark.
+    """
+    if connection.service_type != types_module.ServiceType.LISTENBRAINZ:
+        return
+
+    listens_watermark = connection.sync_watermark.get("listens", {})
+    oldest_synced_at = listens_watermark.get("oldest_synced_at")
+    if oldest_synced_at is not None:
+        task.params = {**task.params, "max_ts": int(str(oldest_synced_at))}
+        logger.info(
+            "watermark_resume_applied",
+            task_id=str(task.id),
+            max_ts=oldest_synced_at,
+        )
+
+
 async def _reenqueue_orphaned_tasks(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     arq_redis: arq.ArqRedis,
@@ -550,10 +579,22 @@ async def _reenqueue_orphaned_tasks(
         if deferred_tasks:
             await session.commit()
 
-        # Reset RUNNING tasks back to PENDING
+        # Reset RUNNING tasks back to PENDING, with watermark resume
         for task in running_tasks:
             task.status = types_module.SyncStatus.PENDING
             task.started_at = None
+
+            # Attempt watermark-based resume for TIME_RANGE tasks
+            if task.task_type == types_module.SyncTaskType.TIME_RANGE:
+                conn_result = await session.execute(
+                    sa.select(user_models.ServiceConnection).where(
+                        user_models.ServiceConnection.id == task.service_connection_id
+                    )
+                )
+                connection = conn_result.scalar_one_or_none()
+                if connection is not None:
+                    _apply_watermark_resume(task, connection)
+
         if running_tasks:
             await session.commit()
             logger.info("reset_running_orphans", count=len(running_tasks))
