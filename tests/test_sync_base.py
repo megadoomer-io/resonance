@@ -145,6 +145,18 @@ class TestShutdownRequestedEvent:
 # ---------------------------------------------------------------------------
 
 
+class TestSyncStrategySignature:
+    """Tests for the SyncStrategy.execute() method signature."""
+
+    def test_execute_accepts_connection_parameter(self) -> None:
+        """execute() signature includes connection parameter."""
+        import inspect
+
+        sig = inspect.signature(sync_base.SyncStrategy.execute)
+        params = list(sig.parameters.keys())
+        assert "connection" in params
+
+
 class TestSyncStrategy:
     """Tests for the SyncStrategy abstract base class."""
 
@@ -187,6 +199,7 @@ class TestSyncStrategy:
                 session: mock.ANY,
                 task: mock.ANY,
                 connector: mock.ANY,
+                connection: mock.ANY,
             ) -> dict[str, object]:
                 return {}
 

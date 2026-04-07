@@ -225,7 +225,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 )
 
             try:
-                result = await strategy.execute(session, task, connector)
+                result = await strategy.execute(session, task, connector, connection)
                 task.status = types_module.SyncStatus.COMPLETED
                 task.result = result
                 task.completed_at = datetime.datetime.now(datetime.UTC)

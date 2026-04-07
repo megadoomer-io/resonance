@@ -183,6 +183,114 @@ class TestPlan:
 
 
 # ---------------------------------------------------------------------------
+# plan() backward-compatible watermark tests
+# ---------------------------------------------------------------------------
+
+
+class TestPlanBackwardCompatibility:
+    """Tests for two-ended watermark reading with backward compatibility."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_last_listened_at_treated_as_newest_synced_at(self) -> None:
+        """Legacy watermark with only last_listened_at plans one task."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={"listens": {"last_listened_at": 1700000000}},
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 1
+        desc = descriptors[0]
+        assert desc.params["min_ts"] == 1700000000
+        assert "since" in desc.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_new_watermark_with_both_fields_plans_two_tasks(self) -> None:
+        """Watermark with newest_synced_at and oldest_synced_at plans two tasks."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1650000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 2
+
+    @pytest.mark.asyncio
+    async def test_new_watermark_with_only_newest_plans_one_task(self) -> None:
+        """Watermark with only newest_synced_at (no oldest) plans one task."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 1
+        desc = descriptors[0]
+        assert desc.params["min_ts"] == 1700000000
+
+    @pytest.mark.asyncio
+    async def test_interrupted_sync_first_task_has_min_ts(self) -> None:
+        """First task (new listens) has min_ts=newest_synced_at."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1680000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        first = descriptors[0]
+        assert first.params["min_ts"] == 1700000000
+        assert "since" in first.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_sync_second_task_has_max_ts(self) -> None:
+        """Second task (backfill) has max_ts=oldest_synced_at and min_ts=None."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1680000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        second = descriptors[1]
+        assert second.params["max_ts"] == 1680000000
+        assert second.params["min_ts"] is None
+        assert "backfill" in second.description.lower()
+
+
+# ---------------------------------------------------------------------------
 # execute() tests
 # ---------------------------------------------------------------------------
 
@@ -236,7 +344,8 @@ class TestExecute:
                 new_callable=AsyncMock,
             ) as mock_upsert_event,
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         assert result["items_created"] == 2
         assert result["last_listened_at"] == 1700000100
@@ -294,7 +403,8 @@ class TestExecute:
                 3,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         # Should have fetched exactly MAX_PAGES pages
         assert connector.get_listens.call_count == 3
@@ -319,8 +429,9 @@ class TestExecute:
             )
             connector = _make_lb_connector()
 
+            connection = _make_connection()
             with pytest.raises(sync_base.ShutdownRequest) as exc_info:
-                await strategy.execute(session, task, connector)
+                await strategy.execute(session, task, connector, connection)
 
             assert exc_info.value.resume_params["max_ts"] == 99999
             assert exc_info.value.resume_params["items_so_far"] == 42
@@ -345,8 +456,9 @@ class TestExecute:
             )
         )
 
+        connection = _make_connection()
         with pytest.raises(sync_base.DeferRequest) as exc_info:
-            await strategy.execute(session, task, connector)
+            await strategy.execute(session, task, connector, connection)
 
         assert exc_info.value.retry_after == 300.0
         assert "max_ts" in exc_info.value.resume_params
@@ -413,7 +525,8 @@ class TestExecute:
             ),
             pytest.raises(sync_base.DeferRequest) as exc_info,
         ):
-            await strategy.execute(session, task_phase1, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task_phase1, connector, connection)
 
         defer = exc_info.value
         assert defer.resume_params["last_listened_at"] == 1700000100
@@ -460,7 +573,9 @@ class TestExecute:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task_phase2, connector2)
+            result = await strategy.execute(
+                session, task_phase2, connector2, connection
+            )
 
         # last_listened_at should be from phase 1 (1700000100), not page 2 (1700000020)
         assert result["last_listened_at"] == 1700000100
@@ -508,9 +623,13 @@ class TestExecute:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
-        assert result["watermark"] == {"last_listened_at": 1700000100}
+        assert result["watermark"] == {
+            "newest_synced_at": 1700000100,
+            "oldest_synced_at": 1700000100,
+        }
 
     @pytest.mark.asyncio
     async def test_result_no_watermark_when_no_listens(self) -> None:
@@ -521,9 +640,156 @@ class TestExecute:
         connector = _make_lb_connector()
         connector.get_listens = AsyncMock(return_value=[])
 
-        result = await strategy.execute(session, task, connector)
+        connection = _make_connection()
+        result = await strategy.execute(session, task, connector, connection)
 
         assert "watermark" not in result
+
+
+# ---------------------------------------------------------------------------
+# Incremental watermark tests
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalWatermark:
+    """Tests for per-page watermark updates during execute()."""
+
+    @pytest.mark.asyncio
+    async def test_watermark_updated_after_each_page(self) -> None:
+        """connection.sync_watermark is updated after each page commit."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+        connection = _make_connection()
+
+        # Page 1: listens at 1700000200 (newest) and 1700000100 (oldest)
+        page1 = [
+            _make_listen(1700000200, "Song A", "Artist A"),
+            _make_listen(1700000100, "Song B", "Artist B"),
+        ]
+        # Page 2: listens at 1700000050 and 1700000010
+        page2 = [
+            _make_listen(1700000050, "Song C", "Artist C"),
+            _make_listen(1700000010, "Song D", "Artist D"),
+        ]
+
+        connector.get_listens = AsyncMock(side_effect=[page1, page2, []])
+
+        # Track watermark values after each commit
+        watermarks_after_commit: list[dict[str, object]] = []
+
+        async def capture_watermark() -> None:
+            watermarks_after_commit.append(
+                dict(connection.sync_watermark.get("listens", {}))
+            )
+
+        session.commit = AsyncMock(side_effect=capture_watermark)
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await strategy.execute(session, task, connector, connection)
+
+        # After page 1: newest=1700000200, oldest=1700000100
+        assert watermarks_after_commit[0] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000100,
+        }
+        # After page 2: newest still 1700000200, oldest advances to 1700000010
+        assert watermarks_after_commit[1] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000010,
+        }
+
+    @pytest.mark.asyncio
+    async def test_result_watermark_uses_two_ended_structure(self) -> None:
+        """Final result has watermark with newest/oldest_synced_at."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+        connection = _make_connection()
+
+        page1 = [
+            _make_listen(1700000200, "Song A", "Artist A"),
+            _make_listen(1700000100, "Song B", "Artist B"),
+        ]
+        page2 = [
+            _make_listen(1700000050, "Song C", "Artist C"),
+        ]
+
+        connector.get_listens = AsyncMock(side_effect=[page1, page2, []])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await strategy.execute(session, task, connector, connection)
+
+        assert result["watermark"] == {
+            "newest_synced_at": 1700000200,
+            "oldest_synced_at": 1700000050,
+        }
+        # last_listened_at should still be present for backward compat
+        assert result["last_listened_at"] == 1700000200
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +852,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         # Should have called get_listens 3 times:
         # 1. count=1000 (failed), 2. count=500 (success), 3. count=1000 (empty)
@@ -651,7 +918,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         calls = connector.get_listens.call_args_list
         assert calls[0].kwargs["count"] == 1000
@@ -678,7 +946,8 @@ class TestAdaptivePageSize:
             patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
             pytest.raises(httpx.RemoteProtocolError),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         # Should have tried 1000, 500, 250, 125, 100, then raised at 100
         calls = connector.get_listens.call_args_list
@@ -736,7 +1005,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            result = await strategy.execute(session, task, connector, connection)
 
         calls = connector.get_listens.call_args_list
         assert calls[0].kwargs["count"] == 1000
@@ -798,7 +1068,8 @@ class TestAdaptivePageSize:
                 new_callable=AsyncMock,
             ),
         ):
-            await strategy.execute(session, task, connector)
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
 
         # Backoff: 5s * depth (5, 10)
         sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
