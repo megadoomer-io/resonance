@@ -123,6 +123,15 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
     ) -> dict[str, object]:
         """Execute a Spotify sync child task.
 
+        Args:
+            session: Async database session for persistence operations.
+            task: The SyncTask being executed, containing params like
+                ``data_type`` that select which helper to dispatch.
+            connector: The BaseConnector (must be a SpotifyConnector).
+            connection: The ServiceConnection whose ``sync_watermark``
+                is updated incrementally after each page commit so that
+                progress survives crashes mid-sync.
+
         Loads the service connection to decrypt the access token at
         execute-time, avoiding plaintext token storage in task.params.
         """
@@ -146,7 +155,12 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
                 )
             elif data_type == "saved_tracks":
                 items_created, items_updated, watermark = await _sync_saved_tracks(
-                    session, task, sp_connector, access_token
+                    session,
+                    task,
+                    sp_connector,
+                    access_token,
+                    connection=connection,
+                    data_type=data_type,
                 )
             elif data_type == "recently_played":
                 items_created, watermark = await _sync_recently_played(
@@ -236,6 +250,9 @@ async def _sync_saved_tracks(
     task: task_module.SyncTask,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
+    *,
+    connection: user_models.ServiceConnection | None = None,
+    data_type: str = "saved_tracks",
 ) -> tuple[int, int, dict[str, object]]:
     """Fetch saved tracks page-by-page with stop-early and fast-finish."""
     created = 0
@@ -318,6 +335,14 @@ async def _sync_saved_tracks(
             )
 
         task.progress_current = created + updated
+
+        # Incrementally persist the watermark on the connection so progress
+        # survives crashes between pages.
+        if connection is not None and watermark:
+            updated_watermarks = dict(connection.sync_watermark)
+            updated_watermarks[data_type] = dict(watermark)
+            connection.sync_watermark = updated_watermarks
+
         await session.commit()
 
         if page_all_duplicates:
