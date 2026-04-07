@@ -61,6 +61,33 @@ track_map = await bulk_fetch_tracks(session, service_key, track_ids)
 
 The per-item upsert functions gain an optional cache parameter. When provided, they check the cache before querying the DB. Items not found in the cache fall through to the existing per-item lookup logic (MBID cross-reference, name matching) — this handles edge cases while the bulk path covers ~90% of items.
 
+## 4. Adaptive Page Size
+
+ListenBrainz has a multi-year gap in listening history. When paginating backward through time with `count=1000`, the server may take a long time scanning empty time ranges to fill the response — long enough to cause `RemoteProtocolError` (server disconnect/timeout). With `count=100`, the server responds faster because it has less to accumulate.
+
+**Solution:** Start at `count=1000` and adaptively reduce on failure. Since pagination uses `max_ts` (a cursor, not an offset), changing page size mid-stream is safe — no data is skipped.
+
+```
+Start: count = 1000
+On success → grow back toward 1000 (double, capped at 1000)
+On RemoteProtocolError → halve count (min 100), retry same max_ts
+```
+
+Example flow through a gap:
+```
+count=1000, max_ts=T  → timeout
+count=500,  max_ts=T  → timeout
+count=250,  max_ts=T  → success (got 250 items)
+count=500,  max_ts=T' → success (got 500 items)
+count=1000, max_ts=T" → success (back to full speed)
+```
+
+**Where it lives:** In `ListenBrainzSyncStrategy.execute()`. The strategy wraps the `get_listens` call in a try/except for transient errors. On failure, it halves `count` and retries the same `max_ts`. On success, it doubles `count` for the next page (capped at 1000). The connector's built-in transient retry still handles other transient errors normally.
+
+**Important:** The adaptive retry must catch the error *before* it reaches the connector's transient retry loop. Otherwise the connector exhausts 5 retries at the same (too-large) page size. The strategy should call `get_listens` with a shorter timeout and handle the retry with reduced page size itself, or the connector's transient retry should be made page-size-aware.
+
+The simplest approach: catch `RemoteProtocolError` and `ReadTimeout` in the strategy's page loop, reduce `count`, and retry. The connector's transient retry handles other transient errors (connection refused, etc.) that aren't page-size-related.
+
 ## Changes by File
 
 ### sync/runner.py
@@ -69,8 +96,9 @@ The per-item upsert functions gain an optional cache parameter. When provided, t
 - Upsert functions gain optional `artist_cache` / `track_cache` params
 
 ### sync/listenbrainz.py
-- Change `count=100` to `count=1000`
+- Change `count=100` to `count=1000` (initial)
 - Restructure loop into three passes with bulk pre-fetch
+- Adaptive page size: halve on timeout, double on success
 
 ### sync/spotify.py
 - Apply same flush batching and bulk pre-fetch to `_sync_saved_tracks` and `_sync_recently_played`
