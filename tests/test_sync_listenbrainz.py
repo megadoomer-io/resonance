@@ -183,6 +183,114 @@ class TestPlan:
 
 
 # ---------------------------------------------------------------------------
+# plan() backward-compatible watermark tests
+# ---------------------------------------------------------------------------
+
+
+class TestPlanBackwardCompatibility:
+    """Tests for two-ended watermark reading with backward compatibility."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_last_listened_at_treated_as_newest_synced_at(self) -> None:
+        """Legacy watermark with only last_listened_at plans one task."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={"listens": {"last_listened_at": 1700000000}},
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 1
+        desc = descriptors[0]
+        assert desc.params["min_ts"] == 1700000000
+        assert "since" in desc.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_new_watermark_with_both_fields_plans_two_tasks(self) -> None:
+        """Watermark with newest_synced_at and oldest_synced_at plans two tasks."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1650000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 2
+
+    @pytest.mark.asyncio
+    async def test_new_watermark_with_only_newest_plans_one_task(self) -> None:
+        """Watermark with only newest_synced_at (no oldest) plans one task."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        assert len(descriptors) == 1
+        desc = descriptors[0]
+        assert desc.params["min_ts"] == 1700000000
+
+    @pytest.mark.asyncio
+    async def test_interrupted_sync_first_task_has_min_ts(self) -> None:
+        """First task (new listens) has min_ts=newest_synced_at."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1680000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        first = descriptors[0]
+        assert first.params["min_ts"] == 1700000000
+        assert "since" in first.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_sync_second_task_has_max_ts(self) -> None:
+        """Second task (backfill) has max_ts=oldest_synced_at and min_ts=None."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1700000000,
+                    "oldest_synced_at": 1680000000,
+                }
+            },
+        )
+        connector = _make_lb_connector()
+
+        descriptors = await strategy.plan(session, connection, connector)
+
+        second = descriptors[1]
+        assert second.params["max_ts"] == 1680000000
+        assert second.params["min_ts"] is None
+        assert "backfill" in second.description.lower()
+
+
+# ---------------------------------------------------------------------------
 # execute() tests
 # ---------------------------------------------------------------------------
 

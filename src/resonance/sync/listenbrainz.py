@@ -40,10 +40,19 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         connection: user_models.ServiceConnection,
         connector: connector_base.BaseConnector,
     ) -> list[sync_base.SyncTaskDescriptor]:
-        """Plan a ListenBrainz sync by creating a single TIME_RANGE task.
+        """Plan ListenBrainz sync tasks with two-ended watermark support.
 
-        Checks for a watermark from the most recent completed sync to enable
-        incremental sync. Fetches listen count for progress tracking.
+        Handles three watermark scenarios:
+
+        1. No watermark: full sync (one task, min_ts=None).
+        2. Legacy watermark (``last_listened_at`` only) or new watermark with
+           only ``newest_synced_at``: incremental sync (one task from that
+           timestamp upward).
+        3. Two-ended watermark (``newest_synced_at`` + ``oldest_synced_at``):
+           plans two tasks -- one for new listens above the newest boundary,
+           and one to resume backfill below the oldest boundary. If the
+           previous sync was actually complete, the backfill task will fetch
+           zero listens and finish immediately.
 
         Args:
             session: Active database session.
@@ -51,7 +60,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             connector: The ListenBrainz connector instance.
 
         Returns:
-            A single-element list with a TIME_RANGE task descriptor.
+            A list of TIME_RANGE task descriptors.
         """
         lb_connector = _cast_connector(connector)
         username = connection.external_user_id
@@ -63,28 +72,65 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         except (httpx.HTTPError, connector_base.RateLimitExceededError):  # fmt: skip
             logger.warning("could_not_fetch_listen_count", username=username)
 
-        # Read watermark from connection
         listens_watermark = connection.sync_watermark.get("listens", {})
-        watermark: int | None = None
-        raw = listens_watermark.get("last_listened_at")
-        if raw is not None:
-            watermark = int(str(raw))
 
-        if watermark is not None:
-            listened_at_dt = datetime.datetime.fromtimestamp(watermark, tz=datetime.UTC)
-            date_str = listened_at_dt.date().isoformat()
-            description = f"Syncing new listens since {date_str}"
-        else:
-            description = "Syncing listening history"
+        # Read two-ended watermark, with backward compat for legacy format
+        newest_synced_at: int | None = None
+        oldest_synced_at: int | None = None
 
-        return [
-            sync_base.SyncTaskDescriptor(
-                task_type=types_module.SyncTaskType.TIME_RANGE,
-                params={"username": username, "min_ts": watermark},
-                progress_total=progress_total,
-                description=description,
+        raw_newest = listens_watermark.get("newest_synced_at")
+        raw_oldest = listens_watermark.get("oldest_synced_at")
+        raw_legacy = listens_watermark.get("last_listened_at")
+
+        if raw_newest is not None:
+            newest_synced_at = int(str(raw_newest))
+            oldest_synced_at = int(str(raw_oldest)) if raw_oldest is not None else None
+        elif raw_legacy is not None:
+            # Legacy format: treat as complete sync up to this point
+            newest_synced_at = int(str(raw_legacy))
+
+        descriptors: list[sync_base.SyncTaskDescriptor] = []
+
+        if newest_synced_at is not None:
+            # Task 1: new listens since last sync
+            listened_at_dt = datetime.datetime.fromtimestamp(
+                newest_synced_at, tz=datetime.UTC
             )
-        ]
+            date_str = listened_at_dt.date().isoformat()
+            descriptors.append(
+                sync_base.SyncTaskDescriptor(
+                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    params={"username": username, "min_ts": newest_synced_at},
+                    progress_total=progress_total,
+                    description=f"Syncing new listens since {date_str}",
+                )
+            )
+
+            # Task 2: remaining backfill if sync was potentially interrupted
+            if oldest_synced_at is not None:
+                descriptors.append(
+                    sync_base.SyncTaskDescriptor(
+                        task_type=types_module.SyncTaskType.TIME_RANGE,
+                        params={
+                            "username": username,
+                            "max_ts": oldest_synced_at,
+                            "min_ts": None,
+                        },
+                        description="Resuming listening history backfill",
+                    )
+                )
+        else:
+            # No watermark at all — full sync
+            descriptors.append(
+                sync_base.SyncTaskDescriptor(
+                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    params={"username": username, "min_ts": None},
+                    progress_total=progress_total,
+                    description="Syncing listening history",
+                )
+            )
+
+        return descriptors
 
     async def execute(
         self,
