@@ -116,6 +116,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                             "max_ts": oldest_synced_at,
                             "min_ts": None,
                         },
+                        progress_total=progress_total,
                         description="Resuming listening history backfill",
                     )
                 )

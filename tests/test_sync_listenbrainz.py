@@ -288,6 +288,7 @@ class TestPlanBackwardCompatibility:
         assert second.params["max_ts"] == 1680000000
         assert second.params["min_ts"] is None
         assert "backfill" in second.description.lower()
+        assert second.progress_total == 500  # same listen count as forward task
 
 
 # ---------------------------------------------------------------------------
