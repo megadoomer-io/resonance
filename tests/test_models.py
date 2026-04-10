@@ -31,9 +31,10 @@ class TestServiceType:
         assert types_module.ServiceType.BANDSINTOWN == "bandsintown"
         assert types_module.ServiceType.BANDCAMP == "bandcamp"
         assert types_module.ServiceType.SOUNDCLOUD == "soundcloud"
+        assert types_module.ServiceType.TEST == "test"
 
     def test_service_type_count(self) -> None:
-        assert len(types_module.ServiceType) == 7
+        assert len(types_module.ServiceType) == 8
 
 
 class TestArtistRelationType:

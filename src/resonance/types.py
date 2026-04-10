@@ -13,6 +13,7 @@ class ServiceType(enum.StrEnum):
     BANDSINTOWN = "bandsintown"
     BANDCAMP = "bandcamp"
     SOUNDCLOUD = "soundcloud"
+    TEST = "test"
 
 
 class ArtistRelationType(enum.StrEnum):
