@@ -650,34 +650,34 @@ async def resume_task(
                     str(task.id),
                     _job_id=f"sync_range:{task.id}",
                 )
-        elif task.parent_id is not None:
-            # Step mode: find and enqueue the next pending sibling
-            next_sibling = (
+        else:
+            # Step mode: find the next pending child or sibling
+            # If this is a parent (SYNC_JOB), look for pending children
+            # If this is a child, look for pending siblings
+            parent_id = task.id if task.parent_id is None else task.parent_id
+            next_task = (
                 await db.execute(
                     sa.select(task_models.SyncTask)
                     .where(
-                        task_models.SyncTask.parent_id == task.parent_id,
+                        task_models.SyncTask.parent_id == parent_id,
                         task_models.SyncTask.status == types_module.SyncStatus.PENDING,
                     )
                     .order_by(task_models.SyncTask.created_at)
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            if next_sibling is None:
-                raise fastapi.HTTPException(
-                    status_code=400,
-                    detail="No pending sibling tasks remaining",
-                )
+            if next_task is None:
+                # No more pending tasks — complete the parent
+                if task.parent_id is None:
+                    task.status = types_module.SyncStatus.COMPLETED
+                    task.completed_at = datetime.datetime.now(datetime.UTC)
+                    await db.commit()
+                return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
             if arq_redis:
                 await arq_redis.enqueue_job(
                     "sync_range",
-                    str(next_sibling.id),
-                    _job_id=f"sync_range:{next_sibling.id}",
+                    str(next_task.id),
+                    _job_id=f"sync_range:{next_task.id}",
                 )
-        else:
-            raise fastapi.HTTPException(
-                status_code=400,
-                detail="Task cannot be resumed",
-            )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
