@@ -212,7 +212,20 @@ async def auth_callback(
             user_id = uuid.UUID(session_user_id)
         else:
             # New user — create User
-            new_user = user_models.User(display_name=display_name)
+            # Check if this is the first user in the system
+            count_result = await db.execute(
+                sa.select(sa.func.count()).select_from(user_models.User)
+            )
+            is_first_user = count_result.scalar_one() == 0
+
+            new_user = user_models.User(
+                display_name=display_name,
+                role=(
+                    types_module.UserRole.OWNER
+                    if is_first_user
+                    else types_module.UserRole.USER
+                ),
+            )
             db.add(new_user)
             await db.flush()
             user_id = new_user.id
@@ -233,6 +246,13 @@ async def auth_callback(
 
     # Set session
     session["user_id"] = str(user_id)
+
+    # Load and cache the user's role in the session for template access.
+    role_result = await db.execute(
+        sa.select(user_models.User.role).where(user_models.User.id == user_id)
+    )
+    user_role = role_result.scalar_one()
+    session["user_role"] = user_role.value
 
     # Load timezone preference into session for templates.
     tz_result = await db.execute(

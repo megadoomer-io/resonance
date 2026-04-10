@@ -34,6 +34,9 @@
             <li><a href="/tracks">Tracks</a></li>
             <li><a href="/history">History</a></li>
             <li><a href="/account">Account</a></li>
+            {% if user_role in ("admin", "owner") %}
+            <li><a href="/admin">Admin</a></li>
+            {% endif %}
         </ul>
     </nav>
     {% endif %}

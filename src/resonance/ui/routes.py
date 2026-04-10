@@ -82,6 +82,11 @@ def _user_tz(request: fastapi.Request) -> str | None:
     return request.state.session.get("user_tz")  # type: ignore[no-any-return]
 
 
+def _user_role(request: fastapi.Request) -> str:
+    """Return the user's role from session, defaulting to 'user'."""
+    return request.state.session.get("user_role", "user")  # type: ignore[no-any-return]
+
+
 @router.get("/login", response_class=fastapi.responses.HTMLResponse)
 async def login(request: fastapi.Request) -> fastapi.responses.HTMLResponse:
     """Render the login page."""
@@ -156,6 +161,7 @@ async def dashboard(
         {
             "user_id": user_id,
             "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
             "artist_count": artist_count,
             "track_count": track_count,
             "event_count": event_count,
@@ -193,6 +199,7 @@ async def artists_page(
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
         "artists": artists,
         "page": page,
         "has_next": has_next,
@@ -233,6 +240,7 @@ async def tracks_page(
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
         "tracks": tracks,
         "page": page,
         "has_next": has_next,
@@ -278,6 +286,7 @@ async def history_page(
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
         "events": events,
         "page": page,
         "has_next": has_next,
@@ -329,6 +338,7 @@ async def account_page(
         {
             "user_id": user_id,
             "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
             "user": user,
             "connections": connections,
         },
@@ -426,6 +436,7 @@ async def merge_page(
         {
             "user_id": user_id,
             "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
             "source_summary": source_summary,
             "service_type": service_type,
         },
