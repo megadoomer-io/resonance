@@ -115,3 +115,21 @@ class TestAdminNavLink:
         # The login page has no user_id, so no nav bar at all
         response = await client.get("/login")
         assert "/admin" not in response.text
+
+
+class TestAdminPage:
+    """Tests for the admin dashboard page."""
+
+    async def test_admin_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/admin", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
+
+    async def test_admin_role_change_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/admin/users/00000000-0000-0000-0000-000000000000/role",
+            follow_redirects=False,
+        )
+        assert response.status_code == 403

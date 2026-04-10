@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Admin — resonance{% endblock %}
+
+{% block content %}
+<h1>Admin</h1>
+
+<div class="grid">
+    <article>
+        <header>Users</header>
+        <p><strong>{{ user_count }}</strong></p>
+    </article>
+</div>
+
+<h2>Users</h2>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Display Name</th>
+                <th>Role</th>
+                <th>Member Since</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.display_name }}</td>
+                <td>{{ u.role.value | capitalize }}</td>
+                <td>{{ (u.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
+                <td>
+                    {% if u.id | string != user_id %}
+                    <form method="post" action="/admin/users/{{ u.id }}/role" style="display:inline">
+                        <select name="role" onchange="this.form.submit()">
+                            <option value="user" {% if u.role.value == 'user' %}selected{% endif %}>User</option>
+                            <option value="admin" {% if u.role.value == 'admin' %}selected{% endif %}>Admin</option>
+                            {% if user_role == 'owner' %}
+                            <option value="owner" {% if u.role.value == 'owner' %}selected{% endif %}>Owner</option>
+                            {% endif %}
+                        </select>
+                    </form>
+                    {% else %}
+                    <small>(you)</small>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endblock %}

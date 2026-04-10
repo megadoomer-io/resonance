@@ -474,3 +474,74 @@ async def merge_confirm(
 
     # 303 See Other — browser follows redirect with GET (not POST)
     return fastapi.responses.RedirectResponse(url="/account", status_code=303)
+
+
+@router.get("/admin", response_model=None)
+async def admin_dashboard(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render admin dashboard with user management controls."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        user_count = await _count(db, user_models.User)
+        users_result = await db.execute(
+            sa.select(user_models.User).order_by(user_models.User.created_at)
+        )
+        users: Sequence[user_models.User] = users_result.scalars().all()
+
+    return templates.TemplateResponse(
+        request,
+        "admin.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": user_role,
+            "user_count": user_count,
+            "users": users,
+        },
+    )
+
+
+@router.post("/admin/users/{target_user_id}/role", response_model=None)
+async def change_user_role(
+    target_user_id: uuid.UUID,
+    request: fastapi.Request,
+) -> fastapi.responses.RedirectResponse:
+    """Change a user's role (admin/owner only)."""
+    user_id = request.state.session.get("user_id")
+    user_role = _user_role(request)
+    if not user_id or user_role not in ("admin", "owner"):
+        raise fastapi.HTTPException(status_code=403)
+
+    form = await request.form()
+    new_role_str = form.get("role", "user")
+
+    if user_role != "owner" and new_role_str == "owner":
+        raise fastapi.HTTPException(
+            status_code=403, detail="Only owner can promote to owner"
+        )
+
+    if str(target_user_id) == user_id:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Cannot change your own role"
+        )
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(user_models.User).where(user_models.User.id == target_user_id)
+        )
+        target_user = result.scalar_one_or_none()
+        if target_user is None:
+            raise fastapi.HTTPException(status_code=404)
+
+        target_user.role = types_module.UserRole(str(new_role_str))
+        await db.commit()
+
+    return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
