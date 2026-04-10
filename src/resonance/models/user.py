@@ -27,10 +27,34 @@ class User(base_module.TimestampMixin, base_module.Base):
     timezone: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(63), nullable=True, default=None
     )
+    role: orm.Mapped[types_module.UserRole] = orm.mapped_column(
+        sa.Enum(types_module.UserRole, native_enum=False),
+        nullable=False,
+        server_default="user",
+        insert_default=types_module.UserRole.USER,
+    )
 
     connections: orm.Mapped[list[ServiceConnection]] = orm.relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+
+
+_USER_DEFAULTS: dict[str, object] = {
+    "role": types_module.UserRole.USER,
+}
+
+
+@sa.event.listens_for(User, "init")
+def _set_user_defaults(
+    target: User,
+    _args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """Apply Python-side defaults for User fields at construction."""
+    for attr, default in _USER_DEFAULTS.items():
+        if attr not in kwargs:
+            value = default() if callable(default) else default
+            setattr(target, attr, value)
 
 
 class ServiceConnection(base_module.TimestampMixin, base_module.Base):

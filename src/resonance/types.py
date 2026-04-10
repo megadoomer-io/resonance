@@ -29,6 +29,14 @@ class TrackRelationType(enum.StrEnum):
     LOVE = "love"
 
 
+class UserRole(enum.StrEnum):
+    """User authorization roles."""
+
+    USER = "user"
+    ADMIN = "admin"
+    OWNER = "owner"
+
+
 class SyncType(enum.StrEnum):
     """Types of data synchronization jobs."""
 

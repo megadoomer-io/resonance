@@ -52,6 +52,18 @@ class TestTrackRelationType:
         assert types_module.TrackRelationType.LOVE == "love"
 
 
+class TestUserRole:
+    """Verify UserRole enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.UserRole.USER == "user"
+        assert types_module.UserRole.ADMIN == "admin"
+        assert types_module.UserRole.OWNER == "owner"
+
+    def test_user_role_count(self) -> None:
+        assert len(types_module.UserRole) == 3
+
+
 class TestSyncType:
     """Verify SyncType enum values."""
 
@@ -115,6 +127,30 @@ class TestUserModel:
     def test_user_has_connections_relationship(self) -> None:
         mapper: orm.Mapper[user_module.User] = orm.class_mapper(user_module.User)
         assert "connections" in mapper.relationships
+
+    def test_user_has_role_column(self) -> None:
+        table: sa.Table = user_module.User.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert "role" in col_names
+
+    def test_user_role_defaults_to_user(self) -> None:
+        user = user_module.User(display_name="Test User")
+        assert user.role == types_module.UserRole.USER
+
+    def test_user_role_can_be_set_on_creation(self) -> None:
+        user = user_module.User(
+            display_name="Admin User",
+            role=types_module.UserRole.ADMIN,
+        )
+        assert user.role == types_module.UserRole.ADMIN
+
+    def test_user_role_column_is_enum(self) -> None:
+        col = _get_column(user_module.User.__table__, "role")  # type: ignore[arg-type]
+        assert isinstance(col.type, sa.Enum)
+
+    def test_user_role_column_not_nullable(self) -> None:
+        col = _get_column(user_module.User.__table__, "role")  # type: ignore[arg-type]
+        assert col.nullable is False
 
 
 class TestServiceConnectionModel:
