@@ -642,13 +642,16 @@ async def resume_task(
 
         if task.status == types_module.SyncStatus.DEFERRED:
             # Resume a deferred task directly
+            import time
+
             task.status = types_module.SyncStatus.PENDING
             await db.commit()
             if arq_redis:
+                job_id = f"sync_range:{task.id}:{int(time.time())}"
                 await arq_redis.enqueue_job(
                     "sync_range",
                     str(task.id),
-                    _job_id=f"sync_range:{task.id}",
+                    _job_id=job_id,
                 )
         else:
             # Step mode: find the next pending child or sibling
@@ -674,10 +677,14 @@ async def resume_task(
                     await db.commit()
                 return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
             if arq_redis:
+                # Use a unique job ID to avoid arq dedup with previous runs
+                import time
+
+                job_id = f"sync_range:{next_task.id}:{int(time.time())}"
                 await arq_redis.enqueue_job(
                     "sync_range",
                     str(next_task.id),
-                    _job_id=f"sync_range:{next_task.id}",
+                    _job_id=job_id,
                 )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
