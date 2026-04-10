@@ -30,7 +30,7 @@ class User(base_module.TimestampMixin, base_module.Base):
     role: orm.Mapped[types_module.UserRole] = orm.mapped_column(
         sa.Enum(types_module.UserRole, native_enum=False),
         nullable=False,
-        server_default="user",
+        server_default="USER",
         insert_default=types_module.UserRole.USER,
     )
 

@@ -22,15 +22,15 @@ def upgrade() -> None:
         "users",
         sa.Column(
             "role",
-            sa.Enum("user", "admin", "owner", name="userrole", native_enum=False),
+            sa.Enum("USER", "ADMIN", "OWNER", name="userrole", native_enum=False),
             nullable=False,
-            server_default="user",
+            server_default="USER",
         ),
     )
     # Promote the earliest user to owner
     op.execute(
         """
-        UPDATE users SET role = 'owner'
+        UPDATE users SET role = 'OWNER'
         WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
         """
     )
