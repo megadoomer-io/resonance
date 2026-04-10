@@ -66,6 +66,9 @@ select = [
 # SQLAlchemy resolves Mapped[] annotations at runtime, so datetime/uuid
 # must remain as runtime imports even with `from __future__ import annotations`.
 "src/resonance/models/*.py" = ["TC003"]
+# FastAPI resolves Annotated[] type hints at runtime for dependency injection,
+# so stdlib types like uuid must remain as runtime imports.
+"src/resonance/api/v1/*.py" = ["TC003"]
 
 [tool.mypy]
 strict = true

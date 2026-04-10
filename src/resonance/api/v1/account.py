@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import uuid  # noqa: TC003 - runtime import required for FastAPI dependency resolution
+import uuid
 import zoneinfo
 from typing import Annotated
 

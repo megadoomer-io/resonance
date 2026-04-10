@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-import uuid  # noqa: TC003 - runtime import required for FastAPI dependency resolution
+import uuid
 from typing import Annotated, Any
 
 import fastapi

@@ -15,6 +15,7 @@ import resonance.config as config_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
+import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
 import resonance.logging as logging_module
 import resonance.middleware.session as session_middleware
@@ -99,6 +100,7 @@ def create_app() -> fastapi.FastAPI:
     connector_registry.register(
         listenbrainz_module.ListenBrainzConnector(settings=settings)
     )
+    connector_registry.register(test_connector_module.TestConnector())
     application.state.connector_registry = connector_registry
 
     @application.get("/healthz")
