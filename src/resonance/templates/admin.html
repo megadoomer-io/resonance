@@ -49,4 +49,47 @@
         </tbody>
     </table>
 </figure>
+
+<h2>Recent Sync Tasks</h2>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Service</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for task in tasks %}
+            <tr>
+                <td>{{ task.service_connection.user.display_name if task.service_connection else '?' }}</td>
+                <td>{{ task.service_connection.service_type.value | capitalize if task.service_connection else '?' }}</td>
+                <td>{{ task.task_type.value | replace('_', ' ') | capitalize }}</td>
+                <td>{{ task.status.value | capitalize }}</td>
+                <td>{{ task.progress_current }}/{{ task.progress_total or '?' }}</td>
+                <td>{{ (task.created_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>
+                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" style="display:inline">
+                        <button type="submit" class="outline secondary" style="padding:0.25rem 0.5rem;font-size:0.8rem">Clone</button>
+                    </form>
+                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" style="display:inline">
+                        <input type="hidden" name="step_mode" value="true">
+                        <button type="submit" class="outline" style="padding:0.25rem 0.5rem;font-size:0.8rem">Step</button>
+                    </form>
+                    {% if task.status.value == 'deferred' and task.params and task.params.get('step_mode') %}
+                    <form method="post" action="/admin/tasks/{{ task.id }}/resume" style="display:inline">
+                        <button type="submit" style="padding:0.25rem 0.5rem;font-size:0.8rem">Next Step</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
 {% endblock %}

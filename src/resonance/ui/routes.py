@@ -496,6 +496,19 @@ async def admin_dashboard(
         )
         users: Sequence[user_models.User] = users_result.scalars().all()
 
+        tasks_result = await db.execute(
+            sa.select(task_models.SyncTask)
+            .where(task_models.SyncTask.parent_id.is_(None))
+            .order_by(task_models.SyncTask.created_at.desc())
+            .options(
+                sa_orm.joinedload(task_models.SyncTask.service_connection).joinedload(
+                    user_models.ServiceConnection.user
+                )
+            )
+            .limit(20)
+        )
+        tasks: Sequence[task_models.SyncTask] = tasks_result.scalars().unique().all()
+
     return templates.TemplateResponse(
         request,
         "admin.html",
@@ -505,6 +518,7 @@ async def admin_dashboard(
             "user_role": user_role,
             "user_count": user_count,
             "users": users,
+            "tasks": tasks,
         },
     )
 
@@ -543,5 +557,96 @@ async def change_user_role(
 
         target_user.role = types_module.UserRole(str(new_role_str))
         await db.commit()
+
+    return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
+
+
+@router.post("/admin/tasks/{task_id}/clone", response_model=None)
+async def clone_task(
+    task_id: uuid.UUID,
+    request: fastapi.Request,
+) -> fastapi.responses.RedirectResponse:
+    """Clone a sync task, optionally enabling step-through mode."""
+    user_id = request.state.session.get("user_id")
+    user_role = _user_role(request)
+    if not user_id or user_role not in ("admin", "owner"):
+        raise fastapi.HTTPException(status_code=403)
+
+    form = await request.form()
+    step_mode = form.get("step_mode") == "true"
+
+    async with _get_db(request) as db:
+        original = (
+            await db.execute(
+                sa.select(task_models.SyncTask).where(
+                    task_models.SyncTask.id == task_id
+                )
+            )
+        ).scalar_one_or_none()
+        if original is None:
+            raise fastapi.HTTPException(status_code=404)
+
+        params = dict(original.params or {})
+        if step_mode:
+            params["step_mode"] = True
+
+        cloned = task_models.SyncTask(
+            user_id=uuid.UUID(user_id),
+            service_connection_id=original.service_connection_id,
+            task_type=original.task_type,
+            params=params,
+            status=types_module.SyncStatus.PENDING,
+            progress_total=original.progress_total,
+        )
+        db.add(cloned)
+        await db.commit()
+
+        # Enqueue via arq if available (not present in web-only mode)
+        arq_redis = getattr(request.app.state, "arq_redis", None)
+        if arq_redis:
+            job_name = (
+                "plan_sync"
+                if original.task_type == types_module.SyncTaskType.SYNC_JOB
+                else "sync_range"
+            )
+            await arq_redis.enqueue_job(
+                job_name, str(cloned.id), _job_id=f"{job_name}:{cloned.id}"
+            )
+
+    return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
+
+
+@router.post("/admin/tasks/{task_id}/resume", response_model=None)
+async def resume_task(
+    task_id: uuid.UUID,
+    request: fastapi.Request,
+) -> fastapi.responses.RedirectResponse:
+    """Resume a deferred step-mode task."""
+    user_id = request.state.session.get("user_id")
+    user_role = _user_role(request)
+    if not user_id or user_role not in ("admin", "owner"):
+        raise fastapi.HTTPException(status_code=403)
+
+    async with _get_db(request) as db:
+        task = (
+            await db.execute(
+                sa.select(task_models.SyncTask).where(
+                    task_models.SyncTask.id == task_id
+                )
+            )
+        ).scalar_one_or_none()
+        if task is None:
+            raise fastapi.HTTPException(status_code=404)
+        if task.status != types_module.SyncStatus.DEFERRED:
+            raise fastapi.HTTPException(status_code=400, detail="Task is not deferred")
+
+        task.status = types_module.SyncStatus.PENDING
+        await db.commit()
+
+        arq_redis = getattr(request.app.state, "arq_redis", None)
+        if arq_redis:
+            await arq_redis.enqueue_job(
+                "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+            )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
