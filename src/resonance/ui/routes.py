@@ -637,16 +637,47 @@ async def resume_task(
         ).scalar_one_or_none()
         if task is None:
             raise fastapi.HTTPException(status_code=404)
-        if task.status != types_module.SyncStatus.DEFERRED:
-            raise fastapi.HTTPException(status_code=400, detail="Task is not deferred")
-
-        task.status = types_module.SyncStatus.PENDING
-        await db.commit()
 
         arq_redis = getattr(request.app.state, "arq_redis", None)
-        if arq_redis:
-            await arq_redis.enqueue_job(
-                "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
+
+        if task.status == types_module.SyncStatus.DEFERRED:
+            # Resume a deferred task directly
+            task.status = types_module.SyncStatus.PENDING
+            await db.commit()
+            if arq_redis:
+                await arq_redis.enqueue_job(
+                    "sync_range",
+                    str(task.id),
+                    _job_id=f"sync_range:{task.id}",
+                )
+        elif task.parent_id is not None:
+            # Step mode: find and enqueue the next pending sibling
+            next_sibling = (
+                await db.execute(
+                    sa.select(task_models.SyncTask)
+                    .where(
+                        task_models.SyncTask.parent_id == task.parent_id,
+                        task_models.SyncTask.status == types_module.SyncStatus.PENDING,
+                    )
+                    .order_by(task_models.SyncTask.created_at)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if next_sibling is None:
+                raise fastapi.HTTPException(
+                    status_code=400,
+                    detail="No pending sibling tasks remaining",
+                )
+            if arq_redis:
+                await arq_redis.enqueue_job(
+                    "sync_range",
+                    str(next_sibling.id),
+                    _job_id=f"sync_range:{next_sibling.id}",
+                )
+        else:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="Task cannot be resumed",
             )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)

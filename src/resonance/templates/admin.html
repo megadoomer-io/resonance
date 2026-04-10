@@ -81,7 +81,7 @@
                         <input type="hidden" name="step_mode" value="true">
                         <button type="submit" class="outline" style="padding:0.25rem 0.5rem;font-size:0.8rem">Step</button>
                     </form>
-                    {% if task.status.value == 'deferred' and task.params and task.params.get('step_mode') %}
+                    {% if task.params and task.params.get('step_mode') and task.status.value in ('running', 'deferred') %}
                     <form method="post" action="/admin/tasks/{{ task.id }}/resume" style="display:inline">
                         <button type="submit" style="padding:0.25rem 0.5rem;font-size:0.8rem">Next Step</button>
                     </form>

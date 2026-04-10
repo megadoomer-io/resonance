@@ -123,8 +123,12 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             # Create child tasks from descriptors
             arq_redis = wctx["redis"]
+            parent_step_mode = bool(task.params and task.params.get("step_mode"))
             children: list[task_module.SyncTask] = []
             for desc in descriptors:
+                child_params = dict(desc.params) if desc.params else {}
+                if parent_step_mode:
+                    child_params["step_mode"] = True
                 child = task_module.SyncTask(
                     id=uuid.uuid4(),
                     user_id=task.user_id,
@@ -132,7 +136,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                     parent_id=task.id,
                     task_type=desc.task_type,
                     status=types_module.SyncStatus.PENDING,
-                    params=desc.params,
+                    params=child_params,
                     progress_total=desc.progress_total,
                     description=desc.description,
                 )
@@ -294,10 +298,17 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await session.commit()
                 task = task_reload
 
-        # Always check parent completion (may enqueue next sibling)
+        # Check parent completion (may enqueue next sibling)
+        # In step_mode, skip auto-advance so user manually triggers next step
         if task is not None:
-            arq_redis = wctx["redis"]
-            await _check_parent_completion(session, task, arq_redis, log)
+            # Check step_mode on this task's params
+            step_mode = bool(task.params and task.params.get("step_mode"))
+
+            if step_mode and task.status == types_module.SyncStatus.COMPLETED:
+                log.info("step_mode_paused", task_id=str(task.id))
+            else:
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
 
 
 # ---------------------------------------------------------------------------
