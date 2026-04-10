@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Annotated
 
 import fastapi
 
-import resonance.middleware.session as session_module  # noqa: TC001 - runtime import required for FastAPI dependency resolution
+import resonance.middleware.session as session_module
+import resonance.types as types_module
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -45,3 +46,29 @@ def get_current_user_id(
             detail="Not authenticated",
         )
     return uuid.UUID(user_id)
+
+
+def require_admin(role: types_module.UserRole) -> None:
+    """Raise 403 if user is not admin or owner.
+
+    Args:
+        role: The user's role to validate.
+
+    Raises:
+        HTTPException: 403 if role is not ADMIN or OWNER.
+    """
+    if role not in (types_module.UserRole.ADMIN, types_module.UserRole.OWNER):
+        raise fastapi.HTTPException(status_code=403, detail="Admin access required")
+
+
+def require_owner(role: types_module.UserRole) -> None:
+    """Raise 403 if user is not owner.
+
+    Args:
+        role: The user's role to validate.
+
+    Raises:
+        HTTPException: 403 if role is not OWNER.
+    """
+    if role != types_module.UserRole.OWNER:
+        raise fastapi.HTTPException(status_code=403, detail="Owner access required")
