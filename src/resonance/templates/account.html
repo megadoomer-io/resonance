@@ -89,6 +89,7 @@
 <p>
     <a href="/api/v1/auth/spotify" role="button">Connect Spotify</a>
     <a href="/api/v1/auth/listenbrainz" role="button" class="outline">Connect ListenBrainz</a>
+    <a href="/api/v1/auth/lastfm" role="button" class="outline">Connect Last.fm</a>
     {% if user_role in ("admin", "owner") %}
     <button
         hx-post="/api/v1/admin/test/connect"
