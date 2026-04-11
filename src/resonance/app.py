@@ -12,6 +12,7 @@ import structlog
 
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
+import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
@@ -100,6 +101,7 @@ def create_app() -> fastapi.FastAPI:
     connector_registry.register(
         listenbrainz_module.ListenBrainzConnector(settings=settings)
     )
+    connector_registry.register(lastfm_module.LastFmConnector(settings=settings))
     connector_registry.register(test_connector_module.TestConnector())
     application.state.connector_registry = connector_registry
 

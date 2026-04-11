@@ -15,6 +15,7 @@ import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
 import resonance.config as config_module
+import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
@@ -24,6 +25,7 @@ import resonance.logging as logging_module
 import resonance.models.task as task_module
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
+import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.listenbrainz as lb_sync
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
@@ -689,6 +691,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     connector_registry.register(
         listenbrainz_module.ListenBrainzConnector(settings=settings)
     )
+    connector_registry.register(lastfm_module.LastFmConnector(settings=settings))
     connector_registry.register(test_connector_module.TestConnector())
 
     wctx["settings"] = settings
@@ -700,6 +703,9 @@ async def startup(ctx: dict[str, Any]) -> None:
             token_encryption_key=settings.token_encryption_key
         ),
         types_module.ServiceType.LISTENBRAINZ: lb_sync.ListenBrainzSyncStrategy(),
+        types_module.ServiceType.LASTFM: lastfm_sync.LastFmSyncStrategy(
+            token_encryption_key=settings.token_encryption_key
+        ),
         types_module.ServiceType.TEST: test_sync.TestSyncStrategy(),
     }
 
