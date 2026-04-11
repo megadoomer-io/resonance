@@ -43,6 +43,10 @@ class Settings(pydantic_settings.BaseSettings):
     musicbrainz_client_secret: str = ""
     musicbrainz_redirect_path: str = "/api/v1/auth/listenbrainz/callback"
 
+    # Last.fm API
+    lastfm_api_key: str = ""
+    lastfm_shared_secret: str = ""
+
     @property
     def spotify_redirect_uri(self) -> str:
         """Full Spotify OAuth redirect URI."""

@@ -57,6 +57,12 @@ def test_settings_has_musicbrainz_credentials() -> None:
     assert hasattr(settings, "musicbrainz_redirect_uri")
 
 
+def test_settings_has_lastfm_credentials() -> None:
+    settings = config_module.Settings()
+    assert hasattr(settings, "lastfm_api_key")
+    assert hasattr(settings, "lastfm_shared_secret")
+
+
 def test_worker_mode_defaults_to_external() -> None:
     settings = config_module.Settings()
     assert settings.worker_mode == "external"

@@ -74,35 +74,51 @@ async def auth_initiate(
     session["oauth_state"] = state
     session["oauth_service"] = service_type.value
 
-    auth_url: str = connector.get_auth_url(state=state)  # type: ignore[attr-defined]
+    auth_url: str = connector.get_auth_url(state=state)
     return fastapi_responses.RedirectResponse(url=auth_url, status_code=307)
 
 
 @router.get("/{service}/callback")
 async def auth_callback(
     service: str,
-    code: str,
-    state: str,
     request: fastapi.Request,
     session: Annotated[
         session_module.SessionData, fastapi.Depends(deps_module.get_session)
     ],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    code: str | None = None,
+    token: str | None = None,
+    state: str = "",
 ) -> fastapi_responses.RedirectResponse:
-    """Handle OAuth callback — exchange code, create/update user and connection."""
+    """Handle OAuth callback — exchange code, create/update user and connection.
+
+    Accepts either ``code`` (standard OAuth2) or ``token`` (Last.fm) as the
+    authorization credential.  The ``state`` parameter is optional because
+    Last.fm does not echo it back in the callback.
+    """
     service_type = _parse_service_type(service)
     connector = _get_connector(request, service_type)
 
-    # Verify state matches
+    auth_code = code or token
+    if auth_code is None:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Missing code or token parameter"
+        )
+
+    # Verify state matches.  When state is non-empty (standard OAuth2) we
+    # require it to match the stored value.  When state is empty the service
+    # does not echo it back (e.g. Last.fm), so we skip the check.
     stored_state = session.get("oauth_state")
-    if stored_state is None or stored_state != state:
+    if state and (stored_state is None or stored_state != state):
         raise fastapi.HTTPException(
             status_code=400, detail="Invalid or missing OAuth state"
         )
 
     # Exchange code for tokens
     try:
-        tokens: base_module.TokenResponse = await connector.exchange_code(code=code)  # type: ignore[attr-defined]
+        tokens: base_module.TokenResponse = await connector.exchange_code(
+            code=auth_code
+        )
     except httpx.HTTPStatusError as exc:
         logger.exception("Token exchange failed for %s", service)
         detail = (
@@ -132,7 +148,7 @@ async def auth_callback(
     external_user_id: str | None = None
     display_name: str = ""
     try:
-        user_profile: dict[str, str] = await connector.get_current_user(  # type: ignore[attr-defined]
+        user_profile: dict[str, str] = await connector.get_current_user(
             access_token=tokens.access_token
         )
         external_user_id = user_profile["id"]

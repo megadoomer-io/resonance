@@ -21,6 +21,15 @@ class FakeConnector(base_module.BaseConnector):
         self._http_client = None
         self._budget = ratelimit_module.RateLimitBudget()
 
+    def get_auth_url(self, state: str) -> str:
+        return f"https://fake.example.com/auth?state={state}"
+
+    async def exchange_code(self, code: str) -> base_module.TokenResponse:
+        return base_module.TokenResponse(access_token="fake-token")
+
+    async def get_current_user(self, access_token: str) -> dict[str, str]:
+        return {"id": "fake-user", "display_name": "Fake User"}
+
 
 class TestConnectorCapability:
     """Tests for ConnectorCapability enum."""

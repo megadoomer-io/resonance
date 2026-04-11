@@ -89,6 +89,21 @@ class BaseConnector(abc.ABC):
         """Check whether this connector supports a given capability."""
         return capability in self.capabilities
 
+    @abc.abstractmethod
+    def get_auth_url(self, state: str) -> str:
+        """Build the authorization URL for this service."""
+        ...
+
+    @abc.abstractmethod
+    async def exchange_code(self, code: str) -> TokenResponse:
+        """Exchange an auth code/token for access tokens."""
+        ...
+
+    @abc.abstractmethod
+    async def get_current_user(self, access_token: str) -> dict[str, str]:
+        """Get the current user's profile. Returns dict with 'id' and 'display_name'."""
+        ...
+
     # Transient errors that should be retried with exponential backoff.
     _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
         httpx.ReadTimeout,
