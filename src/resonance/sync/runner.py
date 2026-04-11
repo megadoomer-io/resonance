@@ -443,6 +443,24 @@ async def _upsert_listening_event(
 
     listened_at = datetime.datetime.fromisoformat(played_at)
 
+    # Fuzzy dedup: skip insert if a matching event exists within ±60 seconds.
+    # This handles clock skew between services (e.g., Spotify scrobbles to
+    # both Last.fm and ListenBrainz with slightly different timestamps).
+    window = datetime.timedelta(seconds=60)
+    check_stmt = (
+        sa.select(models_module.ListeningEvent)
+        .where(
+            models_module.ListeningEvent.user_id == user_id,
+            models_module.ListeningEvent.track_id == track.id,
+            models_module.ListeningEvent.listened_at >= listened_at - window,
+            models_module.ListeningEvent.listened_at <= listened_at + window,
+        )
+        .limit(1)
+    )
+    check_result = await session.execute(check_stmt)
+    if check_result.scalar_one_or_none() is not None:
+        return
+
     stmt = (
         pg_dialect.insert(models_module.ListeningEvent)
         .values(

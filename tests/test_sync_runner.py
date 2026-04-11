@@ -203,8 +203,11 @@ class TestListeningEventUpsert:
         # Track lookup by title (empty external_id skips service_links)
         title_result = MagicMock()
         title_result.scalar_one_or_none.return_value = existing_track
+        # Fuzzy dedup check -> no match
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = None
 
-        session.execute.side_effect = [title_result, AsyncMock()]
+        session.execute.side_effect = [title_result, dedup_result, AsyncMock()]
 
         track_data = _make_track_data(
             external_id="",
@@ -218,8 +221,8 @@ class TestListeningEventUpsert:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        # The second execute call should be an INSERT ... ON CONFLICT DO NOTHING
-        insert_call = session.execute.call_args_list[1]
+        # The third execute call should be an INSERT ... ON CONFLICT DO NOTHING
+        insert_call = session.execute.call_args_list[2]
         stmt = insert_call[0][0]
         assert isinstance(stmt, pg_dialect.Insert)
 
@@ -235,8 +238,11 @@ class TestListeningEventUpsert:
         # Track lookup by title
         title_result = MagicMock()
         title_result.scalar_one_or_none.return_value = existing_track
+        # Fuzzy dedup check -> no match
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = None
 
-        session.execute.side_effect = [title_result, AsyncMock()]
+        session.execute.side_effect = [title_result, dedup_result, AsyncMock()]
 
         track_data = _make_track_data(
             external_id="",
@@ -250,8 +256,8 @@ class TestListeningEventUpsert:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        # Should execute an INSERT (not session.add)
-        assert session.execute.call_count == 2
+        # Track lookup + dedup check + INSERT = 3
+        assert session.execute.call_count == 3
 
     @pytest.mark.anyio()
     async def test_returns_when_no_track_found_by_title(self) -> None:
@@ -280,6 +286,109 @@ class TestListeningEventUpsert:
         assert session.execute.call_count == 1
 
     @pytest.mark.anyio()
+    async def test_dedup_within_60s_window_skips_insert(self) -> None:
+        """Event within 60s of an existing event is deduplicated (no insert)."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        existing_event = MagicMock()
+
+        # 1. Track lookup by title -> found
+        title_result = MagicMock()
+        title_result.scalar_one_or_none.return_value = existing_track
+        # 2. Fuzzy dedup check -> existing event found within window
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = existing_event
+
+        session.execute.side_effect = [title_result, dedup_result]
+
+        track_data = _make_track_data(
+            external_id="",
+            title="Test Song",
+            artist_external_id="",
+            artist_name="Some Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:30+00:00"
+        )
+
+        # Only track lookup + dedup check, NO insert
+        assert session.execute.call_count == 2
+
+    @pytest.mark.anyio()
+    async def test_dedup_beyond_60s_window_inserts(self) -> None:
+        """Event more than 60s from any existing event is NOT deduplicated."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        # 1. Track lookup by title -> found
+        title_result = MagicMock()
+        title_result.scalar_one_or_none.return_value = existing_track
+        # 2. Fuzzy dedup check -> no match (events are >60s apart)
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [title_result, dedup_result, AsyncMock()]
+
+        track_data = _make_track_data(
+            external_id="",
+            title="Test Song",
+            artist_external_id="",
+            artist_name="Some Artist",
+            service=types_module.ServiceType.LISTENBRAINZ,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:05:00+00:00"
+        )
+
+        # Track lookup + dedup check + insert = 3
+        assert session.execute.call_count == 3
+
+    @pytest.mark.anyio()
+    async def test_exact_timestamp_match_still_deduplicates(self) -> None:
+        """Exact same timestamp is caught by the fuzzy window (regression)."""
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+
+        existing_track = MagicMock()
+        existing_track.id = uuid.uuid4()
+
+        existing_event = MagicMock()
+
+        # 1. Track lookup by service_links -> found
+        svc_result = MagicMock()
+        svc_result.scalar_one_or_none.return_value = existing_track
+        # 2. Fuzzy dedup check -> exact match found
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = existing_event
+
+        session.execute.side_effect = [svc_result, dedup_result]
+
+        track_data = _make_track_data(
+            external_id="track-id",
+            title="Test Song",
+            artist_external_id="art1",
+            artist_name="Artist One",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+
+        await runner_module._upsert_listening_event(
+            session, user_id, track_data, "2025-01-15T12:00:00+00:00"
+        )
+
+        # Track lookup + dedup check, NO insert
+        assert session.execute.call_count == 2
+
+    @pytest.mark.anyio()
     async def test_falls_back_to_title_when_service_links_miss(self) -> None:
         """Track with external_id falls back to title when service_links miss."""
         session = AsyncMock()
@@ -294,8 +403,16 @@ class TestListeningEventUpsert:
         # 2. title match -> existing track
         title_result = MagicMock()
         title_result.scalar_one_or_none.return_value = existing_track
+        # 3. Fuzzy dedup check -> no match
+        dedup_result = MagicMock()
+        dedup_result.scalar_one_or_none.return_value = None
 
-        session.execute.side_effect = [no_result, title_result, AsyncMock()]
+        session.execute.side_effect = [
+            no_result,
+            title_result,
+            dedup_result,
+            AsyncMock(),
+        ]
 
         track_data = _make_track_data(
             external_id="some-id",
@@ -309,8 +426,8 @@ class TestListeningEventUpsert:
             session, user_id, track_data, "2025-01-15T12:00:00+00:00"
         )
 
-        # Track lookups (2) + insert (1) = 3
-        assert session.execute.call_count == 3
+        # Track lookups (2) + dedup check (1) + insert (1) = 4
+        assert session.execute.call_count == 4
 
 
 class TestBulkFetchArtists:
