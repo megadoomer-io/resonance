@@ -220,6 +220,10 @@ async def _upsert_track(
         and track_data.external_id
         and track_data.external_id in track_cache
     ):
+        # Update duration if we have it and the cached track doesn't
+        cached = track_cache[track_data.external_id]
+        if track_data.duration_ms and not cached.duration_ms:
+            cached.duration_ms = track_data.duration_ms
         return False
 
     # 1. Check service-specific ID in service_links
@@ -231,6 +235,8 @@ async def _upsert_track(
         result = await session.execute(stmt)
         existing = result.scalar_one_or_none()
         if existing is not None:
+            if track_data.duration_ms and not existing.duration_ms:
+                existing.duration_ms = track_data.duration_ms
             return False
 
     # 2. MBID cross-service check for ListenBrainz
@@ -251,6 +257,8 @@ async def _upsert_track(
                 links = dict(existing.service_links or {})
                 links[service_key] = track_data.external_id
                 existing.service_links = links
+                if track_data.duration_ms and not existing.duration_ms:
+                    existing.duration_ms = track_data.duration_ms
                 return False
 
     # 3. Fall back to title + artist name match
@@ -264,6 +272,8 @@ async def _upsert_track(
         links = dict(existing.service_links or {})
         links[service_key] = track_data.external_id
         existing.service_links = links
+        if track_data.duration_ms and not existing.duration_ms:
+            existing.duration_ms = track_data.duration_ms
         return False
 
     # 4. Look up artist for the new track
@@ -300,6 +310,7 @@ async def _upsert_track(
         id=uuid.uuid4(),
         title=track_data.title,
         artist_id=artist_id,
+        duration_ms=track_data.duration_ms,
         service_links={service_key: track_data.external_id},
     )
     session.add(track)
@@ -453,10 +464,17 @@ async def _upsert_listening_event(
 
     listened_at = datetime.datetime.fromisoformat(played_at)
 
-    # Fuzzy dedup: skip insert if a matching event exists within ±60 seconds.
-    # This handles clock skew between services (e.g., Spotify scrobbles to
-    # both Last.fm and ListenBrainz with slightly different timestamps).
-    window = datetime.timedelta(seconds=60)
+    # Fuzzy dedup: skip insert if a matching event exists within a window.
+    # Services record different moments (track start vs scrobble point),
+    # so the window is based on track duration when known. Falls back to
+    # 10 minutes for tracks without duration data.
+    default_dedup_seconds = 600  # 10 minutes
+    dedup_seconds = (
+        (track.duration_ms // 1000 + 60)  # duration + 60s buffer
+        if track.duration_ms
+        else default_dedup_seconds
+    )
+    window = datetime.timedelta(seconds=dedup_seconds)
     check_stmt = (
         sa.select(models_module.ListeningEvent)
         .where(

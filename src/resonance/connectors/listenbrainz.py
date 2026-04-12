@@ -153,6 +153,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
                         artist_external_id=first_artist_mbid,
                         artist_name=metadata["artist_name"],
                         service=types_module.ServiceType.LISTENBRAINZ,
+                        duration_ms=additional_info.get("duration_ms"),
                     ),
                     listened_at=listen["listened_at"],
                 )

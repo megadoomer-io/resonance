@@ -43,6 +43,9 @@ class Track(base_module.TimestampMixin, base_module.Base):
     artist_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
         sa.ForeignKey("artists.id", ondelete="CASCADE"), nullable=False
     )
+    duration_ms: orm.Mapped[int | None] = orm.mapped_column(
+        sa.Integer, nullable=True, default=None
+    )
     service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
         sa.JSON, nullable=True, default=None
     )

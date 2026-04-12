@@ -205,6 +205,7 @@ class SpotifyConnector(base_module.BaseConnector):
                         artist_external_id=primary_artist["id"],
                         artist_name=primary_artist["name"],
                         service=types_module.ServiceType.SPOTIFY,
+                        duration_ms=track.get("duration_ms"),
                     ),
                     added_at=item["added_at"],
                 )
@@ -244,6 +245,7 @@ class SpotifyConnector(base_module.BaseConnector):
                         artist_external_id=primary_artist["id"],
                         artist_name=primary_artist["name"],
                         service=types_module.ServiceType.SPOTIFY,
+                        duration_ms=track.get("duration_ms"),
                     ),
                     played_at=item["played_at"],
                 )

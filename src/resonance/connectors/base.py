@@ -66,6 +66,7 @@ class TrackData(pydantic.BaseModel):
     artist_external_id: str
     artist_name: str
     service: types_module.ServiceType
+    duration_ms: int | None = None
 
 
 class BaseConnector(abc.ABC):

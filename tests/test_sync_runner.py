@@ -199,6 +199,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         # Track lookup by title (empty external_id skips service_links)
         title_result = MagicMock()
@@ -234,6 +235,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         # Track lookup by title
         title_result = MagicMock()
@@ -293,6 +295,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         existing_event = MagicMock()
 
@@ -328,6 +331,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         # 1. Track lookup by title -> found
         title_result = MagicMock()
@@ -361,6 +365,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         existing_event = MagicMock()
 
@@ -396,6 +401,7 @@ class TestListeningEventUpsert:
 
         existing_track = MagicMock()
         existing_track.id = uuid.uuid4()
+        existing_track.duration_ms = None
 
         # 1. service_links lookup -> None
         no_result = MagicMock()
