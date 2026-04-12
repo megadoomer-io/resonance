@@ -144,14 +144,21 @@ def api() -> None:
 
     elif command == "sync":
         if len(sys.argv) < 3:
-            print("Usage: resonance-api sync <service>")
+            print("Usage: resonance-api sync <service> [--full]")
             sys.exit(1)
         service = sys.argv[2]
-        resp = _api_request("POST", f"/api/v1/sync/{service}")
-        if resp.status_code == 200:
-            print(json.dumps(resp.json(), indent=2))
+        body = None
+        if "--full" in sys.argv[3:]:
+            body = {"sync_from": "full"}
+            print(f"Triggering full re-sync for {service}...")
         else:
-            print(f"Error {resp.status_code}: {resp.text}")
+            print(f"Triggering incremental sync for {service}...")
+        resp = _api_request(
+            "POST",
+            f"/api/v1/sync/{service}",
+            json=body,
+        )
+        print(json.dumps(resp.json(), indent=2))
 
     elif command == "users":
         resp = _api_request("GET", "/admin")
