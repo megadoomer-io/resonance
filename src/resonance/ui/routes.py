@@ -734,3 +734,45 @@ async def dedup_listening_events(
         await db.commit()
 
     return {"status": "completed", "events_deleted": deleted}
+
+
+@router.post("/admin/dedup-artists", response_model=None)
+async def dedup_artists(
+    request: fastapi.Request,
+) -> dict[str, int | str]:
+    """Admin-only: merge duplicate artist records."""
+    deps_module.verify_admin_access(request)
+
+    import resonance.dedup as dedup_module
+
+    async with _get_db(request) as db:
+        stats = await dedup_module.find_and_merge_duplicate_artists(db)
+
+    return {
+        "status": "completed",
+        "artists_merged": stats.artists_merged,
+        "tracks_repointed": stats.tracks_repointed,
+        "relations_repointed": stats.artist_relations_repointed,
+        "relations_deleted": stats.artist_relations_deleted,
+    }
+
+
+@router.post("/admin/dedup-tracks", response_model=None)
+async def dedup_tracks(
+    request: fastapi.Request,
+) -> dict[str, int | str]:
+    """Admin-only: merge duplicate track records."""
+    deps_module.verify_admin_access(request)
+
+    import resonance.dedup as dedup_module
+
+    async with _get_db(request) as db:
+        stats = await dedup_module.find_and_merge_duplicate_tracks(db)
+
+    return {
+        "status": "completed",
+        "tracks_merged": stats.tracks_merged,
+        "events_repointed": stats.events_repointed,
+        "relations_repointed": stats.track_relations_repointed,
+        "relations_deleted": stats.track_relations_deleted,
+    }

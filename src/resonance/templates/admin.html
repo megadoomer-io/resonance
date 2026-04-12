@@ -95,11 +95,27 @@
 
 <h2>Maintenance</h2>
 <div id="dedup-result"></div>
+<p>
 <button
     hx-post="/admin/dedup-events"
     hx-target="#dedup-result"
     hx-swap="innerHTML"
     hx-confirm="Remove duplicate cross-service listening events?"
     class="outline"
->Deduplicate Listening Events</button>
+>Dedup Listening Events</button>
+<button
+    hx-post="/admin/dedup-artists"
+    hx-target="#dedup-result"
+    hx-swap="innerHTML"
+    hx-confirm="Merge duplicate artist records? This cannot be undone."
+    class="outline"
+>Dedup Artists</button>
+<button
+    hx-post="/admin/dedup-tracks"
+    hx-target="#dedup-result"
+    hx-swap="innerHTML"
+    hx-confirm="Merge duplicate track records? This cannot be undone."
+    class="outline"
+>Dedup Tracks</button>
+</p>
 {% endblock %}

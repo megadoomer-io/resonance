@@ -122,8 +122,11 @@ def api() -> None:
         print("Usage: resonance-api <command> [args]")
         print()
         print("Commands:")
-        print("  dedup-events     Remove duplicate listening events")
+        print("  healthz          Check health + deployed revision")
         print("  sync <service>   Trigger a sync (spotify, listenbrainz, lastfm)")
+        print("  dedup-events     Remove cross-service duplicate listening events")
+        print("  dedup-artists    Merge duplicate artist records")
+        print("  dedup-tracks     Merge duplicate track records")
         print("  healthz          Check health and deployed revision")
         print("  users            List all users")
         sys.exit(1)
@@ -160,12 +163,19 @@ def api() -> None:
         )
         print(json.dumps(resp.json(), indent=2))
 
+    elif command == "dedup-artists":
+        print("Deduplicating artists...")
+        resp = _api_request("POST", "/admin/dedup-artists")
+        print(json.dumps(resp.json(), indent=2))
+
+    elif command == "dedup-tracks":
+        print("Deduplicating tracks...")
+        resp = _api_request("POST", "/admin/dedup-tracks")
+        print(json.dumps(resp.json(), indent=2))
+
     elif command == "users":
         resp = _api_request("GET", "/admin")
-        if resp.status_code == 200:
-            print("Users page returned (HTML). Use the web UI for user management.")
-        else:
-            print(f"Error {resp.status_code}: {resp.text}")
+        print("Users page returned (HTML). Use the web UI for user management.")
 
     else:
         print(f"Unknown command: {command}")
