@@ -1,9 +1,12 @@
 """CLI commands for Resonance administration."""
 
 import asyncio
+import json
+import os
 import sys
 import uuid
 
+import httpx
 import sqlalchemy as sa
 
 import resonance.config as config_module
@@ -56,3 +59,89 @@ def set_role() -> None:
         sys.exit(1)
 
     asyncio.run(_set_role(sys.argv[1], sys.argv[2]))
+
+
+# ---------------------------------------------------------------------------
+# resonance-api: CLI for admin API calls via bearer token
+# ---------------------------------------------------------------------------
+
+
+def _get_api_config() -> tuple[str, str]:
+    """Get base URL and API token from env or settings."""
+    settings = config_module.Settings()
+    base_url = os.environ.get("RESONANCE_URL", settings.base_url)
+    token = os.environ.get("RESONANCE_API_TOKEN", settings.admin_api_token)
+    if not token:
+        print("Error: No API token. Set RESONANCE_API_TOKEN or admin_api_token.")
+        sys.exit(1)
+    return base_url, token
+
+
+def _api_request(method: str, path: str, **kwargs: object) -> httpx.Response:
+    """Make an authenticated API request."""
+    base_url, token = _get_api_config()
+    url = f"{base_url}{path}"
+    response = httpx.request(
+        method,
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=60.0,
+        **kwargs,  # type: ignore[arg-type]
+    )
+    return response
+
+
+def api() -> None:
+    """Entry point for `resonance-api <command> [args]`.
+
+    Commands:
+        dedup-events     Remove duplicate cross-service listening events
+        sync <service>   Trigger a sync for a service
+        healthz          Check health and revision
+        users            List all users
+    """
+    if len(sys.argv) < 2:
+        print("Usage: resonance-api <command> [args]")
+        print()
+        print("Commands:")
+        print("  dedup-events     Remove duplicate listening events")
+        print("  sync <service>   Trigger a sync (spotify, listenbrainz, lastfm)")
+        print("  healthz          Check health and deployed revision")
+        print("  users            List all users")
+        sys.exit(1)
+
+    command = sys.argv[1]
+
+    if command == "healthz":
+        resp = _api_request("GET", "/healthz")
+        print(json.dumps(resp.json(), indent=2))
+
+    elif command == "dedup-events":
+        print("Running dedup...")
+        resp = _api_request("POST", "/admin/dedup-events")
+        if resp.status_code == 200:
+            print(json.dumps(resp.json(), indent=2))
+        else:
+            print(f"Error {resp.status_code}: {resp.text}")
+
+    elif command == "sync":
+        if len(sys.argv) < 3:
+            print("Usage: resonance-api sync <service>")
+            sys.exit(1)
+        service = sys.argv[2]
+        resp = _api_request("POST", f"/api/v1/sync/{service}")
+        if resp.status_code == 200:
+            print(json.dumps(resp.json(), indent=2))
+        else:
+            print(f"Error {resp.status_code}: {resp.text}")
+
+    elif command == "users":
+        resp = _api_request("GET", "/admin")
+        if resp.status_code == 200:
+            print("Users page returned (HTML). Use the web UI for user management.")
+        else:
+            print(f"Error {resp.status_code}: {resp.text}")
+
+    else:
+        print(f"Unknown command: {command}")
+        sys.exit(1)

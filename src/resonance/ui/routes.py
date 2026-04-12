@@ -15,6 +15,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.dependencies as deps_module
 import resonance.merge as merge_module
 import resonance.middleware.session as session_module
 import resonance.models.music as music_models
@@ -701,10 +702,7 @@ async def dedup_listening_events(
     or 10 minutes when duration is unknown). Keeps the earliest event,
     deletes the rest.
     """
-    user_id = request.state.session.get("user_id")
-    user_role = _user_role(request)
-    if not user_id or user_role not in ("admin", "owner"):
-        raise fastapi.HTTPException(status_code=403)
+    deps_module.verify_admin_access(request)
 
     async with _get_db(request) as db:
         # Find IDs of duplicate events to delete.

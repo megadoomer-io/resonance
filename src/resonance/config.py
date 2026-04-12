@@ -47,6 +47,9 @@ class Settings(pydantic_settings.BaseSettings):
     lastfm_api_key: str = ""
     lastfm_shared_secret: str = ""
 
+    # Admin API token (for CLI/programmatic access)
+    admin_api_token: str = ""
+
     @property
     def spotify_redirect_uri(self) -> str:
         """Full Spotify OAuth redirect URI."""

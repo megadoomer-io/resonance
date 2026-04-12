@@ -48,6 +48,38 @@ def get_current_user_id(
     return uuid.UUID(user_id)
 
 
+def verify_admin_access(request: fastapi.Request) -> None:
+    """Verify admin access via session role OR bearer token.
+
+    Checks in order:
+    1. Session-based: user_role in session is admin/owner
+    2. Token-based: Authorization header matches ADMIN_API_TOKEN
+
+    Raises:
+        HTTPException: 401 if not authenticated, 403 if not admin.
+    """
+    # Check bearer token first (for CLI/programmatic access)
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        settings = request.app.state.settings
+        if settings.admin_api_token and token == settings.admin_api_token:
+            return
+        raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
+
+    # Fall back to session-based auth
+    session = request.state.session
+    user_role = session.get("user_role", "")
+    if user_role in ("admin", "owner"):
+        return
+
+    user_id = session.get("user_id")
+    if not user_id:
+        raise fastapi.HTTPException(status_code=401, detail="Not authenticated")
+
+    raise fastapi.HTTPException(status_code=403, detail="Admin access required")
+
+
 def require_admin(role: types_module.UserRole) -> None:
     """Raise 403 if user is not admin or owner.
 
