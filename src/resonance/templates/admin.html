@@ -92,4 +92,14 @@
         </tbody>
     </table>
 </figure>
+
+<h2>Maintenance</h2>
+<div id="dedup-result"></div>
+<button
+    hx-post="/admin/dedup-events"
+    hx-target="#dedup-result"
+    hx-swap="innerHTML"
+    hx-confirm="Remove duplicate cross-service listening events?"
+    class="outline"
+>Deduplicate Listening Events</button>
 {% endblock %}

@@ -688,3 +688,51 @@ async def resume_task(
                 )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
+
+
+@router.post("/admin/dedup-events", response_model=None)
+async def dedup_listening_events(
+    request: fastapi.Request,
+) -> dict[str, int | str]:
+    """Admin-only: remove duplicate cross-service listening events.
+
+    Finds events where the same user listened to the same track on
+    different services within a dedup window (track duration + 60s,
+    or 10 minutes when duration is unknown). Keeps the earliest event,
+    deletes the rest.
+    """
+    user_id = request.state.session.get("user_id")
+    user_role = _user_role(request)
+    if not user_id or user_role not in ("admin", "owner"):
+        raise fastapi.HTTPException(status_code=403)
+
+    async with _get_db(request) as db:
+        # Find IDs of duplicate events to delete.
+        # For each pair of events on the same track by the same user
+        # from different services within the dedup window, mark the
+        # later one for deletion.
+        result = await db.execute(
+            sa.text(
+                "DELETE FROM listening_events "
+                "WHERE id IN ("
+                "  SELECT e2.id "
+                "  FROM listening_events e1 "
+                "  JOIN listening_events e2 "
+                "    ON e1.track_id = e2.track_id "
+                "    AND e1.user_id = e2.user_id "
+                "    AND e1.source_service != e2.source_service "
+                "    AND e1.listened_at < e2.listened_at "
+                "  JOIN tracks t ON e1.track_id = t.id "
+                "  WHERE e2.listened_at - e1.listened_at < "
+                "    CASE "
+                "      WHEN t.duration_ms IS NOT NULL "
+                "      THEN make_interval(secs => t.duration_ms / 1000 + 60) "
+                "      ELSE interval '10 minutes' "
+                "    END"
+                ")"
+            )
+        )
+        deleted = result.rowcount if hasattr(result, "rowcount") else 0
+        await db.commit()
+
+    return {"status": "completed", "events_deleted": deleted}
