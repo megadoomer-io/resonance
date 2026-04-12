@@ -20,4 +20,6 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
 async def test_healthz_returns_ok(client: httpx.AsyncClient) -> None:
     response = await client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "revision" in data

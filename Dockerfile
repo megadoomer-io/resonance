@@ -23,6 +23,9 @@ COPY --from=builder /app/alembic.ini /app/alembic.ini
 COPY --from=builder /app/alembic /app/alembic
 ENV PATH="/app/.venv/bin:$PATH"
 
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 EXPOSE 8000
 USER nobody
 

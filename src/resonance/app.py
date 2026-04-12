@@ -107,6 +107,8 @@ def create_app() -> fastapi.FastAPI:
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+        import os
+
+        return {"status": "ok", "revision": os.environ.get("GIT_SHA", "dev")}
 
     return application
