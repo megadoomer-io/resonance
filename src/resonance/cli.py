@@ -81,13 +81,31 @@ def _api_request(method: str, path: str, **kwargs: object) -> httpx.Response:
     """Make an authenticated API request."""
     base_url, token = _get_api_config()
     url = f"{base_url}{path}"
-    response = httpx.request(
-        method,
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=60.0,
-        **kwargs,  # type: ignore[arg-type]
-    )
+    try:
+        response = httpx.request(
+            method,
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60.0,
+            follow_redirects=True,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    except httpx.ConnectError as exc:
+        print(f"Error: Could not connect to {base_url}: {exc}")
+        sys.exit(1)
+    except httpx.TimeoutException:
+        print(f"Error: Request to {url} timed out")
+        sys.exit(1)
+
+    if response.status_code >= 400:
+        print(f"Error: HTTP {response.status_code}")
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text[:500]
+        print(f"  {detail}")
+        sys.exit(1)
+
     return response
 
 
