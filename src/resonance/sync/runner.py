@@ -151,8 +151,10 @@ async def _upsert_artist(
                 return False
 
     # 3. Fall back to exact name match
-    stmt = sa.select(models_module.Artist).where(
-        models_module.Artist.name == artist_data.name
+    stmt = (
+        sa.select(models_module.Artist)
+        .where(models_module.Artist.name == artist_data.name)
+        .limit(1)
     )
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
@@ -262,8 +264,10 @@ async def _upsert_track(
                 return False
 
     # 3. Fall back to title + artist name match
-    stmt = sa.select(models_module.Track).where(
-        models_module.Track.title == track_data.title,
+    stmt = (
+        sa.select(models_module.Track)
+        .where(models_module.Track.title == track_data.title)
+        .limit(1)
     )
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
@@ -281,17 +285,23 @@ async def _upsert_track(
 
     # Try by service_links first
     if track_data.artist_external_id:
-        artist_stmt = sa.select(models_module.Artist).where(
-            models_module.Artist.service_links[service_key].as_string()
-            == track_data.artist_external_id
+        artist_stmt = (
+            sa.select(models_module.Artist)
+            .where(
+                models_module.Artist.service_links[service_key].as_string()
+                == track_data.artist_external_id
+            )
+            .limit(1)
         )
         artist_result = await session.execute(artist_stmt)
         artist = artist_result.scalar_one_or_none()
 
     # Fall back to name match
     if artist is None and track_data.artist_name:
-        artist_stmt = sa.select(models_module.Artist).where(
-            models_module.Artist.name == track_data.artist_name
+        artist_stmt = (
+            sa.select(models_module.Artist)
+            .where(models_module.Artist.name == track_data.artist_name)
+            .limit(1)
         )
         artist_result = await session.execute(artist_stmt)
         artist = artist_result.scalar_one_or_none()
