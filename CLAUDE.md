@@ -90,11 +90,44 @@ src/resonance/
 
 ## Architecture Principles
 
-- **API-first:** Every UI action goes through a REST API call. The UI is a thin template layer.
+- **API-first:** Every UI action goes through a REST API call. The UI and CLI are thin consumers of the same API. When building new features, ensure they are accessible via the API — the UI and CLI simply call it.
 - **Pluggable connectors:** Each external service is a connector class with declared capabilities. Query capabilities dynamically, never hardcode service names.
 - **Pluggable generators:** Each playlist generator is a self-contained module implementing a common interface.
 - **Async throughout:** SQLAlchemy async sessions, asyncpg, async connector methods.
 - **Rate limit budget management:** Shared `RateLimitBudget` class paces API requests, with priority lanes for auth (high) vs sync (normal).
+
+## CLI Tools
+
+Two CLI tools for administration and debugging:
+
+### `resonance-set-role`
+
+Direct database command for role management (disaster recovery):
+```bash
+uv run resonance-set-role <user_id> <role>   # role: user, admin, owner
+```
+
+### `resonance-api`
+
+HTTP client for admin API endpoints. Uses bearer token auth.
+
+```bash
+# Set environment variables (or use ADMIN_API_TOKEN in app config)
+export RESONANCE_URL=https://resonance.megadoomer.io
+export RESONANCE_API_TOKEN=<token>   # from 1Password: "Last.fm" item, Private vault
+
+# Available commands
+uv run resonance-api healthz          # Check health + deployed revision
+uv run resonance-api dedup-events     # Remove cross-service duplicate listening events
+uv run resonance-api sync <service>   # Trigger a sync (spotify, listenbrainz, lastfm)
+```
+
+### CLI Testing Guidelines
+
+- **Use the CLI to verify deployments** — `resonance-api healthz` confirms the running revision
+- **Use the CLI to trigger admin actions** — dedup, sync triggers, and future admin operations should be testable without a browser
+- **When adding new admin features**, ensure they have a corresponding API endpoint and CLI command — not just a UI button
+- **The CLI is also useful for Claude** — when debugging in a session, use `resonance-api` to interact with the live app instead of raw curl commands
 
 ## Git Workflow
 
@@ -123,3 +156,5 @@ App config is loaded via Pydantic `Settings`. Key variables:
 - `TOKEN_ENCRYPTION_KEY` — Fernet encryption key for stored OAuth tokens
 - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` — Spotify OAuth credentials
 - `MUSICBRAINZ_CLIENT_ID`, `MUSICBRAINZ_CLIENT_SECRET` — MusicBrainz OAuth credentials (for ListenBrainz)
+- `LASTFM_API_KEY`, `LASTFM_SHARED_SECRET` — Last.fm API credentials
+- `ADMIN_API_TOKEN` — Bearer token for admin API access (CLI and programmatic use)
