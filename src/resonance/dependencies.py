@@ -31,21 +31,51 @@ async def get_db(request: fastapi.Request) -> AsyncIterator[sa_async.AsyncSessio
         yield db
 
 
-def get_current_user_id(
+async def get_current_user_id(
+    request: fastapi.Request,
     session: Annotated[session_module.SessionData, fastapi.Depends(get_session)],
 ) -> uuid.UUID:
-    """Extract the authenticated user ID from the session.
+    """Extract the authenticated user ID from the session or bearer token.
+
+    Checks session first. If no session, checks for a valid admin API
+    token and resolves to the owner user.
 
     Raises:
-        HTTPException: 401 if no user_id is present in the session.
+        HTTPException: 401 if not authenticated.
     """
+    # 1. Try session auth
     user_id = session.get("user_id")
-    if user_id is None:
-        raise fastapi.HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-        )
-    return uuid.UUID(user_id)
+    if user_id is not None:
+        return uuid.UUID(user_id)
+
+    # 2. Try bearer token → resolve to owner user
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        settings = request.app.state.settings
+        if settings.admin_api_token and token == settings.admin_api_token:
+            # Look up the owner user
+            import sqlalchemy as sa
+
+            import resonance.models.user as user_models
+
+            factory = request.app.state.session_factory
+            async with factory() as db:
+                result = await db.execute(
+                    sa.select(user_models.User.id)
+                    .where(user_models.User.role == types_module.UserRole.OWNER)
+                    .limit(1)
+                )
+                owner_id = result.scalar_one_or_none()
+                if owner_id is not None:
+                    return uuid.UUID(str(owner_id))
+            raise fastapi.HTTPException(status_code=500, detail="No owner user found")
+        raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
+
+    raise fastapi.HTTPException(
+        status_code=401,
+        detail="Not authenticated",
+    )
 
 
 def verify_admin_access(request: fastapi.Request) -> None:
