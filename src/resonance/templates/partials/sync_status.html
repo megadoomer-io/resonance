@@ -28,9 +28,7 @@
                 </td>
                 <td>
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
-                        {% set done_count = job.children | selectattr('status.value', 'eq', 'completed') | list | length %}
-                        {% set total_count = job.children | length %}
-                            {% for child in job.children %}
+                        {% for child in job.children | sort(attribute='created_at') %}
                             {% if child.status.value == 'completed' %}
                             <div style="margin-bottom: 0.25rem;">
                                 <small>✓ {{ child.description or 'Done' }}</small>
