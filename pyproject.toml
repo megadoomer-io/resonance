@@ -31,7 +31,6 @@ dev = [
 ]
 
 [project.scripts]
-resonance-set-role = "resonance.cli:set_role"
 resonance-api = "resonance.cli:api"
 
 [build-system]

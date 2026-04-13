@@ -51,16 +51,6 @@ async def _set_role(user_id_str: str, role_str: str) -> None:
     await engine.dispose()
 
 
-def set_role() -> None:
-    """Entry point for `resonance-set-role <user_id> <role>`."""
-    if len(sys.argv) != 3:
-        print("Usage: resonance-set-role <user_id> <role>")
-        print(f"  Roles: {', '.join(r.value for r in types_module.UserRole)}")
-        sys.exit(1)
-
-    asyncio.run(_set_role(sys.argv[1], sys.argv[2]))
-
-
 # ---------------------------------------------------------------------------
 # resonance-api: CLI for admin API calls via bearer token
 # ---------------------------------------------------------------------------
@@ -115,25 +105,34 @@ def api() -> None:
     """Entry point for `resonance-api <command> [args]`.
 
     Commands:
-        dedup-events     Remove duplicate cross-service listening events
-        sync <service>   Trigger a sync for a service
-        healthz          Check health and revision
-        users            List all users
+        healthz                    Check health and revision
+        sync <service> [--full]    Trigger a sync for a service
+        dedup-events               Remove duplicate cross-service listening events
+        dedup-artists              Merge duplicate artist records
+        dedup-tracks               Merge duplicate track records
+        set-role <user_id> <role>  Set a user's role (user, admin, owner)
+        users                      List all users
     """
     if len(sys.argv) < 2:
         print("Usage: resonance-api <command> [args]")
         print()
         print("Commands:")
-        print("  healthz          Check health + deployed revision")
-        print("  sync <service>   Trigger a sync (spotify, listenbrainz, lastfm)")
-        print("  dedup-events     Remove cross-service duplicate listening events")
-        print("  dedup-artists    Merge duplicate artist records")
-        print("  dedup-tracks     Merge duplicate track records")
-        print("  healthz          Check health and deployed revision")
-        print("  users            List all users")
+        print("  healthz                   Health + deployed revision")
+        print("  sync <service> [--full]   Trigger a sync")
+        print("  dedup-events              Remove cross-service dupes")
+        print("  dedup-artists             Merge duplicate artists")
+        print("  dedup-tracks              Merge duplicate tracks")
+        print("  set-role <user_id> <role> Set user role")
+        print("  users                     List all users")
         sys.exit(1)
 
     command = sys.argv[1]
+
+    if command in ("--help", "-h"):
+        # Re-invoke with no args to print usage
+        sys.argv = sys.argv[:1]
+        api()
+        return
 
     if command == "healthz":
         resp = _api_request("GET", "/healthz")
@@ -174,6 +173,13 @@ def api() -> None:
         print("Deduplicating tracks...")
         resp = _api_request("POST", "/admin/dedup-tracks")
         print(json.dumps(resp.json(), indent=2))
+
+    elif command == "set-role":
+        if len(sys.argv) != 4:
+            print("Usage: resonance-api set-role <user_id> <role>")
+            print(f"  Roles: {', '.join(r.value for r in types_module.UserRole)}")
+            sys.exit(1)
+        asyncio.run(_set_role(sys.argv[2], sys.argv[3]))
 
     elif command == "users":
         resp = _api_request("GET", "/admin")

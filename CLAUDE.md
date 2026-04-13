@@ -96,20 +96,12 @@ src/resonance/
 - **Async throughout:** SQLAlchemy async sessions, asyncpg, async connector methods.
 - **Rate limit budget management:** Shared `RateLimitBudget` class paces API requests, with priority lanes for auth (high) vs sync (normal).
 
-## CLI Tools
-
-Two CLI tools for administration and debugging:
-
-### `resonance-set-role`
-
-Direct database command for role management (disaster recovery):
-```bash
-uv run resonance-set-role <user_id> <role>   # role: user, admin, owner
-```
+## CLI Tool
 
 ### `resonance-api`
 
-HTTP client for admin API endpoints. Uses bearer token auth.
+Unified CLI for admin operations. Uses bearer token auth for API commands;
+`set-role` connects directly to the database (disaster recovery).
 
 ```bash
 # Set environment variables (or use ADMIN_API_TOKEN in app config)
@@ -117,9 +109,13 @@ export RESONANCE_URL=https://resonance.megadoomer.io
 export RESONANCE_API_TOKEN=<token>   # from 1Password: "Last.fm" item, Private vault
 
 # Available commands
-uv run resonance-api healthz          # Check health + deployed revision
-uv run resonance-api dedup-events     # Remove cross-service duplicate listening events
-uv run resonance-api sync <service>   # Trigger a sync (spotify, listenbrainz, lastfm)
+uv run resonance-api healthz                    # Check health + deployed revision
+uv run resonance-api sync <service> [--full]    # Trigger a sync (spotify, listenbrainz, lastfm)
+uv run resonance-api dedup-events               # Remove cross-service duplicate listening events
+uv run resonance-api dedup-artists              # Merge duplicate artist records
+uv run resonance-api dedup-tracks               # Merge duplicate track records
+uv run resonance-api set-role <user_id> <role>  # Set role (user, admin, owner) — direct DB
+uv run resonance-api users                      # List users
 ```
 
 ### CLI Testing Guidelines
