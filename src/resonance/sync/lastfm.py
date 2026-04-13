@@ -206,12 +206,17 @@ def _parse_recent_track(
         artist_mbid if artist_mbid else _generate_artist_id(artist_name)
     )
 
+    # Last.fm returns duration in seconds; convert to milliseconds
+    raw_duration = int(raw.get("duration", 0))
+    duration_ms = raw_duration * 1000 if raw_duration > 0 else None
+
     track_data = connector_base.TrackData(
         external_id=external_id,
         title=track_name,
         artist_external_id=artist_external_id,
         artist_name=artist_name,
         service=types_module.ServiceType.LASTFM,
+        duration_ms=duration_ms,
     )
     return track_data, uts
 
@@ -241,12 +246,17 @@ def _parse_loved_track(
         artist_mbid if artist_mbid else _generate_artist_id(artist_name)
     )
 
+    # Last.fm returns duration in seconds; convert to milliseconds
+    raw_duration = int(raw.get("duration", 0))
+    duration_ms = raw_duration * 1000 if raw_duration > 0 else None
+
     return connector_base.TrackData(
         external_id=external_id,
         title=track_name,
         artist_external_id=artist_external_id,
         artist_name=artist_name,
         service=types_module.ServiceType.LASTFM,
+        duration_ms=duration_ms,
     )
 
 

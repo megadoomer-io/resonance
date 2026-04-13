@@ -145,6 +145,13 @@ class ListenBrainzConnector(base_module.BaseConnector):
             artist_mbids: list[str] = additional_info.get("artist_mbids", [])
             first_artist_mbid = artist_mbids[0] if artist_mbids else ""
 
+            # duration_ms is preferred; fall back to duration (seconds)
+            duration_ms = additional_info.get("duration_ms")
+            if duration_ms is None:
+                raw_duration = additional_info.get("duration")
+                if raw_duration and int(raw_duration) > 0:
+                    duration_ms = int(raw_duration) * 1000
+
             items.append(
                 ListenBrainzListenItem(
                     track=base_module.TrackData(
@@ -153,7 +160,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
                         artist_external_id=first_artist_mbid,
                         artist_name=metadata["artist_name"],
                         service=types_module.ServiceType.LISTENBRAINZ,
-                        duration_ms=additional_info.get("duration_ms"),
+                        duration_ms=duration_ms,
                     ),
                     listened_at=listen["listened_at"],
                 )
