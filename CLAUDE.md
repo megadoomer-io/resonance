@@ -109,13 +109,13 @@ export RESONANCE_URL=https://resonance.megadoomer.io
 export RESONANCE_API_TOKEN=<token>   # from 1Password: "Last.fm" item, Private vault
 
 # Available commands
-uv run resonance-api healthz                    # Check health + deployed revision
-uv run resonance-api sync <service> [--full]    # Trigger a sync (spotify, listenbrainz, lastfm)
-uv run resonance-api dedup-events               # Remove cross-service duplicate listening events
-uv run resonance-api dedup-artists              # Merge duplicate artist records
-uv run resonance-api dedup-tracks               # Merge duplicate track records
-uv run resonance-api set-role <user_id> <role>  # Set role (user, admin, owner) — direct DB
-uv run resonance-api users                      # List users
+uv run resonance-api healthz                    # Health + deployed revision
+uv run resonance-api status                     # Recent sync job overview
+uv run resonance-api stats                      # Database statistics
+uv run resonance-api sync <service> [--full]    # Trigger a sync
+uv run resonance-api dedup <type>               # Dedup: events|artists|tracks|all
+uv run resonance-api track <query>              # Search tracks by title
+uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 ```
 
 ### CLI Testing Guidelines

@@ -1,10 +1,13 @@
 """CLI commands for Resonance administration."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import sys
 import uuid
+from typing import TYPE_CHECKING
 
 import httpx
 import sqlalchemy as sa
@@ -13,6 +16,9 @@ import resonance.config as config_module
 import resonance.database as database_module
 import resonance.models.user as user_models
 import resonance.types as types_module
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 async def _set_role(user_id_str: str, role_str: str) -> None:
@@ -54,6 +60,29 @@ async def _set_role(user_id_str: str, role_str: str) -> None:
 # ---------------------------------------------------------------------------
 # resonance-api: CLI for admin API calls via bearer token
 # ---------------------------------------------------------------------------
+
+_USAGE = """\
+Usage: resonance-api <command> [args]
+
+Commands:
+  healthz                   Health + deployed revision
+  status                    Recent sync job overview
+  stats                     Database statistics
+  sync <service> [--full]   Trigger a sync
+  dedup <type>              Run deduplication
+  track <query>             Search tracks by title
+  set-role <user_id> <role> Set user role (direct DB)
+"""
+
+_DEDUP_USAGE = """\
+Usage: resonance-api dedup <type>
+
+Types:
+  events    Remove cross-service duplicate events
+  artists   Merge duplicate artist records
+  tracks    Merge duplicate track records
+  all       Run all three in sequence
+"""
 
 
 def _get_api_config() -> tuple[str, str]:
@@ -101,90 +130,157 @@ def _api_request(
     return response
 
 
-def api() -> None:
-    """Entry point for `resonance-api <command> [args]`.
+def _cmd_healthz() -> None:
+    resp = _api_request("GET", "/healthz")
+    print(json.dumps(resp.json(), indent=2))
 
-    Commands:
-        healthz                    Check health and revision
-        sync <service> [--full]    Trigger a sync for a service
-        dedup-events               Remove duplicate cross-service listening events
-        dedup-artists              Merge duplicate artist records
-        dedup-tracks               Merge duplicate track records
-        set-role <user_id> <role>  Set a user's role (user, admin, owner)
-        users                      List all users
-    """
-    if len(sys.argv) < 2:
-        print("Usage: resonance-api <command> [args]")
+
+def _cmd_status() -> None:
+    resp = _api_request("GET", "/admin/status")
+    data = resp.json()
+    for job in data.get("sync_jobs", []):
+        status = job["status"].upper()
+        svc = job["service"]
+        created = job["created_at"][:19].replace("T", " ")
+        print(f"[{status}] {svc} sync — {created}")
+        for child in job.get("children", []):
+            c_status = child["status"].upper()
+            desc = child.get("description") or child["type"]
+            progress = child.get("progress", 0)
+            total = child.get("total")
+            p_str = f" {progress}/{total}" if total else ""
+            err = f" — {child['error']}" if child.get("error") else ""
+            print(f"  {c_status:10s} {desc}{p_str}{err}")
         print()
-        print("Commands:")
-        print("  healthz                   Health + deployed revision")
-        print("  sync <service> [--full]   Trigger a sync")
-        print("  dedup-events              Remove cross-service dupes")
-        print("  dedup-artists             Merge duplicate artists")
-        print("  dedup-tracks              Merge duplicate tracks")
-        print("  set-role <user_id> <role> Set user role")
-        print("  users                     List all users")
+
+
+def _cmd_stats() -> None:
+    resp = _api_request("GET", "/admin/stats")
+    data = resp.json()
+    print(f"Artists:  {data['artists']}")
+    print(f"Tracks:  {data['tracks']}")
+    dur_with = data["tracks_with_duration"]
+    dur_without = data["tracks_without_duration"]
+    total = dur_with + dur_without
+    pct = (dur_with / total * 100) if total else 0
+    print(f"  with duration:    {dur_with} ({pct:.0f}%)")
+    print(f"  without duration: {dur_without}")
+    print(f"Events:  {data['events_total']}")
+    for svc, count in sorted(data.get("events_by_service", {}).items()):
+        print(f"  {svc:15s} {count}")
+    dup_a = data.get("duplicate_artist_groups", 0)
+    dup_t = data.get("duplicate_track_groups", 0)
+    if dup_a or dup_t:
+        print(f"Duplicate groups: {dup_a} artists, {dup_t} tracks")
+
+
+def _cmd_sync() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api sync <service> [--full]")
         sys.exit(1)
+    service = sys.argv[2]
+    body = None
+    if "--full" in sys.argv[3:]:
+        body = {"sync_from": "full"}
+        print(f"Triggering full re-sync for {service}...")
+    else:
+        print(f"Triggering incremental sync for {service}...")
+    resp = _api_request("POST", f"/api/v1/sync/{service}", json=body)
+    print(json.dumps(resp.json(), indent=2))
+
+
+def _cmd_dedup() -> None:
+    if len(sys.argv) < 3:
+        print(_DEDUP_USAGE)
+        sys.exit(1)
+    dedup_type = sys.argv[2]
+
+    targets: list[tuple[str, str]] = []
+    if dedup_type == "events":
+        targets = [("events", "/admin/dedup-events")]
+    elif dedup_type == "artists":
+        targets = [("artists", "/admin/dedup-artists")]
+    elif dedup_type == "tracks":
+        targets = [("tracks", "/admin/dedup-tracks")]
+    elif dedup_type == "all":
+        targets = [
+            ("artists", "/admin/dedup-artists"),
+            ("tracks", "/admin/dedup-tracks"),
+            ("events", "/admin/dedup-events"),
+        ]
+    else:
+        print(f"Unknown dedup type: {dedup_type}")
+        print(_DEDUP_USAGE)
+        sys.exit(1)
+
+    for label, path in targets:
+        print(f"Deduplicating {label}...")
+        resp = _api_request("POST", path)
+        print(json.dumps(resp.json(), indent=2))
+        if len(targets) > 1:
+            print()
+
+
+def _cmd_track() -> None:
+    query = " ".join(sys.argv[2:])
+    if not query.strip():
+        print("Usage: resonance-api track <query>")
+        sys.exit(1)
+    resp = _api_request("GET", f"/admin/track?q={query}")
+    data = resp.json()
+    results = data.get("results", [])
+    if not results:
+        print(f"No tracks found matching '{query}'")
+        return
+    for t in results:
+        dur = t.get("duration") or "no duration"
+        print(f"{t['title']} — {t['artist']} ({dur})")
+        print(f"  id: {t['id']}")
+        links = t.get("service_links") or {}
+        if links:
+            print(f"  links: {links}")
+        evts = t.get("events_by_service", {})
+        if evts:
+            parts = [f"{s}: {c}" for s, c in sorted(evts.items())]
+            print(f"  events: {', '.join(parts)}")
+        for ev in t.get("recent_events", []):
+            ts = ev["listened_at"][:19].replace("T", " ")
+            print(f"    {ts} ({ev['service']})")
+        print()
+
+
+def _cmd_set_role() -> None:
+    if len(sys.argv) != 4:
+        print("Usage: resonance-api set-role <user_id> <role>")
+        valid = ", ".join(r.value for r in types_module.UserRole)
+        print(f"  Roles: {valid}")
+        sys.exit(1)
+    asyncio.run(_set_role(sys.argv[2], sys.argv[3]))
+
+
+_COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
+    "healthz": ("Health + deployed revision", _cmd_healthz),
+    "status": ("Recent sync job overview", _cmd_status),
+    "stats": ("Database statistics", _cmd_stats),
+    "sync": ("Trigger a sync", _cmd_sync),
+    "dedup": ("Run deduplication", _cmd_dedup),
+    "track": ("Search tracks by title", _cmd_track),
+    "set-role": ("Set user role (direct DB)", _cmd_set_role),
+}
+
+
+def api() -> None:
+    """Entry point for ``resonance-api <command> [args]``."""
+    if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
+        print(_USAGE)
+        sys.exit(0 if len(sys.argv) >= 2 else 1)
 
     command = sys.argv[1]
 
-    if command in ("--help", "-h"):
-        # Re-invoke with no args to print usage
-        sys.argv = sys.argv[:1]
-        api()
-        return
-
-    if command == "healthz":
-        resp = _api_request("GET", "/healthz")
-        print(json.dumps(resp.json(), indent=2))
-
-    elif command == "dedup-events":
-        print("Running dedup...")
-        resp = _api_request("POST", "/admin/dedup-events")
-        if resp.status_code == 200:
-            print(json.dumps(resp.json(), indent=2))
-        else:
-            print(f"Error {resp.status_code}: {resp.text}")
-
-    elif command == "sync":
-        if len(sys.argv) < 3:
-            print("Usage: resonance-api sync <service> [--full]")
-            sys.exit(1)
-        service = sys.argv[2]
-        body = None
-        if "--full" in sys.argv[3:]:
-            body = {"sync_from": "full"}
-            print(f"Triggering full re-sync for {service}...")
-        else:
-            print(f"Triggering incremental sync for {service}...")
-        resp = _api_request(
-            "POST",
-            f"/api/v1/sync/{service}",
-            json=body,
-        )
-        print(json.dumps(resp.json(), indent=2))
-
-    elif command == "dedup-artists":
-        print("Deduplicating artists...")
-        resp = _api_request("POST", "/admin/dedup-artists")
-        print(json.dumps(resp.json(), indent=2))
-
-    elif command == "dedup-tracks":
-        print("Deduplicating tracks...")
-        resp = _api_request("POST", "/admin/dedup-tracks")
-        print(json.dumps(resp.json(), indent=2))
-
-    elif command == "set-role":
-        if len(sys.argv) != 4:
-            print("Usage: resonance-api set-role <user_id> <role>")
-            print(f"  Roles: {', '.join(r.value for r in types_module.UserRole)}")
-            sys.exit(1)
-        asyncio.run(_set_role(sys.argv[2], sys.argv[3]))
-
-    elif command == "users":
-        resp = _api_request("GET", "/admin")
-        print("Users page returned (HTML). Use the web UI for user management.")
-
-    else:
+    handler = _COMMANDS.get(command)
+    if handler is None:
         print(f"Unknown command: {command}")
+        print(_USAGE)
         sys.exit(1)
+
+    handler[1]()
