@@ -30,18 +30,21 @@
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
                         {% set done_count = job.children | selectattr('status.value', 'eq', 'completed') | list | length %}
                         {% set total_count = job.children | length %}
-                        {% if total_count > 1 %}
-                        <div style="margin-bottom: 0.25rem;">
-                            <small>Phase {{ [done_count + 1, total_count] | min }}/{{ total_count }}</small>
-                        </div>
-                        {% endif %}
-                        {% for child in job.children %}
-                            {% if child.status.value == 'running' %}
+                            {% for child in job.children %}
+                            {% if child.status.value == 'completed' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small>✓ {{ child.description or 'Done' }}</small>
+                            </div>
+                            {% elif child.status.value == 'deferred' %}
+                            <div style="margin-bottom: 0.25rem;">
+                                <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ (child.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}</small>
+                            </div>
+                            {% elif child.status.value in ('pending', 'running') %}
                             <div style="margin-bottom: 0.25rem;">
                                 <small><strong>{{ child.description or 'Processing...' }}</strong></small>
                                 {% if child.progress_total %}
                                 <progress value="{{ child.progress_current }}" max="{{ child.progress_total }}" style="width: 100%;"></progress>
-                                <small>{{ child.progress_current }} of {{ child.progress_total }}
+                                <small>{{ child.progress_current }} / {{ child.progress_total }}
                                 {% if child.started_at and child.progress_current > 0 %}
                                     {% set elapsed = (now - child.started_at).total_seconds() %}
                                     {% set rate = child.progress_current / elapsed if elapsed > 0 else 0 %}
@@ -53,14 +56,12 @@
                                     {% endif %}
                                 {% endif %}
                                 </small>
-                                {% else %}
+                                {% elif child.progress_current > 0 %}
                                 <progress style="width: 100%;"></progress>
                                 <small>{{ child.progress_current }} so far</small>
+                                {% else %}
+                                <small>Queued</small>
                                 {% endif %}
-                            </div>
-                            {% elif child.status.value == 'deferred' %}
-                            <div style="margin-bottom: 0.25rem;">
-                                <small>{{ child.description or 'Deferred' }} — waiting{% if child.deferred_until %} until {{ (child.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}</small>
                             </div>
                             {% endif %}
                         {% endfor %}
