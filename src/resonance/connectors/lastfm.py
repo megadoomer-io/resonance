@@ -4,6 +4,7 @@ import hashlib
 import urllib.parse
 from typing import Any
 
+import httpx
 import structlog
 
 import resonance.config as config_module
@@ -96,7 +97,33 @@ class LastFmConnector(base_module.BaseConnector):
             sign_params = {k: str(v) for k, v in request_params.items()}
             request_params["api_sig"] = self._sign_params(sign_params)
 
-        response = await self._request("GET", LASTFM_API_BASE, params=request_params)
+        # Retry on server errors (5xx) — Last.fm occasionally returns 500
+        import asyncio as _asyncio
+
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                response = await self._request(
+                    "GET", LASTFM_API_BASE, params=request_params
+                )
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code >= 500 and attempt < 3:
+                    wait = 2**attempt  # 1, 2, 4 seconds
+                    logger.warning(
+                        "lastfm_server_error",
+                        status=exc.response.status_code,
+                        attempt=attempt + 1,
+                        retry_in=wait,
+                    )
+                    await _asyncio.sleep(wait)
+                    last_exc = exc
+                    continue
+                raise
+        else:
+            if last_exc:
+                raise last_exc
+
         data: dict[str, Any] = response.json()
 
         if "error" in data:
