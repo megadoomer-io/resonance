@@ -77,7 +77,9 @@ def _get_api_config() -> tuple[str, str]:
     return base_url, token
 
 
-def _api_request(method: str, path: str, **kwargs: object) -> httpx.Response:
+def _api_request(
+    method: str, path: str, timeout: float = 300.0, **kwargs: object
+) -> httpx.Response:
     """Make an authenticated API request."""
     base_url, token = _get_api_config()
     url = f"{base_url}{path}"
@@ -86,7 +88,7 @@ def _api_request(method: str, path: str, **kwargs: object) -> httpx.Response:
             method,
             url,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=60.0,
+            timeout=timeout,
             follow_redirects=True,
             **kwargs,  # type: ignore[arg-type]
         )
