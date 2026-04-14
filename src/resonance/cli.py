@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import sys
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -69,7 +71,8 @@ Commands:
   status                    Recent sync job overview
   stats                     Database statistics
   sync <service> [--full]   Trigger a sync
-  dedup <type>              Run deduplication
+  dedup <type> [--no-wait]  Run deduplication
+  task <task_id>            Check task status
   track <query>             Search tracks by title
   set-role <user_id> <role> Set user role (direct DB)
 """
@@ -189,11 +192,48 @@ def _cmd_sync() -> None:
     print(json.dumps(resp.json(), indent=2))
 
 
+def _poll_task(task_id: str, label: str) -> dict[str, object]:
+    """Poll a task until completion, showing progress."""
+    is_tty = sys.stdout.isatty()
+    poll_interval = 3
+
+    while True:
+        resp = _api_request("GET", f"/admin/tasks/{task_id}")
+        data = resp.json()
+        status = data.get("status", "unknown")
+
+        if status in ("completed", "failed"):
+            if is_tty:
+                # Clear the progress line
+                sys.stdout.write("\r" + " " * 60 + "\r")
+                sys.stdout.flush()
+            if status == "failed":
+                error = data.get("error", "Unknown error")
+                print(f"FAILED: {error}")
+                sys.exit(1)
+            result: dict[str, object] = data.get("result") or {}
+            return result
+
+        # Show progress
+        progress = data.get("progress_current", 0)
+        total = data.get("progress_total")
+        p_str = f"{progress}/{total}" if total else f"{progress}"
+        if is_tty:
+            sys.stdout.write(f"\r{label}... {p_str}")
+            sys.stdout.flush()
+        else:
+            now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{now} {label} {status} {p_str}")
+
+        time.sleep(poll_interval)
+
+
 def _cmd_dedup() -> None:
     if len(sys.argv) < 3:
         print(_DEDUP_USAGE)
         sys.exit(1)
     dedup_type = sys.argv[2]
+    no_wait = "--no-wait" in sys.argv[3:]
 
     targets: list[tuple[str, str]] = []
     if dedup_type == "events":
@@ -214,11 +254,27 @@ def _cmd_dedup() -> None:
         sys.exit(1)
 
     for label, path in targets:
-        print(f"Deduplicating {label}...")
         resp = _api_request("POST", path)
-        print(json.dumps(resp.json(), indent=2))
+        data = resp.json()
+        task_id = data.get("task_id", "")
+
+        if no_wait:
+            print(f"{label}: task {task_id}")
+            continue
+
+        result = _poll_task(task_id, f"Deduplicating {label}")
+        print(json.dumps(result, indent=2))
         if len(targets) > 1:
             print()
+
+
+def _cmd_task() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api task <task_id>")
+        sys.exit(1)
+    task_id = sys.argv[2]
+    resp = _api_request("GET", f"/admin/tasks/{task_id}")
+    print(json.dumps(resp.json(), indent=2))
 
 
 def _cmd_track() -> None:
@@ -264,6 +320,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "stats": ("Database statistics", _cmd_stats),
     "sync": ("Trigger a sync", _cmd_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
+    "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }
