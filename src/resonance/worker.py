@@ -511,6 +511,23 @@ async def _check_parent_completion(
         result=parent.result,
     )
 
+    # After a successful sync, run cross-service event dedup
+    if parent.status == types_module.SyncStatus.COMPLETED:
+        dedup_task = task_module.Task(
+            task_type=types_module.TaskType.BULK_JOB,
+            status=types_module.SyncStatus.PENDING,
+            params={"operation": "dedup_events"},
+            description="Post-sync event dedup",
+        )
+        session.add(dedup_task)
+        await session.commit()
+        await arq_redis.enqueue_job(
+            "run_bulk_job",
+            str(dedup_task.id),
+            _job_id=f"bulk:{dedup_task.id}",
+        )
+        log.info("post_sync_dedup_enqueued", task_id=str(dedup_task.id))
+
 
 # ---------------------------------------------------------------------------
 # Helpers

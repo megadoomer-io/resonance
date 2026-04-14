@@ -208,7 +208,8 @@ class TestCheckParentCompletion:
         assert parent_task.result["items_created"] == 30
         assert parent_task.result["items_updated"] == 8
         assert parent_task.completed_at is not None
-        session.commit.assert_called_once()
+        # Two commits: one for parent completion, one for post-sync dedup task
+        assert session.commit.call_count == 2
 
     @pytest.mark.asyncio
     async def test_aggregates_results_from_children(self) -> None:
