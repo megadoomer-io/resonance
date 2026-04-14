@@ -31,7 +31,8 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE sync_tasks ADD CONSTRAINT "
         '"ck_sync_tasks_task_type" '
-        "CHECK (task_type IN ('sync_job', 'time_range', 'page_fetch', 'bulk_job'))"
+        "CHECK (task_type IN "
+        "('SYNC_JOB', 'TIME_RANGE', 'PAGE_FETCH', 'BULK_JOB'))"
     )
 
 
@@ -43,7 +44,7 @@ def downgrade() -> None:
     op.execute(
         "ALTER TABLE sync_tasks ADD CONSTRAINT "
         '"ck_sync_tasks_task_type" '
-        "CHECK (task_type IN ('sync_job', 'time_range', 'page_fetch'))"
+        "CHECK (task_type IN ('SYNC_JOB', 'TIME_RANGE', 'PAGE_FETCH'))"
     )
     op.alter_column(
         "sync_tasks", "service_connection_id", existing_type=sa.Uuid(), nullable=False
