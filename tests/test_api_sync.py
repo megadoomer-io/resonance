@@ -264,10 +264,10 @@ class TestSyncTrigger:
         fake_conn.service_type = types_module.ServiceType.SPOTIFY
         fake_conn.encrypted_access_token = "encrypted-token"
 
-        fake_running_task = MagicMock(spec=task_models.SyncTask)
+        fake_running_task = MagicMock(spec=task_models.Task)
         fake_running_task.id = uuid.uuid4()
         fake_running_task.status = types_module.SyncStatus.RUNNING
-        fake_running_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_running_task.task_type = types_module.TaskType.SYNC_JOB
 
         db_session = FakeAsyncSession()
         # First: find connection; Second: find running sync task
@@ -300,10 +300,10 @@ class TestSyncTrigger:
         fake_conn.service_type = types_module.ServiceType.SPOTIFY
         fake_conn.encrypted_access_token = "encrypted-token"
 
-        fake_deferred_task = MagicMock(spec=task_models.SyncTask)
+        fake_deferred_task = MagicMock(spec=task_models.Task)
         fake_deferred_task.id = uuid.uuid4()
         fake_deferred_task.status = types_module.SyncStatus.DEFERRED
-        fake_deferred_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_deferred_task.task_type = types_module.TaskType.SYNC_JOB
 
         db_session = FakeAsyncSession()
         # First: find connection; Second: find deferred sync task
@@ -529,10 +529,10 @@ class TestSyncStatus:
         user_id = uuid.uuid4()
         job_id = uuid.uuid4()
 
-        fake_task = MagicMock(spec=task_models.SyncTask)
+        fake_task = MagicMock(spec=task_models.Task)
         fake_task.id = job_id
         fake_task.status = types_module.SyncStatus.COMPLETED
-        fake_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_task.task_type = types_module.TaskType.SYNC_JOB
         fake_task.progress_current = 10
         fake_task.progress_total = 10
         fake_task.result = {"items_created": 5, "items_updated": 3}
@@ -594,10 +594,10 @@ class TestSyncStatus:
         job_id = uuid.uuid4()
         deferred_time = datetime.datetime(2026, 4, 3, 12, 0, 0, tzinfo=datetime.UTC)
 
-        fake_task = MagicMock(spec=task_models.SyncTask)
+        fake_task = MagicMock(spec=task_models.Task)
         fake_task.id = job_id
         fake_task.status = types_module.SyncStatus.DEFERRED
-        fake_task.task_type = types_module.SyncTaskType.SYNC_JOB
+        fake_task.task_type = types_module.TaskType.SYNC_JOB
         fake_task.progress_current = 0
         fake_task.progress_total = 0
         fake_task.result = {}

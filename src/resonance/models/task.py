@@ -1,4 +1,7 @@
-"""SyncTask model for hierarchical sync job tracking."""
+"""Task model for tracking sync jobs, bulk operations, and other async work.
+
+Note: The underlying table is ``sync_tasks`` (historical name).
+"""
 
 from __future__ import annotations
 
@@ -20,8 +23,12 @@ _PYTHON_DEFAULTS: dict[str, object] = {
 }
 
 
-class SyncTask(base_module.Base):
-    """A hierarchical sync task: sync_job -> time_range -> page_fetch."""
+class Task(base_module.Base):
+    """A task: sync jobs, bulk operations, or other async work.
+
+    Sync tasks use parent/children for hierarchy (sync_job -> time_range).
+    Bulk tasks (e.g., dedup) are standalone with no parent or service connection.
+    """
 
     __tablename__ = "sync_tasks"
     __table_args__ = (
@@ -38,24 +45,26 @@ class SyncTask(base_module.Base):
     id: orm.Mapped[uuid.UUID] = orm.mapped_column(
         sa.Uuid, primary_key=True, default=uuid.uuid4
     )
-    user_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
-        sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    user_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
+        sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
-    service_connection_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
-        sa.ForeignKey("service_connections.id", ondelete="CASCADE"), nullable=False
+    service_connection_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
+        sa.ForeignKey("service_connections.id", ondelete="CASCADE"), nullable=True
     )
-    service_connection: orm.Mapped[user_models.ServiceConnection] = orm.relationship()
+    service_connection: orm.Mapped[user_models.ServiceConnection | None] = (
+        orm.relationship()
+    )
     parent_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
         sa.ForeignKey("sync_tasks.id", ondelete="CASCADE"), nullable=True, default=None
     )
-    parent: orm.Mapped[SyncTask | None] = orm.relationship(
+    parent: orm.Mapped[Task | None] = orm.relationship(
         back_populates="children", remote_side=[id]
     )
-    children: orm.Mapped[list[SyncTask]] = orm.relationship(
+    children: orm.Mapped[list[Task]] = orm.relationship(
         back_populates="parent", cascade="all, delete-orphan"
     )
-    task_type: orm.Mapped[types_module.SyncTaskType] = orm.mapped_column(
-        sa.Enum(types_module.SyncTaskType, native_enum=False), nullable=False
+    task_type: orm.Mapped[types_module.TaskType] = orm.mapped_column(
+        sa.Enum(types_module.TaskType, native_enum=False), nullable=False
     )
     status: orm.Mapped[types_module.SyncStatus] = orm.mapped_column(
         sa.Enum(types_module.SyncStatus, native_enum=False),
@@ -96,9 +105,9 @@ class SyncTask(base_module.Base):
     )
 
 
-@sa.event.listens_for(SyncTask, "init")
+@sa.event.listens_for(Task, "init")
 def _set_python_defaults(
-    target: SyncTask,
+    target: Task,
     _args: tuple[object, ...],
     kwargs: dict[str, object],
 ) -> None:

@@ -32,7 +32,7 @@ class TestSyncStrategy(sync_base.SyncStrategy):
         """Return a single task descriptor for generating test data."""
         return [
             sync_base.SyncTaskDescriptor(
-                task_type=types_module.SyncTaskType.TIME_RANGE,
+                task_type=types_module.TaskType.TIME_RANGE,
                 params={
                     "artists": 5,
                     "tracks": 20,
@@ -47,7 +47,7 @@ class TestSyncStrategy(sync_base.SyncStrategy):
     async def execute(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: base_module.BaseConnector,
         connection: user_models.ServiceConnection,
     ) -> dict[str, Any]:

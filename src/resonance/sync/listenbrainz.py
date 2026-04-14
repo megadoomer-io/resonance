@@ -99,7 +99,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             date_str = listened_at_dt.date().isoformat()
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
-                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    task_type=types_module.TaskType.TIME_RANGE,
                     params={"username": username, "min_ts": newest_synced_at},
                     progress_total=progress_total,
                     description=f"Syncing new listens since {date_str}",
@@ -110,7 +110,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             if oldest_synced_at is not None:
                 descriptors.append(
                     sync_base.SyncTaskDescriptor(
-                        task_type=types_module.SyncTaskType.TIME_RANGE,
+                        task_type=types_module.TaskType.TIME_RANGE,
                         params={
                             "username": username,
                             "max_ts": oldest_synced_at,
@@ -124,7 +124,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             # No watermark at all — full sync
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
-                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    task_type=types_module.TaskType.TIME_RANGE,
                     params={"username": username, "min_ts": None},
                     progress_total=progress_total,
                     description="Syncing listening history",
@@ -136,7 +136,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
     async def execute(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: connector_base.BaseConnector,
         connection: user_models.ServiceConnection,
     ) -> dict[str, object]:
@@ -161,6 +161,7 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         Raises:
             DeferRequest: When a RateLimitExceededError is encountered.
         """
+        assert task.user_id is not None
         lb_connector = _cast_connector(connector)
         username: str = str(task.params.get("username", ""))
         min_ts_param = task.params.get("min_ts")

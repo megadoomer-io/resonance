@@ -81,8 +81,8 @@ src/resonance/
     listenbrainz.py   # ListenBrainz connector (MusicBrainz OAuth)
   generators/         # Playlist generator plugins (future)
   middleware/         # Session middleware (Redis-backed)
-  models/             # SQLAlchemy async models
-  worker.py           # arq task queue worker (plan_sync, sync_range)
+  models/             # SQLAlchemy async models (Task maps to sync_tasks table)
+  worker.py           # arq task queue worker (plan_sync, sync_range, run_bulk_job)
   sync/               # Data upsert functions shared by worker tasks
   templates/          # Jinja2 server-rendered UI + HTMX partials
   ui/                 # UI route handlers

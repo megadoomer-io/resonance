@@ -422,25 +422,25 @@ class TestUserTrackRelationModel:
 
 
 # ---------------------------------------------------------------------------
-# SyncTask model
+# Task model
 # ---------------------------------------------------------------------------
 
 
-class TestSyncTask:
-    """Tests for the SyncTask model."""
+class TestTask:
+    """Tests for the Task model."""
 
     def test_progress_fields_are_biginteger(self) -> None:
-        table: sa.Table = task_module.SyncTask.__table__  # type: ignore[assignment]
+        table: sa.Table = task_module.Task.__table__  # type: ignore[assignment]
         current_col = _get_column(table, "progress_current")
         total_col = _get_column(table, "progress_total")
         assert isinstance(current_col.type, sa.BigInteger)
         assert isinstance(total_col.type, sa.BigInteger)
 
     def test_sync_task_has_expected_columns(self) -> None:
-        task = task_module.SyncTask(
+        task = task_module.Task(
             user_id=uuid.uuid4(),
             service_connection_id=uuid.uuid4(),
-            task_type=types_module.SyncTaskType.SYNC_JOB,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.PENDING,
         )
         assert task.parent_id is None
@@ -451,7 +451,7 @@ class TestSyncTask:
         assert task.error_message is None
 
     def test_sync_task_tablename(self) -> None:
-        assert task_module.SyncTask.__tablename__ == "sync_tasks"
+        assert task_module.Task.__tablename__ == "sync_tasks"
 
 
 # ---------------------------------------------------------------------------
@@ -487,4 +487,4 @@ class TestModelsPackageExports:
         assert models_module.UserTrackRelation is taste_module.UserTrackRelation
 
     def test_sync_task_exported(self) -> None:
-        assert models_module.SyncTask is task_module.SyncTask
+        assert models_module.Task is task_module.Task

@@ -92,14 +92,14 @@ def _make_task(
     parent_id: uuid.UUID | None = None,
     status: types_module.SyncStatus = types_module.SyncStatus.COMPLETED,
     result: dict[str, object] | None = None,
-) -> task_module.SyncTask:
-    """Create a SyncTask instance for testing."""
-    task = task_module.SyncTask(
+) -> task_module.Task:
+    """Create a Task instance for testing."""
+    task = task_module.Task(
         id=task_id or uuid.uuid4(),
         user_id=uuid.uuid4(),
         service_connection_id=uuid.uuid4(),
         parent_id=parent_id,
-        task_type=types_module.SyncTaskType.TIME_RANGE,
+        task_type=types_module.TaskType.TIME_RANGE,
         status=status,
         result=result or {},
     )
@@ -479,11 +479,11 @@ class TestPlanSyncStrategyDispatch:
         conn_id = uuid.uuid4()
         user_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
-            task_type=types_module.SyncTaskType.SYNC_JOB,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.PENDING,
         )
 
@@ -531,11 +531,11 @@ class TestPlanSyncStrategyDispatch:
         conn_id = uuid.uuid4()
         user_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
-            task_type=types_module.SyncTaskType.SYNC_JOB,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.PENDING,
         )
 
@@ -586,12 +586,12 @@ class TestSyncRangeWatermarkResume:
         parent_id = uuid.uuid4()
 
         # Task is already RUNNING — simulates arq retry after crash
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.RUNNING,
             params={"username": "testuser", "min_ts": 1700000000},
             progress_current=15000,
@@ -688,12 +688,12 @@ class TestSyncRangeWatermarkResume:
         parent_id = uuid.uuid4()
 
         # Task is PENDING — normal first execution
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={"username": "testuser", "min_ts": 1700000000},
         )
@@ -789,12 +789,12 @@ class TestSyncRangeDeferral:
         user_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={"data_type": "saved_tracks"},
         )
@@ -879,12 +879,12 @@ class TestSyncRangeShutdown:
         user_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={"data_type": "saved_tracks"},
         )
@@ -952,12 +952,12 @@ class TestSyncRangeWatermarkWrite:
         user_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={"data_type": "saved_tracks"},
         )
@@ -1039,12 +1039,12 @@ class TestSyncRangeWatermarkWrite:
         user_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={"data_type": "saved_tracks"},
         )
@@ -1125,12 +1125,12 @@ class TestSyncRangeWatermarkWrite:
         user_id = uuid.uuid4()
         parent_id = uuid.uuid4()
 
-        task = task_module.SyncTask(
+        task = task_module.Task(
             id=task_id,
             user_id=user_id,
             service_connection_id=conn_id,
             parent_id=parent_id,
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             status=types_module.SyncStatus.PENDING,
             params={},  # ListenBrainz tasks have no data_type param
         )
@@ -1219,7 +1219,7 @@ class TestReenqueueOrphanedTasks:
         task = _make_task(
             status=types_module.SyncStatus.PENDING,
         )
-        task.task_type = types_module.SyncTaskType.SYNC_JOB
+        task.task_type = types_module.TaskType.SYNC_JOB
 
         session = AsyncMock()
         # 1. PENDING tasks query
@@ -1367,7 +1367,7 @@ class TestReenqueueOrphanedTasks:
     async def test_skips_sync_job_that_already_has_children(self) -> None:
         """PENDING SYNC_JOB with existing children is not re-enqueued."""
         parent = _make_task(status=types_module.SyncStatus.PENDING)
-        parent.task_type = types_module.SyncTaskType.SYNC_JOB
+        parent.task_type = types_module.TaskType.SYNC_JOB
 
         session = AsyncMock()
 

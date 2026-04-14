@@ -38,7 +38,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
     async def _get_access_token(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: spotify_module.SpotifyConnector,
     ) -> str:
         """Load the connection, refresh if expired, return the token."""
@@ -107,7 +107,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
 
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
-                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    task_type=types_module.TaskType.TIME_RANGE,
                     params=params,
                     description=description,
                 )
@@ -117,7 +117,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
     async def execute(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: connector_base.BaseConnector,
         connection: user_models.ServiceConnection,
     ) -> dict[str, object]:
@@ -125,7 +125,7 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
 
         Args:
             session: Async database session for persistence operations.
-            task: The SyncTask being executed, containing params like
+            task: The Task being executed, containing params like
                 ``data_type`` that select which helper to dispatch.
             connector: The BaseConnector (must be a SpotifyConnector).
             connection: The ServiceConnection whose ``sync_watermark``
@@ -135,6 +135,8 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
         Loads the service connection to decrypt the access token at
         execute-time, avoiding plaintext token storage in task.params.
         """
+        assert task.user_id is not None
+        assert task.service_connection_id is not None
         sp_connector = _cast_connector(connector)
         data_type = str(task.params.get("data_type", ""))
 
@@ -203,7 +205,7 @@ def _cast_connector(
 
 async def _sync_followed_artists(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
 ) -> tuple[int, int, dict[str, object]]:
@@ -213,6 +215,8 @@ async def _sync_followed_artists(
     typically small (1-3 API calls) and Spotify's cursor ordering
     doesn't guarantee new follows appear after the stored cursor.
     """
+    assert task.user_id is not None
+    assert task.service_connection_id is not None
     artists = await connector.get_followed_artists(access_token)
     logger.info("spotify_artists_fetched", count=len(artists))
     created = 0
@@ -247,7 +251,7 @@ async def _sync_followed_artists(
 
 async def _sync_saved_tracks(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
     *,
@@ -255,6 +259,8 @@ async def _sync_saved_tracks(
     data_type: str = "saved_tracks",
 ) -> tuple[int, int, dict[str, object]]:
     """Fetch saved tracks page-by-page with stop-early and fast-finish."""
+    assert task.user_id is not None
+    assert task.service_connection_id is not None
     created = 0
     updated = 0
     watermark: dict[str, object] = {}
@@ -358,11 +364,12 @@ async def _sync_saved_tracks(
 
 async def _sync_recently_played(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connector: spotify_module.SpotifyConnector,
     access_token: str,
 ) -> tuple[int, dict[str, object]]:
     """Fetch recently played tracks and upsert into the database."""
+    assert task.user_id is not None
     after_param = task.params.get("last_played_at")
     after = str(after_param) if after_param is not None else None
     played_items = await connector.get_recently_played(access_token, after=after)

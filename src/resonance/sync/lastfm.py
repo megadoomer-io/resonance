@@ -81,7 +81,7 @@ class LastFmSyncStrategy(sync_base.SyncStrategy):
 
             descriptors.append(
                 sync_base.SyncTaskDescriptor(
-                    task_type=types_module.SyncTaskType.TIME_RANGE,
+                    task_type=types_module.TaskType.TIME_RANGE,
                     params=params,
                     description=description,
                 )
@@ -92,7 +92,7 @@ class LastFmSyncStrategy(sync_base.SyncStrategy):
     async def execute(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: connector_base.BaseConnector,
         connection: user_models.ServiceConnection,
     ) -> dict[str, object]:
@@ -100,7 +100,7 @@ class LastFmSyncStrategy(sync_base.SyncStrategy):
 
         Args:
             session: Async database session for persistence operations.
-            task: The SyncTask being executed.
+            task: The Task being executed.
             connector: The BaseConnector (must be a LastFmConnector).
             connection: The ServiceConnection whose sync_watermark
                 is updated incrementally.
@@ -108,6 +108,8 @@ class LastFmSyncStrategy(sync_base.SyncStrategy):
         Returns:
             Dict with items_created, items_updated, and watermark.
         """
+        assert task.user_id is not None
+        assert task.service_connection_id is not None
         lfm_connector = _cast_connector(connector)
         data_type = str(task.params.get("data_type", ""))
 
@@ -292,7 +294,7 @@ def _generate_artist_id(artist_name: str) -> str:
 
 async def _sync_recent_tracks(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connector: lastfm_module.LastFmConnector,
     username: str,
     *,
@@ -313,6 +315,7 @@ async def _sync_recent_tracks(
     Returns:
         Tuple of (items_created, watermark_dict).
     """
+    assert task.user_id is not None
     from_ts_param = task.params.get("from_ts")
     from_ts: int | None = int(str(from_ts_param)) if from_ts_param is not None else None
     items_created = int(str(task.params.get("items_so_far", 0)))
@@ -443,7 +446,7 @@ async def _sync_recent_tracks(
 
 async def _sync_loved_tracks(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connector: lastfm_module.LastFmConnector,
     username: str,
 ) -> tuple[int, int]:
@@ -460,6 +463,8 @@ async def _sync_loved_tracks(
     Returns:
         Tuple of (items_created, items_updated).
     """
+    assert task.user_id is not None
+    assert task.service_connection_id is not None
     items_created = 0
     items_updated = 0
     page = 1

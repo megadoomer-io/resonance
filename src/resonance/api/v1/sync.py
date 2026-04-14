@@ -86,11 +86,11 @@ async def trigger_sync(
         )
 
     # Check for already-running sync (PENDING or RUNNING)
-    running_stmt = sa.select(task_models.SyncTask).where(
-        task_models.SyncTask.user_id == user_id,
-        task_models.SyncTask.service_connection_id == connection.id,
-        task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
-        task_models.SyncTask.status.in_(
+    running_stmt = sa.select(task_models.Task).where(
+        task_models.Task.user_id == user_id,
+        task_models.Task.service_connection_id == connection.id,
+        task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
+        task_models.Task.status.in_(
             [
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
@@ -111,11 +111,11 @@ async def trigger_sync(
     if body is not None and body.sync_from is not None:
         _apply_watermark_override(connection, body.sync_from)
 
-    # Create SyncTask
-    task = task_models.SyncTask(
+    # Create Task
+    task = task_models.Task(
         user_id=user_id,
         service_connection_id=connection.id,
-        task_type=types_module.SyncTaskType.SYNC_JOB,
+        task_type=types_module.TaskType.SYNC_JOB,
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
@@ -194,9 +194,9 @@ async def cancel_sync(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
     """Cancel a pending or running sync task."""
-    stmt = sa.select(task_models.SyncTask).where(
-        task_models.SyncTask.id == job_id,
-        task_models.SyncTask.user_id == user_id,
+    stmt = sa.select(task_models.Task).where(
+        task_models.Task.id == job_id,
+        task_models.Task.user_id == user_id,
     )
     result = await db.execute(stmt)
     job = result.scalar_one_or_none()
@@ -234,12 +234,12 @@ async def sync_status(
         A list of sync task status dicts, most recent first.
     """
     stmt = (
-        sa.select(task_models.SyncTask)
+        sa.select(task_models.Task)
         .where(
-            task_models.SyncTask.user_id == user_id,
-            task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+            task_models.Task.user_id == user_id,
+            task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
         )
-        .order_by(task_models.SyncTask.created_at.desc())
+        .order_by(task_models.Task.created_at.desc())
         .limit(10)
     )
     result = await db.execute(stmt)

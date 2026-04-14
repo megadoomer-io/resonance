@@ -45,7 +45,7 @@ def _make_task(
     user_id: uuid.UUID | None = None,
     connection_id: uuid.UUID | None = None,
 ) -> MagicMock:
-    """Create a mock SyncTask."""
+    """Create a mock Task."""
     task = MagicMock()
     task.id = uuid.uuid4()
     task.user_id = user_id or uuid.uuid4()
@@ -229,7 +229,7 @@ class TestLastFmPlan:
         descriptors = await strategy.plan(session, connection, connector)
 
         for desc in descriptors:
-            assert desc.task_type == types_module.SyncTaskType.TIME_RANGE
+            assert desc.task_type == types_module.TaskType.TIME_RANGE
 
 
 # ---------------------------------------------------------------------------
