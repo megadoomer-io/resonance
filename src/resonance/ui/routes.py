@@ -685,66 +685,85 @@ async def resume_task(
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
 
 
+async def _enqueue_bulk_job(
+    request: fastapi.Request,
+    operation: str,
+) -> dict[str, str]:
+    """Create a BULK_JOB task and enqueue it to arq."""
+    async with _get_db(request) as db:
+        task = task_models.Task(
+            task_type=types_module.TaskType.BULK_JOB,
+            status=types_module.SyncStatus.PENDING,
+            params={"operation": operation},
+            description=operation.replace("_", " ").title(),
+        )
+        db.add(task)
+        await db.commit()
+        task_id = str(task.id)
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "run_bulk_job",
+        task_id,
+        _job_id=f"bulk:{task_id}",
+    )
+    return {"task_id": task_id, "status": "started"}
+
+
 @router.post("/admin/dedup-events", response_model=None)
 async def dedup_listening_events(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: remove duplicate cross-service listening events.
-
-    Finds events where the same user listened to the same track on
-    different services within a dedup window (track duration + 60s,
-    or 10 minutes when duration is unknown). Keeps the earliest event,
-    deletes the rest.
-    """
+) -> dict[str, str]:
+    """Admin-only: enqueue cross-service event dedup as a bulk job."""
     deps_module.verify_admin_access(request)
-
-    import resonance.dedup as dedup_module
-
-    async with _get_db(request) as db:
-        deleted = await dedup_module.delete_cross_service_duplicate_events(db)
-
-    return {"status": "completed", "events_deleted": deleted}
+    return await _enqueue_bulk_job(request, "dedup_events")
 
 
 @router.post("/admin/dedup-artists", response_model=None)
 async def dedup_artists(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: merge duplicate artist records."""
+) -> dict[str, str]:
+    """Admin-only: enqueue artist dedup as a bulk job."""
     deps_module.verify_admin_access(request)
-
-    import resonance.dedup as dedup_module
-
-    async with _get_db(request) as db:
-        stats = await dedup_module.find_and_merge_duplicate_artists(db)
-
-    return {
-        "status": "completed",
-        "artists_merged": stats.artists_merged,
-        "tracks_repointed": stats.tracks_repointed,
-        "relations_repointed": stats.artist_relations_repointed,
-        "relations_deleted": stats.artist_relations_deleted,
-    }
+    return await _enqueue_bulk_job(request, "dedup_artists")
 
 
 @router.post("/admin/dedup-tracks", response_model=None)
 async def dedup_tracks(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: merge duplicate track records."""
+) -> dict[str, str]:
+    """Admin-only: enqueue track dedup as a bulk job."""
+    deps_module.verify_admin_access(request)
+    return await _enqueue_bulk_job(request, "dedup_tracks")
+
+
+@router.get("/admin/tasks/{task_id}", response_model=None)
+async def admin_task_status(
+    task_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, object]:
+    """Admin-only: get status of a bulk/admin task."""
     deps_module.verify_admin_access(request)
 
-    import resonance.dedup as dedup_module
-
     async with _get_db(request) as db:
-        stats = await dedup_module.find_and_merge_duplicate_tracks(db)
+        result = await db.execute(
+            sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+    if task is None:
+        raise fastapi.HTTPException(status_code=404, detail="Task not found")
 
     return {
-        "status": "completed",
-        "tracks_merged": stats.tracks_merged,
-        "events_repointed": stats.events_repointed,
-        "relations_repointed": stats.track_relations_repointed,
-        "relations_deleted": stats.track_relations_deleted,
+        "task_id": str(task.id),
+        "status": task.status.value,
+        "operation": task.params.get("operation"),
+        "progress_current": task.progress_current,
+        "progress_total": task.progress_total,
+        "result": task.result if task.result else None,
+        "error": task.error_message,
+        "started_at": (task.started_at.isoformat() if task.started_at else None),
+        "completed_at": (task.completed_at.isoformat() if task.completed_at else None),
     }
 
 
