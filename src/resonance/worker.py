@@ -314,6 +314,89 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bulk job execution
+# ---------------------------------------------------------------------------
+
+_BULK_OPERATIONS: dict[str, str] = {
+    "dedup_artists": "find_and_merge_duplicate_artists",
+    "dedup_tracks": "find_and_merge_duplicate_tracks",
+    "dedup_events": "delete_cross_service_duplicate_events",
+}
+
+
+async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
+    """Execute a BULK_JOB task (dedup, future bulk operations).
+
+    Reads ``params["operation"]`` to dispatch to the correct function
+    in the dedup module. Updates task status through the standard
+    PENDING -> RUNNING -> COMPLETED/FAILED lifecycle.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the BULK_JOB Task.
+    """
+    import resonance.dedup as dedup_module
+
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("bulk_job_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            operation = str(task.params.get("operation", ""))
+            log = log.bind(operation=operation)
+            log.info("bulk_job_started")
+
+            if operation == "dedup_artists":
+                stats = await dedup_module.find_and_merge_duplicate_artists(session)
+                task.result = {
+                    "artists_merged": stats.artists_merged,
+                    "tracks_repointed": stats.tracks_repointed,
+                    "relations_repointed": stats.artist_relations_repointed,
+                    "relations_deleted": stats.artist_relations_deleted,
+                }
+            elif operation == "dedup_tracks":
+                stats = await dedup_module.find_and_merge_duplicate_tracks(session)
+                task.result = {
+                    "tracks_merged": stats.tracks_merged,
+                    "events_repointed": stats.events_repointed,
+                    "relations_repointed": stats.track_relations_repointed,
+                    "relations_deleted": stats.track_relations_deleted,
+                }
+            elif operation == "dedup_events":
+                deleted = await dedup_module.delete_cross_service_duplicate_events(
+                    session
+                )
+                task.result = {"events_deleted": deleted}
+            else:
+                msg = f"Unknown bulk operation: {operation}"
+                raise ValueError(msg)
+
+            task.status = types_module.SyncStatus.COMPLETED
+            task.completed_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+            log.info("bulk_job_completed", result=task.result)
+
+        except Exception:
+            log.exception("bulk_job_failed")
+            if task is not None:
+                task.status = types_module.SyncStatus.FAILED
+                task.error_message = traceback.format_exc()
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Parent completion check
 # ---------------------------------------------------------------------------
 
@@ -746,6 +829,7 @@ class WorkerSettings:
     functions: typing.ClassVar[list[typing.Any]] = [
         arq.func(plan_sync, timeout=86400),  # 24h — orchestrator, duration varies
         arq.func(sync_range, timeout=86400),  # 24h — duration depends on user data
+        arq.func(run_bulk_job, timeout=86400),  # 24h — dedup can be slow on large DBs
     ]
     on_startup = startup
     on_shutdown = shutdown
