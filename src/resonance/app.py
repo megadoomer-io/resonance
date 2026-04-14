@@ -51,8 +51,8 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     # Reset RUNNING tasks back to PENDING (interrupted by pod restart)
     async with session_factory() as db:
         result = await db.execute(
-            sa.update(task_models.SyncTask)
-            .where(task_models.SyncTask.status == types_module.SyncStatus.RUNNING)
+            sa.update(task_models.Task)
+            .where(task_models.Task.status == types_module.SyncStatus.RUNNING)
             .values(
                 status=types_module.SyncStatus.PENDING,
                 started_at=None,

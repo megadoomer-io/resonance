@@ -41,13 +41,13 @@ def _make_task(
     task_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     params: dict[str, object] | None = None,
-) -> task_module.SyncTask:
-    """Create a SyncTask instance for testing."""
-    return task_module.SyncTask(
+) -> task_module.Task:
+    """Create a Task instance for testing."""
+    return task_module.Task(
         id=task_id or uuid.uuid4(),
         user_id=user_id or uuid.uuid4(),
         service_connection_id=uuid.uuid4(),
-        task_type=types_module.SyncTaskType.TIME_RANGE,
+        task_type=types_module.TaskType.TIME_RANGE,
         status=types_module.SyncStatus.RUNNING,
         params=params or {"username": "testuser"},
     )
@@ -112,7 +112,7 @@ class TestPlan:
 
         assert len(descriptors) == 1
         desc = descriptors[0]
-        assert desc.task_type == types_module.SyncTaskType.TIME_RANGE
+        assert desc.task_type == types_module.TaskType.TIME_RANGE
         assert desc.params["username"] == connection.external_user_id
         assert desc.params["min_ts"] is None
         assert desc.progress_total == 500

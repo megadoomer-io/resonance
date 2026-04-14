@@ -24,15 +24,15 @@ class TestSyncTaskDescriptor:
 
     def test_required_fields(self) -> None:
         desc = sync_base.SyncTaskDescriptor(
-            task_type=types_module.SyncTaskType.TIME_RANGE,
+            task_type=types_module.TaskType.TIME_RANGE,
             params={"start": "2024-01-01"},
         )
-        assert desc.task_type == types_module.SyncTaskType.TIME_RANGE
+        assert desc.task_type == types_module.TaskType.TIME_RANGE
         assert desc.params == {"start": "2024-01-01"}
 
     def test_optional_defaults(self) -> None:
         desc = sync_base.SyncTaskDescriptor(
-            task_type=types_module.SyncTaskType.PAGE_FETCH,
+            task_type=types_module.TaskType.PAGE_FETCH,
             params={},
         )
         assert desc.progress_total is None
@@ -40,7 +40,7 @@ class TestSyncTaskDescriptor:
 
     def test_optional_fields_set(self) -> None:
         desc = sync_base.SyncTaskDescriptor(
-            task_type=types_module.SyncTaskType.SYNC_JOB,
+            task_type=types_module.TaskType.SYNC_JOB,
             params={"key": "value"},
             progress_total=42,
             description="Fetch pages",
@@ -50,7 +50,7 @@ class TestSyncTaskDescriptor:
 
     def test_missing_required_field_raises(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            sync_base.SyncTaskDescriptor(task_type=types_module.SyncTaskType.TIME_RANGE)  # type: ignore[call-arg]
+            sync_base.SyncTaskDescriptor(task_type=types_module.TaskType.TIME_RANGE)  # type: ignore[call-arg]
 
         with pytest.raises(pydantic.ValidationError):
             sync_base.SyncTaskDescriptor(params={"a": 1})  # type: ignore[call-arg]

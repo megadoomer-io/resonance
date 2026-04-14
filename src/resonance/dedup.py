@@ -421,3 +421,43 @@ async def find_and_merge_duplicate_tracks(
     await session.commit()
     logger.info("track_dedup_completed", stats=total)
     return total
+
+
+async def delete_cross_service_duplicate_events(
+    session: AsyncSession,
+) -> int:
+    """Delete duplicate cross-service listening events.
+
+    For each pair of events on the same track by the same user from
+    different services within the dedup window, deletes the later one.
+    The window is track duration + 60s, or 10 minutes when duration
+    is unknown.
+
+    Returns:
+        Number of events deleted.
+    """
+    result = await session.execute(
+        sa.text(
+            "DELETE FROM listening_events "
+            "WHERE id IN ("
+            "  SELECT e2.id "
+            "  FROM listening_events e1 "
+            "  JOIN listening_events e2 "
+            "    ON e1.track_id = e2.track_id "
+            "    AND e1.user_id = e2.user_id "
+            "    AND e1.source_service != e2.source_service "
+            "    AND e1.listened_at < e2.listened_at "
+            "  JOIN tracks t ON e1.track_id = t.id "
+            "  WHERE e2.listened_at - e1.listened_at < "
+            "    CASE "
+            "      WHEN t.duration_ms IS NOT NULL "
+            "      THEN make_interval(secs => t.duration_ms / 1000 + 60) "
+            "      ELSE interval '10 minutes' "
+            "    END"
+            ")"
+        )
+    )
+    deleted = result.rowcount if hasattr(result, "rowcount") else 0
+    await session.commit()
+    logger.info("event_dedup_completed", events_deleted=deleted)
+    return deleted

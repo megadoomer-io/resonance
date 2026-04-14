@@ -28,7 +28,7 @@ class TestTestSyncStrategy:
 
         assert len(descriptors) == 1
         desc = descriptors[0]
-        assert desc.task_type == types_module.SyncTaskType.TIME_RANGE
+        assert desc.task_type == types_module.TaskType.TIME_RANGE
         assert desc.progress_total == 1
         assert desc.description == "Generate test data"
         assert "artists" in desc.params

@@ -62,7 +62,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
     Args:
         ctx: arq worker context dict (contains session_factory, settings, etc.).
-        sync_task_id: UUID string of the SYNC_JOB SyncTask.
+        sync_task_id: UUID string of the SYNC_JOB Task.
     """
     wctx = typing.cast("WorkerContext", ctx)
     session_factory = wctx["session_factory"]
@@ -126,12 +126,12 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Create child tasks from descriptors
             arq_redis = wctx["redis"]
             parent_step_mode = bool(task.params and task.params.get("step_mode"))
-            children: list[task_module.SyncTask] = []
+            children: list[task_module.Task] = []
             for desc in descriptors:
                 child_params = dict(desc.params) if desc.params else {}
                 if parent_step_mode:
                     child_params["step_mode"] = True
-                child = task_module.SyncTask(
+                child = task_module.Task(
                     id=uuid.uuid4(),
                     user_id=task.user_id,
                     service_connection_id=task.service_connection_id,
@@ -193,7 +193,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
     Args:
         ctx: arq worker context dict.
-        sync_task_id: UUID string of the TIME_RANGE SyncTask.
+        sync_task_id: UUID string of the TIME_RANGE Task.
     """
     wctx = typing.cast("WorkerContext", ctx)
     session_factory = wctx["session_factory"]
@@ -201,7 +201,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
     log = logger.bind(sync_task_id=sync_task_id)
 
     async with session_factory() as session:
-        task: task_module.SyncTask | None = None
+        task: task_module.Task | None = None
         try:
             task = await _load_task(session, sync_task_id)
             if task is None:
@@ -314,13 +314,96 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bulk job execution
+# ---------------------------------------------------------------------------
+
+_BULK_OPERATIONS: dict[str, str] = {
+    "dedup_artists": "find_and_merge_duplicate_artists",
+    "dedup_tracks": "find_and_merge_duplicate_tracks",
+    "dedup_events": "delete_cross_service_duplicate_events",
+}
+
+
+async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
+    """Execute a BULK_JOB task (dedup, future bulk operations).
+
+    Reads ``params["operation"]`` to dispatch to the correct function
+    in the dedup module. Updates task status through the standard
+    PENDING -> RUNNING -> COMPLETED/FAILED lifecycle.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the BULK_JOB Task.
+    """
+    import resonance.dedup as dedup_module
+
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("bulk_job_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            operation = str(task.params.get("operation", ""))
+            log = log.bind(operation=operation)
+            log.info("bulk_job_started")
+
+            if operation == "dedup_artists":
+                stats = await dedup_module.find_and_merge_duplicate_artists(session)
+                task.result = {
+                    "artists_merged": stats.artists_merged,
+                    "tracks_repointed": stats.tracks_repointed,
+                    "relations_repointed": stats.artist_relations_repointed,
+                    "relations_deleted": stats.artist_relations_deleted,
+                }
+            elif operation == "dedup_tracks":
+                stats = await dedup_module.find_and_merge_duplicate_tracks(session)
+                task.result = {
+                    "tracks_merged": stats.tracks_merged,
+                    "events_repointed": stats.events_repointed,
+                    "relations_repointed": stats.track_relations_repointed,
+                    "relations_deleted": stats.track_relations_deleted,
+                }
+            elif operation == "dedup_events":
+                deleted = await dedup_module.delete_cross_service_duplicate_events(
+                    session
+                )
+                task.result = {"events_deleted": deleted}
+            else:
+                msg = f"Unknown bulk operation: {operation}"
+                raise ValueError(msg)
+
+            task.status = types_module.SyncStatus.COMPLETED
+            task.completed_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+            log.info("bulk_job_completed", result=task.result)
+
+        except Exception:
+            log.exception("bulk_job_failed")
+            if task is not None:
+                task.status = types_module.SyncStatus.FAILED
+                task.error_message = traceback.format_exc()
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Parent completion check
 # ---------------------------------------------------------------------------
 
 
 async def _check_parent_completion(
     session: sa_async.AsyncSession,
-    task: task_module.SyncTask,
+    task: task_module.Task,
     arq_redis: arq.ArqRedis,
     log: structlog.stdlib.BoundLogger,
 ) -> None:
@@ -343,8 +426,8 @@ async def _check_parent_completion(
     # Count siblings (including self) that are NOT in a terminal state
     pending_count_result = await session.execute(
         sa.select(sa.func.count()).where(
-            task_module.SyncTask.parent_id == task.parent_id,
-            task_module.SyncTask.status.notin_(
+            task_module.Task.parent_id == task.parent_id,
+            task_module.Task.status.notin_(
                 [types_module.SyncStatus.COMPLETED, types_module.SyncStatus.FAILED]
             ),
         )
@@ -354,12 +437,12 @@ async def _check_parent_completion(
     if pending_count > 0:
         # Enqueue the next PENDING sibling (sequential execution)
         next_pending_result = await session.execute(
-            sa.select(task_module.SyncTask)
+            sa.select(task_module.Task)
             .where(
-                task_module.SyncTask.parent_id == task.parent_id,
-                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
+                task_module.Task.parent_id == task.parent_id,
+                task_module.Task.status == types_module.SyncStatus.PENDING,
             )
-            .order_by(task_module.SyncTask.created_at)
+            .order_by(task_module.Task.created_at)
             .limit(1)
         )
         next_pending = next_pending_result.scalar_one_or_none()
@@ -387,17 +470,15 @@ async def _check_parent_completion(
     # Check if any children failed
     failed_count_result = await session.execute(
         sa.select(sa.func.count()).where(
-            task_module.SyncTask.parent_id == task.parent_id,
-            task_module.SyncTask.status == types_module.SyncStatus.FAILED,
+            task_module.Task.parent_id == task.parent_id,
+            task_module.Task.status == types_module.SyncStatus.FAILED,
         )
     )
     failed_count: int = failed_count_result.scalar_one()
 
     # Aggregate results from all children
     children_result = await session.execute(
-        sa.select(task_module.SyncTask).where(
-            task_module.SyncTask.parent_id == task.parent_id
-        )
+        sa.select(task_module.Task).where(task_module.Task.parent_id == task.parent_id)
     )
     children = children_result.scalars().all()
 
@@ -438,26 +519,26 @@ async def _check_parent_completion(
 
 async def _load_task(
     session: sa_async.AsyncSession, sync_task_id: str
-) -> task_module.SyncTask | None:
-    """Load a SyncTask by ID.
+) -> task_module.Task | None:
+    """Load a Task by ID.
 
     Args:
         session: Active database session.
         sync_task_id: UUID string of the task.
 
     Returns:
-        The SyncTask, or None if not found.
+        The Task, or None if not found.
     """
     result = await session.execute(
-        sa.select(task_module.SyncTask).where(
-            task_module.SyncTask.id == uuid.UUID(sync_task_id)
+        sa.select(task_module.Task).where(
+            task_module.Task.id == uuid.UUID(sync_task_id)
         )
     )
     return result.scalar_one_or_none()
 
 
 def _apply_watermark_resume(
-    task: task_module.SyncTask,
+    task: task_module.Task,
     connection: user_models.ServiceConnection,
 ) -> None:
     """Inject watermark position into task params for crash recovery.
@@ -500,7 +581,7 @@ async def _reenqueue_orphaned_tasks(
     Finds tasks stuck in PENDING, expired DEFERRED, or RUNNING status
     (from crashes or ungraceful shutdowns) and re-enqueues them. arq jobs
     in Redis expire after ~1 day, so if the worker was down during that
-    window the SyncTask row remains but the arq job is gone.
+    window the Task row remains but the arq job is gone.
     """
     async with session_factory() as session:
         now = datetime.datetime.now(datetime.UTC)
@@ -508,23 +589,23 @@ async def _reenqueue_orphaned_tasks(
         # Find PENDING tasks (orphaned — their arq job likely expired).
         # Exclude children whose parent already completed or failed —
         # those are stale leftovers, not actionable orphans.
-        parent_alias = sa.orm.aliased(task_module.SyncTask)
+        parent_alias = sa.orm.aliased(task_module.Task)
         pending_result = await session.execute(
-            sa.select(task_module.SyncTask)
+            sa.select(task_module.Task)
             .outerjoin(
                 parent_alias,
-                task_module.SyncTask.parent_id == parent_alias.id,
+                task_module.Task.parent_id == parent_alias.id,
             )
             .where(
-                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
-                task_module.SyncTask.task_type.in_(
+                task_module.Task.status == types_module.SyncStatus.PENDING,
+                task_module.Task.task_type.in_(
                     [
-                        types_module.SyncTaskType.SYNC_JOB,
-                        types_module.SyncTaskType.TIME_RANGE,
+                        types_module.TaskType.SYNC_JOB,
+                        types_module.TaskType.TIME_RANGE,
                     ]
                 ),
                 sa.or_(
-                    task_module.SyncTask.parent_id.is_(None),
+                    task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
                         [
                             types_module.SyncStatus.COMPLETED,
@@ -538,11 +619,11 @@ async def _reenqueue_orphaned_tasks(
 
         # Find DEFERRED tasks whose deferred_until has passed
         deferred_result = await session.execute(
-            sa.select(task_module.SyncTask).where(
-                task_module.SyncTask.status == types_module.SyncStatus.DEFERRED,
+            sa.select(task_module.Task).where(
+                task_module.Task.status == types_module.SyncStatus.DEFERRED,
                 sa.or_(
-                    task_module.SyncTask.deferred_until <= now,
-                    task_module.SyncTask.deferred_until.is_(None),
+                    task_module.Task.deferred_until <= now,
+                    task_module.Task.deferred_until.is_(None),
                 ),
             )
         )
@@ -550,13 +631,13 @@ async def _reenqueue_orphaned_tasks(
 
         # Mark stale children of terminal parents as FAILED
         stale_result = await session.execute(
-            sa.select(task_module.SyncTask)
+            sa.select(task_module.Task)
             .join(
                 parent_alias,
-                task_module.SyncTask.parent_id == parent_alias.id,
+                task_module.Task.parent_id == parent_alias.id,
             )
             .where(
-                task_module.SyncTask.status == types_module.SyncStatus.PENDING,
+                task_module.Task.status == types_module.SyncStatus.PENDING,
                 parent_alias.status.in_(
                     [
                         types_module.SyncStatus.COMPLETED,
@@ -576,21 +657,21 @@ async def _reenqueue_orphaned_tasks(
 
         # Find RUNNING tasks (interrupted by crash/restart)
         running_result = await session.execute(
-            sa.select(task_module.SyncTask)
+            sa.select(task_module.Task)
             .outerjoin(
                 parent_alias,
-                task_module.SyncTask.parent_id == parent_alias.id,
+                task_module.Task.parent_id == parent_alias.id,
             )
             .where(
-                task_module.SyncTask.status == types_module.SyncStatus.RUNNING,
-                task_module.SyncTask.task_type.in_(
+                task_module.Task.status == types_module.SyncStatus.RUNNING,
+                task_module.Task.task_type.in_(
                     [
-                        types_module.SyncTaskType.SYNC_JOB,
-                        types_module.SyncTaskType.TIME_RANGE,
+                        types_module.TaskType.SYNC_JOB,
+                        types_module.TaskType.TIME_RANGE,
                     ]
                 ),
                 sa.or_(
-                    task_module.SyncTask.parent_id.is_(None),
+                    task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
                         [
                             types_module.SyncStatus.COMPLETED,
@@ -614,7 +695,7 @@ async def _reenqueue_orphaned_tasks(
             task.status = types_module.SyncStatus.PENDING
 
             # Attempt watermark-based resume for TIME_RANGE tasks
-            if task.task_type == types_module.SyncTaskType.TIME_RANGE:
+            if task.task_type == types_module.TaskType.TIME_RANGE:
                 conn_result = await session.execute(
                     sa.select(user_models.ServiceConnection).where(
                         user_models.ServiceConnection.id == task.service_connection_id
@@ -634,12 +715,12 @@ async def _reenqueue_orphaned_tasks(
 
         enqueued = 0
         for task in all_tasks:
-            if task.task_type == types_module.SyncTaskType.SYNC_JOB:
+            if task.task_type == types_module.TaskType.SYNC_JOB:
                 # Skip SYNC_JOBs that already have children — re-planning
                 # would create duplicate child tasks.
                 children_count_result = await session.execute(
                     sa.select(sa.func.count()).where(
-                        task_module.SyncTask.parent_id == task.id,
+                        task_module.Task.parent_id == task.id,
                     )
                 )
                 if children_count_result.scalar_one() > 0:
@@ -748,6 +829,7 @@ class WorkerSettings:
     functions: typing.ClassVar[list[typing.Any]] = [
         arq.func(plan_sync, timeout=86400),  # 24h — orchestrator, duration varies
         arq.func(sync_range, timeout=86400),  # 24h — duration depends on user data
+        arq.func(run_bulk_job, timeout=86400),  # 24h — dedup can be slow on large DBs
     ]
     on_startup = startup
     on_shutdown = shutdown

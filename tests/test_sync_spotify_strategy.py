@@ -35,7 +35,7 @@ def _make_connection(
 def _make_task(
     params: dict[str, object] | None = None,
 ) -> MagicMock:
-    """Create a mock SyncTask."""
+    """Create a mock Task."""
     task = MagicMock()
     task.id = uuid.uuid4()
     task.user_id = uuid.uuid4()

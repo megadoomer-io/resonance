@@ -81,8 +81,8 @@ src/resonance/
     listenbrainz.py   # ListenBrainz connector (MusicBrainz OAuth)
   generators/         # Playlist generator plugins (future)
   middleware/         # Session middleware (Redis-backed)
-  models/             # SQLAlchemy async models
-  worker.py           # arq task queue worker (plan_sync, sync_range)
+  models/             # SQLAlchemy async models (Task maps to sync_tasks table)
+  worker.py           # arq task queue worker (plan_sync, sync_range, run_bulk_job)
   sync/               # Data upsert functions shared by worker tasks
   templates/          # Jinja2 server-rendered UI + HTMX partials
   ui/                 # UI route handlers
@@ -113,7 +113,8 @@ uv run resonance-api healthz                    # Health + deployed revision
 uv run resonance-api status                     # Recent sync job overview
 uv run resonance-api stats                      # Database statistics
 uv run resonance-api sync <service> [--full]    # Trigger a sync
-uv run resonance-api dedup <type>               # Dedup: events|artists|tracks|all
+uv run resonance-api dedup <type> [--no-wait]   # Dedup: events|artists|tracks|all
+uv run resonance-api task <task_id>             # Check bulk task status
 uv run resonance-api track <query>              # Search tracks by title
 uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 ```

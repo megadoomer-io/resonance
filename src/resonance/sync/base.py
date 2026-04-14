@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 class SyncTaskDescriptor(pydantic.BaseModel):
     """Lightweight description of a child task to create."""
 
-    task_type: types_module.SyncTaskType
+    task_type: types_module.TaskType
     params: dict[str, Any]
     progress_total: int | None = None
     description: str = ""
@@ -66,7 +66,7 @@ class SyncStrategy(abc.ABC):
     async def execute(
         self,
         session: sa_async.AsyncSession,
-        task: task_module.SyncTask,
+        task: task_module.Task,
         connector: connector_base.BaseConnector,
         connection: user_models.ServiceConnection,
     ) -> dict[str, Any]:

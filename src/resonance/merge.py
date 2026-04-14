@@ -45,7 +45,7 @@ async def get_account_summary(
         ("listening_events", models.ListeningEvent),
         ("artist_relations", models.UserArtistRelation),
         ("track_relations", models.UserTrackRelation),
-        ("sync_tasks", models.SyncTask),
+        ("sync_tasks", models.Task),
     ]
 
     counts: dict[str, int] = {}
@@ -118,8 +118,8 @@ async def merge_accounts(
     cursor = cast(
         "sa.CursorResult[tuple[()]]",
         await session.execute(
-            sa.update(models.SyncTask)
-            .where(models.SyncTask.user_id == source_user_id)
+            sa.update(models.Task)
+            .where(models.Task.user_id == source_user_id)
             .values(user_id=target_user_id)
         ),
     )

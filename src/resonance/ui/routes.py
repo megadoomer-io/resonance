@@ -124,26 +124,24 @@ async def dashboard(
         )
 
         latest_sync_result = await db.execute(
-            sa.select(task_models.SyncTask)
+            sa.select(task_models.Task)
             .where(
-                task_models.SyncTask.user_id == user_uuid,
-                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+                task_models.Task.user_id == user_uuid,
+                task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
             )
-            .order_by(task_models.SyncTask.created_at.desc())
+            .order_by(task_models.Task.created_at.desc())
             .limit(1)
         )
-        latest_sync: task_models.SyncTask | None = (
-            latest_sync_result.scalar_one_or_none()
-        )
+        latest_sync: task_models.Task | None = latest_sync_result.scalar_one_or_none()
 
         # Build active sync lookup for conditional button
-        active_syncs: dict[str, task_models.SyncTask] = {}
+        active_syncs: dict[str, task_models.Task] = {}
         for conn in connections:
-            active_stmt = sa.select(task_models.SyncTask).where(
-                task_models.SyncTask.user_id == user_uuid,
-                task_models.SyncTask.service_connection_id == conn.id,
-                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
-                task_models.SyncTask.status.in_(
+            active_stmt = sa.select(task_models.Task).where(
+                task_models.Task.user_id == user_uuid,
+                task_models.Task.service_connection_id == conn.id,
+                task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
+                task_models.Task.status.in_(
                     [
                         types_module.SyncStatus.PENDING,
                         types_module.SyncStatus.RUNNING,
@@ -359,19 +357,19 @@ async def sync_status_partial(
 
     async with _get_db(request) as db:
         sync_jobs_result = await db.execute(
-            sa.select(task_models.SyncTask)
+            sa.select(task_models.Task)
             .where(
-                task_models.SyncTask.user_id == user_uuid,
-                task_models.SyncTask.task_type == types_module.SyncTaskType.SYNC_JOB,
+                task_models.Task.user_id == user_uuid,
+                task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
             )
-            .order_by(task_models.SyncTask.created_at.desc())
+            .order_by(task_models.Task.created_at.desc())
             .options(
-                sa_orm.joinedload(task_models.SyncTask.service_connection),
-                sa_orm.subqueryload(task_models.SyncTask.children),
+                sa_orm.joinedload(task_models.Task.service_connection),
+                sa_orm.subqueryload(task_models.Task.children),
             )
             .limit(5)
         )
-        sync_jobs: Sequence[task_models.SyncTask] = sync_jobs_result.scalars().all()
+        sync_jobs: Sequence[task_models.Task] = sync_jobs_result.scalars().all()
 
         # Aggregate progress from children into parent for display
         for job in sync_jobs:
@@ -381,8 +379,8 @@ async def sync_status_partial(
                 types_module.SyncStatus.DEFERRED,
             ):
                 child_progress_result = await db.execute(
-                    sa.select(sa.func.sum(task_models.SyncTask.progress_current)).where(
-                        task_models.SyncTask.parent_id == job.id
+                    sa.select(sa.func.sum(task_models.Task.progress_current)).where(
+                        task_models.Task.parent_id == job.id
                     )
                 )
                 child_total = child_progress_result.scalar_one_or_none()
@@ -498,17 +496,17 @@ async def admin_dashboard(
         users: Sequence[user_models.User] = users_result.scalars().all()
 
         tasks_result = await db.execute(
-            sa.select(task_models.SyncTask)
-            .where(task_models.SyncTask.parent_id.is_(None))
-            .order_by(task_models.SyncTask.created_at.desc())
+            sa.select(task_models.Task)
+            .where(task_models.Task.parent_id.is_(None))
+            .order_by(task_models.Task.created_at.desc())
             .options(
-                sa_orm.joinedload(task_models.SyncTask.service_connection).joinedload(
+                sa_orm.joinedload(task_models.Task.service_connection).joinedload(
                     user_models.ServiceConnection.user
                 )
             )
             .limit(20)
         )
-        tasks: Sequence[task_models.SyncTask] = tasks_result.scalars().unique().all()
+        tasks: Sequence[task_models.Task] = tasks_result.scalars().unique().all()
 
     return templates.TemplateResponse(
         request,
@@ -579,9 +577,7 @@ async def clone_task(
     async with _get_db(request) as db:
         original = (
             await db.execute(
-                sa.select(task_models.SyncTask).where(
-                    task_models.SyncTask.id == task_id
-                )
+                sa.select(task_models.Task).where(task_models.Task.id == task_id)
             )
         ).scalar_one_or_none()
         if original is None:
@@ -591,7 +587,7 @@ async def clone_task(
         if step_mode:
             params["step_mode"] = True
 
-        cloned = task_models.SyncTask(
+        cloned = task_models.Task(
             user_id=uuid.UUID(user_id),
             service_connection_id=original.service_connection_id,
             task_type=original.task_type,
@@ -607,7 +603,7 @@ async def clone_task(
         if arq_redis:
             job_name = (
                 "plan_sync"
-                if original.task_type == types_module.SyncTaskType.SYNC_JOB
+                if original.task_type == types_module.TaskType.SYNC_JOB
                 else "sync_range"
             )
             await arq_redis.enqueue_job(
@@ -631,9 +627,7 @@ async def resume_task(
     async with _get_db(request) as db:
         task = (
             await db.execute(
-                sa.select(task_models.SyncTask).where(
-                    task_models.SyncTask.id == task_id
-                )
+                sa.select(task_models.Task).where(task_models.Task.id == task_id)
             )
         ).scalar_one_or_none()
         if task is None:
@@ -661,12 +655,12 @@ async def resume_task(
             parent_id = task.id if task.parent_id is None else task.parent_id
             next_task = (
                 await db.execute(
-                    sa.select(task_models.SyncTask)
+                    sa.select(task_models.Task)
                     .where(
-                        task_models.SyncTask.parent_id == parent_id,
-                        task_models.SyncTask.status == types_module.SyncStatus.PENDING,
+                        task_models.Task.parent_id == parent_id,
+                        task_models.Task.status == types_module.SyncStatus.PENDING,
                     )
-                    .order_by(task_models.SyncTask.created_at)
+                    .order_by(task_models.Task.created_at)
                     .limit(1)
                 )
             ).scalar_one_or_none()
@@ -691,90 +685,85 @@ async def resume_task(
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
 
 
+async def _enqueue_bulk_job(
+    request: fastapi.Request,
+    operation: str,
+) -> dict[str, str]:
+    """Create a BULK_JOB task and enqueue it to arq."""
+    async with _get_db(request) as db:
+        task = task_models.Task(
+            task_type=types_module.TaskType.BULK_JOB,
+            status=types_module.SyncStatus.PENDING,
+            params={"operation": operation},
+            description=operation.replace("_", " ").title(),
+        )
+        db.add(task)
+        await db.commit()
+        task_id = str(task.id)
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "run_bulk_job",
+        task_id,
+        _job_id=f"bulk:{task_id}",
+    )
+    return {"task_id": task_id, "status": "started"}
+
+
 @router.post("/admin/dedup-events", response_model=None)
 async def dedup_listening_events(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: remove duplicate cross-service listening events.
-
-    Finds events where the same user listened to the same track on
-    different services within a dedup window (track duration + 60s,
-    or 10 minutes when duration is unknown). Keeps the earliest event,
-    deletes the rest.
-    """
+) -> dict[str, str]:
+    """Admin-only: enqueue cross-service event dedup as a bulk job."""
     deps_module.verify_admin_access(request)
-
-    async with _get_db(request) as db:
-        # Find IDs of duplicate events to delete.
-        # For each pair of events on the same track by the same user
-        # from different services within the dedup window, mark the
-        # later one for deletion.
-        result = await db.execute(
-            sa.text(
-                "DELETE FROM listening_events "
-                "WHERE id IN ("
-                "  SELECT e2.id "
-                "  FROM listening_events e1 "
-                "  JOIN listening_events e2 "
-                "    ON e1.track_id = e2.track_id "
-                "    AND e1.user_id = e2.user_id "
-                "    AND e1.source_service != e2.source_service "
-                "    AND e1.listened_at < e2.listened_at "
-                "  JOIN tracks t ON e1.track_id = t.id "
-                "  WHERE e2.listened_at - e1.listened_at < "
-                "    CASE "
-                "      WHEN t.duration_ms IS NOT NULL "
-                "      THEN make_interval(secs => t.duration_ms / 1000 + 60) "
-                "      ELSE interval '10 minutes' "
-                "    END"
-                ")"
-            )
-        )
-        deleted = result.rowcount if hasattr(result, "rowcount") else 0
-        await db.commit()
-
-    return {"status": "completed", "events_deleted": deleted}
+    return await _enqueue_bulk_job(request, "dedup_events")
 
 
 @router.post("/admin/dedup-artists", response_model=None)
 async def dedup_artists(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: merge duplicate artist records."""
+) -> dict[str, str]:
+    """Admin-only: enqueue artist dedup as a bulk job."""
     deps_module.verify_admin_access(request)
-
-    import resonance.dedup as dedup_module
-
-    async with _get_db(request) as db:
-        stats = await dedup_module.find_and_merge_duplicate_artists(db)
-
-    return {
-        "status": "completed",
-        "artists_merged": stats.artists_merged,
-        "tracks_repointed": stats.tracks_repointed,
-        "relations_repointed": stats.artist_relations_repointed,
-        "relations_deleted": stats.artist_relations_deleted,
-    }
+    return await _enqueue_bulk_job(request, "dedup_artists")
 
 
 @router.post("/admin/dedup-tracks", response_model=None)
 async def dedup_tracks(
     request: fastapi.Request,
-) -> dict[str, int | str]:
-    """Admin-only: merge duplicate track records."""
+) -> dict[str, str]:
+    """Admin-only: enqueue track dedup as a bulk job."""
+    deps_module.verify_admin_access(request)
+    return await _enqueue_bulk_job(request, "dedup_tracks")
+
+
+@router.get("/admin/tasks/{task_id}", response_model=None)
+async def admin_task_status(
+    task_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, object]:
+    """Admin-only: get status of a bulk/admin task."""
     deps_module.verify_admin_access(request)
 
-    import resonance.dedup as dedup_module
-
     async with _get_db(request) as db:
-        stats = await dedup_module.find_and_merge_duplicate_tracks(db)
+        result = await db.execute(
+            sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+    if task is None:
+        raise fastapi.HTTPException(status_code=404, detail="Task not found")
 
     return {
-        "status": "completed",
-        "tracks_merged": stats.tracks_merged,
-        "events_repointed": stats.events_repointed,
-        "relations_repointed": stats.track_relations_repointed,
-        "relations_deleted": stats.track_relations_deleted,
+        "task_id": str(task.id),
+        "status": task.status.value,
+        "operation": task.params.get("operation"),
+        "progress_current": task.progress_current,
+        "progress_total": task.progress_total,
+        "result": task.result if task.result else None,
+        "error": task.error_message,
+        "started_at": (task.started_at.isoformat() if task.started_at else None),
+        "completed_at": (task.completed_at.isoformat() if task.completed_at else None),
     }
 
 
@@ -787,12 +776,12 @@ async def admin_status(
 
     async with _get_db(request) as db:
         result = await db.execute(
-            sa.select(task_models.SyncTask)
-            .where(task_models.SyncTask.parent_id.is_(None))
-            .order_by(task_models.SyncTask.created_at.desc())
+            sa.select(task_models.Task)
+            .where(task_models.Task.parent_id.is_(None))
+            .order_by(task_models.Task.created_at.desc())
             .options(
-                sa_orm.joinedload(task_models.SyncTask.service_connection),
-                sa_orm.joinedload(task_models.SyncTask.children),
+                sa_orm.joinedload(task_models.Task.service_connection),
+                sa_orm.joinedload(task_models.Task.children),
             )
             .limit(10)
         )
