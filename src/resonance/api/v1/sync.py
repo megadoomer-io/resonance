@@ -41,7 +41,16 @@ def _parse_service_type(service: str) -> types_module.ServiceType:
         ) from exc
 
 
-@router.post("/{service}")
+@router.post(
+    "/{service}",
+    summary="Trigger sync",
+    description=(
+        "Start a data sync job for the given service."
+        " Optionally accepts a watermark override to sync"
+        " from a specific point in time."
+        " Requires session authentication."
+    ),
+)
 async def trigger_sync(
     service: str,
     request: fastapi.Request,
@@ -187,7 +196,13 @@ def _apply_watermark_override(
     )
 
 
-@router.post("/cancel/{job_id}")
+@router.post(
+    "/cancel/{job_id}",
+    summary="Cancel sync",
+    description=(
+        "Cancel a pending or running sync task. Requires session authentication."
+    ),
+)
 async def cancel_sync(
     job_id: uuid.UUID,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
@@ -219,7 +234,15 @@ async def cancel_sync(
     return {"status": "cancelled", "job_id": str(job_id)}
 
 
-@router.get("/status")
+@router.get(
+    "/status",
+    summary="Sync status",
+    description=(
+        "Get recent sync task status for the authenticated"
+        " user. Returns the 10 most recent sync jobs."
+        " Requires session authentication."
+    ),
+)
 async def sync_status(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],

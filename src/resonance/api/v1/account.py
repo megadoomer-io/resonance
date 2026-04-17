@@ -17,7 +17,14 @@ import resonance.models.user as user_models
 router = fastapi.APIRouter(prefix="/account", tags=["account"])
 
 
-@router.get("")
+@router.get(
+    "",
+    summary="Get user profile",
+    description=(
+        "Return the authenticated user's profile"
+        " information. Requires session authentication."
+    ),
+)
 async def get_profile(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
@@ -35,7 +42,15 @@ async def get_profile(
     }
 
 
-@router.get("/connections")
+@router.get(
+    "/connections",
+    summary="List service connections",
+    description=(
+        "Return all service connections for the"
+        " authenticated user."
+        " Requires session authentication."
+    ),
+)
 async def list_connections(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
@@ -59,7 +74,16 @@ async def list_connections(
     ]
 
 
-@router.delete("/connections/{connection_id}")
+@router.delete(
+    "/connections/{connection_id}",
+    summary="Unlink service connection",
+    description=(
+        "Remove a service connection from the authenticated"
+        " user's account. The last remaining connection"
+        " cannot be unlinked."
+        " Requires session authentication."
+    ),
+)
 async def unlink_connection(
     connection_id: uuid.UUID,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
@@ -113,7 +137,14 @@ class TimezoneUpdate(pydantic.BaseModel):
         return v
 
 
-@router.put("/timezone")
+@router.put(
+    "/timezone",
+    summary="Update timezone",
+    description=(
+        "Update the authenticated user's timezone"
+        " preference. Requires session authentication."
+    ),
+)
 async def update_timezone(
     body: TimezoneUpdate,
     request: fastapi.Request,
