@@ -1078,6 +1078,317 @@ class TestAdaptivePageSize:
 
 
 # ---------------------------------------------------------------------------
+# Gap-skip tests
+# ---------------------------------------------------------------------------
+
+
+class TestGapSkip:
+    """Tests for gap detection and skipping in _adaptive_fetch."""
+
+    @pytest.mark.asyncio
+    async def test_gap_skip_finds_listens_after_gap(self) -> None:
+        """When page size is exhausted with max_ts set, probes bounded windows."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        # Backfill task with max_ts set
+        task = _make_task(
+            params={"username": "testuser", "max_ts": 1648623657},
+        )
+        connector = _make_lb_connector()
+
+        # Simulate: all page-size reductions fail, then gap-skip probe
+        # at a bounded window succeeds with a listen
+        old_listen = _make_listen(1500000000, "Old Song", "Old Artist")
+
+        gap_skipped = False
+
+        async def mock_get_listens(
+            username: str, **kwargs: object
+        ) -> list[listenbrainz_module.ListenBrainzListenItem]:
+            nonlocal gap_skipped
+            count = kwargs.get("count", 100)
+            min_ts = kwargs.get("min_ts")
+            max_ts = kwargs.get("max_ts")
+
+            # After gap-skip found data, normal pagination returns empty
+            if gap_skipped and count >= 100:
+                return []
+
+            # Page-size reduction calls (count >= 100, no min_ts bound)
+            if count >= 100 and min_ts is None:
+                raise httpx.RemoteProtocolError("Server disconnected")
+
+            # Gap-skip probes (count=1, both bounds set)
+            if count == 1 and min_ts is not None and max_ts is not None:
+                # First few probes find nothing
+                if max_ts > 1510000000:
+                    return []
+                # Eventually find a listen
+                gap_skipped = True
+                return [old_listen]
+
+            # Fallback
+            return []
+
+        connector.get_listens = AsyncMock(side_effect=mock_get_listens)
+
+        with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            connection = _make_connection(
+                sync_watermark={
+                    "listens": {
+                        "newest_synced_at": 1649389960,
+                        "oldest_synced_at": 1648623657,
+                    }
+                },
+            )
+            result = await strategy.execute(session, task, connector, connection)
+
+        assert result["items_created"] == 1
+        assert result["last_listened_at"] == 1500000000
+
+    @pytest.mark.asyncio
+    async def test_gap_skip_returns_empty_at_lower_bound(self) -> None:
+        """When all probes find nothing down to year 2000, returns empty."""
+        connector = _make_lb_connector()
+
+        # All calls fail or return empty
+        async def mock_get_listens(
+            username: str, **kwargs: object
+        ) -> list[listenbrainz_module.ListenBrainzListenItem]:
+            count = kwargs.get("count", 100)
+            if count >= 100:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            # Gap-skip probes all return empty
+            return []
+
+        connector.get_listens = AsyncMock(side_effect=mock_get_listens)
+
+        with patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock):
+            listens, _ = await lb_sync_module._adaptive_fetch(
+                connector,
+                "testuser",
+                max_ts=1648623657,
+                min_ts=None,
+                page_size=lb_sync_module._DEFAULT_PAGE_SIZE,
+            )
+
+        assert listens == []
+
+    @pytest.mark.asyncio
+    async def test_gap_skip_probe_failure_continues(self) -> None:
+        """If a gap-skip probe itself disconnects, skip that window."""
+        connector = _make_lb_connector()
+
+        old_listen = _make_listen(1400000000, "Found Song", "Found Artist")
+        probe_count = 0
+
+        async def mock_get_listens(
+            username: str, **kwargs: object
+        ) -> list[listenbrainz_module.ListenBrainzListenItem]:
+            nonlocal probe_count
+            count = kwargs.get("count", 100)
+            if count >= 100:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            # Gap-skip probes
+            probe_count += 1
+            if probe_count <= 2:
+                # First two probes also disconnect
+                raise httpx.RemoteProtocolError("probe failed")
+            # Third probe finds data
+            return [old_listen]
+
+        connector.get_listens = AsyncMock(side_effect=mock_get_listens)
+
+        with patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock):
+            listens, _ = await lb_sync_module._adaptive_fetch(
+                connector,
+                "testuser",
+                max_ts=1648623657,
+                min_ts=None,
+                page_size=lb_sync_module._DEFAULT_PAGE_SIZE,
+            )
+
+        assert len(listens) == 1
+        assert listens[0].listened_at == 1400000000
+
+    @pytest.mark.asyncio
+    async def test_gap_skip_not_triggered_without_max_ts(self) -> None:
+        """Without max_ts, page size exhaustion still raises."""
+        connector = _make_lb_connector()
+        connector.get_listens = AsyncMock(
+            side_effect=httpx.RemoteProtocolError("Server disconnected")
+        )
+
+        with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(httpx.RemoteProtocolError),
+        ):
+            await lb_sync_module._adaptive_fetch(
+                connector,
+                "testuser",
+                max_ts=None,
+                min_ts=None,
+                page_size=lb_sync_module._DEFAULT_PAGE_SIZE,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Backfill watermark cleanup tests
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillWatermarkCleanup:
+    """Tests for clearing oldest_synced_at when backfill completes."""
+
+    @pytest.mark.asyncio
+    async def test_clears_oldest_synced_at_on_backfill_completion(self) -> None:
+        """oldest_synced_at is removed when backfill finishes with no items."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        task = _make_task(
+            params={"username": "testuser", "max_ts": 1648623657},
+        )
+        connector = _make_lb_connector()
+        # get_listens returns empty (backfill has nothing left)
+        connector.get_listens = AsyncMock(return_value=[])
+
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1649389960,
+                    "oldest_synced_at": 1648623657,
+                }
+            },
+        )
+        await strategy.execute(session, task, connector, connection)
+
+        # oldest_synced_at should be gone
+        listens_wm = connection.sync_watermark.get("listens", {})
+        assert "oldest_synced_at" not in listens_wm
+        assert listens_wm["newest_synced_at"] == 1649389960
+        session.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_preserves_oldest_synced_at_on_page_limit(self) -> None:
+        """oldest_synced_at preserved when backfill hits page limit."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(
+            params={"username": "testuser", "max_ts": 1648623657},
+        )
+        connector = _make_lb_connector()
+
+        listen = _make_listen(1648000000, "Song", "Artist")
+        connector.get_listens = AsyncMock(return_value=[listen])
+
+        with (
+            patch.object(lb_sync_module, "MAX_PAGES", 2),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            connection = _make_connection(
+                sync_watermark={
+                    "listens": {
+                        "newest_synced_at": 1649389960,
+                        "oldest_synced_at": 1648623657,
+                    }
+                },
+            )
+            result = await strategy.execute(session, task, connector, connection)
+
+        assert result.get("page_limit_reached") is True
+        # oldest_synced_at should still be in the watermark
+        listens_wm = connection.sync_watermark.get("listens", {})
+        assert "oldest_synced_at" in listens_wm
+
+    @pytest.mark.asyncio
+    async def test_no_cleanup_for_non_backfill_task(self) -> None:
+        """Non-backfill tasks (no max_ts param) don't touch oldest_synced_at."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        # Incremental task — no max_ts in params
+        task = _make_task(
+            params={"username": "testuser", "min_ts": 1649389960},
+        )
+        connector = _make_lb_connector()
+        connector.get_listens = AsyncMock(return_value=[])
+
+        connection = _make_connection(
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1649389960,
+                    "oldest_synced_at": 1648623657,
+                }
+            },
+        )
+        await strategy.execute(session, task, connector, connection)
+
+        # oldest_synced_at should be unchanged
+        listens_wm = connection.sync_watermark.get("listens", {})
+        assert listens_wm["oldest_synced_at"] == 1648623657
+
+
+# ---------------------------------------------------------------------------
 # _cast_connector tests
 # ---------------------------------------------------------------------------
 

@@ -27,6 +27,8 @@ MAX_PAGES = 5000
 _DEFAULT_PAGE_SIZE = 1000
 _MIN_PAGE_SIZE = 100
 _ADAPTIVE_BACKOFF_BASE = 5.0  # seconds — scales with reduction depth
+_GAP_SKIP_WINDOW = 90 * 86400  # 90 days in seconds
+_GAP_SKIP_LOWER_BOUND = 946684800  # 2000-01-01T00:00:00Z
 
 
 class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
@@ -293,6 +295,19 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
 
             await session.commit()
 
+        # Clear oldest_synced_at when backfill completes normally.
+        # A backfill task has max_ts in its original params.  If we exited
+        # the loop without hitting the page limit, the backfill is done.
+        if max_ts_param is not None and not page_limit_reached:
+            updated_watermarks = dict(connection.sync_watermark)
+            listens_wm = dict(updated_watermarks.get("listens", {}))
+            if "oldest_synced_at" in listens_wm:
+                listens_wm.pop("oldest_synced_at")
+                updated_watermarks["listens"] = listens_wm
+                connection.sync_watermark = updated_watermarks
+                await session.commit()
+                logger.info("backfill_complete_cleared_oldest_synced_at")
+
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
@@ -352,13 +367,20 @@ async def _adaptive_fetch(
             )
         except (httpx.RemoteProtocolError, httpx.ReadTimeout):  # fmt: skip
             if current_size <= _MIN_PAGE_SIZE:
-                logger.error(
-                    "adaptive_page_size_exhausted",
-                    page_size=current_size,
-                    max_ts=max_ts,
-                    username=username,
-                )
-                raise
+                if max_ts is None:
+                    logger.error(
+                        "adaptive_page_size_exhausted",
+                        page_size=current_size,
+                        max_ts=max_ts,
+                        username=username,
+                    )
+                    raise
+                # Page size exhausted with a max_ts bound — likely a
+                # multi-year gap.  Probe bounded time windows to skip
+                # past it rather than failing the entire sync.
+                return await _skip_gap(
+                    connector, username, max_ts=max_ts, min_ts=min_ts
+                ), current_size
 
             old_size = current_size
             current_size = max(_MIN_PAGE_SIZE, current_size // 2)
@@ -386,6 +408,97 @@ async def _adaptive_fetch(
             )
 
         return listens, next_page_size
+
+
+async def _skip_gap(
+    connector: listenbrainz_module.ListenBrainzConnector,
+    username: str,
+    *,
+    max_ts: int,
+    min_ts: int | None,
+) -> list[listenbrainz_module.ListenBrainzListenItem]:
+    """Skip past a gap in listening history by probing bounded time windows.
+
+    When ``_adaptive_fetch`` exhausts page-size reduction, the problem is
+    likely a multi-year gap rather than a large result set.  This function
+    probes 90-day bounded windows stepping backward from *max_ts* until it
+    finds listens or reaches the year-2000 lower bound.
+
+    Each probe uses ``count=1`` with both ``min_ts`` and ``max_ts`` set so
+    the API only has to search a small, bounded range.
+
+    Args:
+        connector: The ListenBrainz connector.
+        username: ListenBrainz username.
+        max_ts: Upper bound where the gap was detected.
+        min_ts: Global lower bound from the task (may be ``None``).
+
+    Returns:
+        A non-empty list if listens were found after the gap, or an empty
+        list if no listens exist before the lower bound (backfill complete).
+    """
+    logger.warning(
+        "gap_detected_starting_skip",
+        max_ts=max_ts,
+        username=username,
+    )
+
+    probe_max = max_ts
+
+    while probe_max > _GAP_SKIP_LOWER_BOUND:
+        probe_min = probe_max - _GAP_SKIP_WINDOW
+        if probe_min < _GAP_SKIP_LOWER_BOUND:
+            probe_min = _GAP_SKIP_LOWER_BOUND
+
+        # Respect the task's global lower bound if set
+        if min_ts is not None and probe_min < min_ts:
+            probe_min = min_ts
+
+        try:
+            listens = await connector.get_listens(
+                username,
+                max_ts=probe_max,
+                min_ts=probe_min,
+                count=1,
+                max_retries=1,
+            )
+        except httpx.RemoteProtocolError, httpx.ReadTimeout:
+            logger.warning(
+                "gap_skip_probe_failed",
+                probe_max=probe_max,
+                probe_min=probe_min,
+                username=username,
+            )
+            probe_max = probe_min
+            continue
+
+        if listens:
+            logger.info(
+                "gap_skip_found_listens",
+                probe_max=probe_max,
+                probe_min=probe_min,
+                listened_at=listens[0].listened_at,
+                username=username,
+            )
+            return listens
+
+        logger.debug(
+            "gap_skip_window_empty",
+            probe_max=probe_max,
+            probe_min=probe_min,
+            username=username,
+        )
+        probe_max = probe_min
+
+        # If we've reached the task's lower bound, stop
+        if min_ts is not None and probe_max <= min_ts:
+            break
+
+    logger.info(
+        "gap_skip_exhausted_backfill_complete",
+        username=username,
+    )
+    return []
 
 
 def _cast_connector(
