@@ -6,9 +6,17 @@ Personal media discovery platform — aggregates music data from external servic
 
 - **Stack:** Python 3.14, FastAPI, SQLAlchemy 2.0 (async), PostgreSQL, Redis, Jinja2, HTMX
 - **Package manager:** uv
-- **Design doc:** [docs/design.md](docs/design.md)
+- **Architecture:** [docs/architecture.md](docs/architecture.md)
 - **Spotify API constraints:** [docs/spotify-api-constraints.md](docs/spotify-api-constraints.md) — Dev mode rate limits, removed endpoints, sync implications
 - **Deployment:** ArgoCD on megadoomer-do K8s cluster; config in `megadoomer-config` repo
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — system components, data model, connectors, sync pipeline
+- [User Guide](docs/user-guide.md) — end-user walkthrough
+- [Admin Guide](docs/admin-guide.md) — admin panel, CLI tool, dedup operations
+- [Self-Hosting](docs/self-hosting.md) — setup and deployment
+- [Spotify API Constraints](docs/spotify-api-constraints.md) — dev mode limitations
 
 ## Development Commands
 
@@ -63,38 +71,7 @@ uv run alembic revision --autogenerate -m "description"  # create new
 
 ## Project Structure
 
-```
-src/resonance/
-  app.py              # FastAPI app factory
-  config.py           # Pydantic Settings (env-based config)
-  crypto.py           # Fernet token encryption
-  database.py         # Async engine + session factory
-  dependencies.py     # FastAPI dependency injection
-  merge.py            # Account merge logic
-  types.py            # Shared enums (ServiceType, SyncStatus, etc.)
-  api/v1/             # API route modules (auth, account, sync)
-  connectors/         # Service connector plugins (Spotify, ListenBrainz)
-    base.py           # BaseConnector ABC, capability enum, data models
-    registry.py       # Connector registry
-    ratelimit.py      # Rate limit budget manager
-    spotify.py        # Spotify connector
-    listenbrainz.py   # ListenBrainz connector (MusicBrainz OAuth)
-  generators/         # Playlist generator plugins (future)
-  middleware/         # Session middleware (Redis-backed)
-  models/             # SQLAlchemy async models (Task maps to sync_tasks table)
-  worker.py           # arq task queue worker (plan_sync, sync_range, run_bulk_job)
-  sync/               # Data upsert functions shared by worker tasks
-  templates/          # Jinja2 server-rendered UI + HTMX partials
-  ui/                 # UI route handlers
-```
-
-## Architecture Principles
-
-- **API-first:** Every UI action goes through a REST API call. The UI and CLI are thin consumers of the same API. When building new features, ensure they are accessible via the API — the UI and CLI simply call it.
-- **Pluggable connectors:** Each external service is a connector class with declared capabilities. Query capabilities dynamically, never hardcode service names.
-- **Pluggable generators:** Each playlist generator is a self-contained module implementing a common interface.
-- **Async throughout:** SQLAlchemy async sessions, asyncpg, async connector methods.
-- **Rate limit budget management:** Shared `RateLimitBudget` class paces API requests, with priority lanes for auth (high) vs sync (normal).
+See [docs/architecture.md](docs/architecture.md) for project structure and system design.
 
 ## CLI Tool
 
