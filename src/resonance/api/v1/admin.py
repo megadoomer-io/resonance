@@ -17,7 +17,15 @@ import resonance.types as types_module
 router = fastapi.APIRouter(prefix="/admin", tags=["admin"])
 
 
-@router.post("/test/connect")
+@router.post(
+    "/test/connect",
+    summary="Connect test service",
+    description=(
+        "Instantly connect the test service for the current"
+        " user. Requires bearer token authentication with"
+        " admin or owner role."
+    ),
+)
 async def connect_test_service(
     request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],

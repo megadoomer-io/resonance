@@ -52,7 +52,14 @@ def _get_connector(
     return connector
 
 
-@router.get("/{service}")
+@router.get(
+    "/{service}",
+    summary="Initiate OAuth flow",
+    description=(
+        "Redirect the user to the external service's OAuth"
+        " authorization page. Requires session authentication."
+    ),
+)
 async def auth_initiate(
     service: str,
     request: fastapi.Request,
@@ -78,7 +85,15 @@ async def auth_initiate(
     return fastapi_responses.RedirectResponse(url=auth_url, status_code=307)
 
 
-@router.get("/{service}/callback")
+@router.get(
+    "/{service}/callback",
+    summary="OAuth callback",
+    description=(
+        "Handle the OAuth callback from the external service."
+        " Exchanges the authorization code for tokens, creates"
+        " or updates the user and service connection."
+    ),
+)
 async def auth_callback(
     service: str,
     request: fastapi.Request,
@@ -285,7 +300,13 @@ async def auth_callback(
     return fastapi_responses.RedirectResponse(url="/", status_code=307)
 
 
-@router.post("/logout")
+@router.post(
+    "/logout",
+    summary="Log out",
+    description=(
+        "Clear the session and log the user out. Requires session authentication."
+    ),
+)
 async def logout(
     session: Annotated[
         session_module.SessionData, fastapi.Depends(deps_module.get_session)
