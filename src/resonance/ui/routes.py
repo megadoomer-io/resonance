@@ -134,12 +134,13 @@ async def dashboard(
         )
         latest_sync: task_models.Task | None = latest_sync_result.scalar_one_or_none()
 
-        # Build active sync lookup for conditional button
+        # Build active sync lookup — single query for all connections
+        conn_ids = [conn.id for conn in connections]
         active_syncs: dict[str, task_models.Task] = {}
-        for conn in connections:
+        if conn_ids:
             active_stmt = sa.select(task_models.Task).where(
                 task_models.Task.user_id == user_uuid,
-                task_models.Task.service_connection_id == conn.id,
+                task_models.Task.service_connection_id.in_(conn_ids),
                 task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
                 task_models.Task.status.in_(
                     [
@@ -150,9 +151,8 @@ async def dashboard(
                 ),
             )
             active_result = await db.execute(active_stmt)
-            active_task = active_result.scalar_one_or_none()
-            if active_task is not None:
-                active_syncs[str(conn.id)] = active_task
+            for active_task in active_result.scalars().all():
+                active_syncs[str(active_task.service_connection_id)] = active_task
 
     return templates.TemplateResponse(
         request,
@@ -371,20 +371,15 @@ async def sync_status_partial(
         )
         sync_jobs: Sequence[task_models.Task] = sync_jobs_result.scalars().all()
 
-        # Aggregate progress from children into parent for display
+        # Aggregate progress from eagerly-loaded children (no extra queries)
         for job in sync_jobs:
             if job.status in (
                 types_module.SyncStatus.PENDING,
                 types_module.SyncStatus.RUNNING,
                 types_module.SyncStatus.DEFERRED,
             ):
-                child_progress_result = await db.execute(
-                    sa.select(sa.func.sum(task_models.Task.progress_current)).where(
-                        task_models.Task.parent_id == job.id
-                    )
-                )
-                child_total = child_progress_result.scalar_one_or_none()
-                if child_total is not None:
+                child_total = sum(child.progress_current for child in job.children)
+                if child_total:
                     job.progress_current = int(child_total)
 
     has_active_sync = any(
