@@ -1362,6 +1362,64 @@ class TestBackfillWatermarkCleanup:
         assert "oldest_synced_at" in listens_wm
 
     @pytest.mark.asyncio
+    async def test_result_watermark_omits_oldest_when_backfill_complete(self) -> None:
+        """Result watermark excludes oldest_synced_at when backfill is done."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(
+            params={"username": "testuser", "max_ts": 1648623657},
+        )
+        connector = _make_lb_connector()
+
+        listen = _make_listen(1648000000, "Song", "Artist")
+        connector.get_listens = AsyncMock(side_effect=[[listen], []])
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            connection = _make_connection(
+                sync_watermark={
+                    "listens": {
+                        "newest_synced_at": 1649389960,
+                        "oldest_synced_at": 1648623657,
+                    }
+                },
+            )
+            result = await strategy.execute(session, task, connector, connection)
+
+        assert "oldest_synced_at" not in result["watermark"]
+        assert result["watermark"]["newest_synced_at"] == 1648000000
+
+    @pytest.mark.asyncio
     async def test_no_cleanup_for_non_backfill_task(self) -> None:
         """Non-backfill tasks (no max_ts param) don't touch oldest_synced_at."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()

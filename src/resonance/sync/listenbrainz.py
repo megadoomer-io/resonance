@@ -308,13 +308,22 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                 await session.commit()
                 logger.info("backfill_complete_cleared_oldest_synced_at")
 
+        backfill_complete = max_ts_param is not None and not page_limit_reached
+
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
-            result["watermark"] = {
+            watermark: dict[str, object] = {
                 "newest_synced_at": last_listened_at,
-                "oldest_synced_at": max_ts if max_ts is not None else last_listened_at,
             }
+            # Only include oldest_synced_at if the backfill is NOT done.
+            # When backfill completes, omitting it signals the worker to
+            # stop creating backfill tasks on future syncs.
+            if not backfill_complete:
+                watermark["oldest_synced_at"] = (
+                    max_ts if max_ts is not None else last_listened_at
+                )
+            result["watermark"] = watermark
         if page_limit_reached:
             result["page_limit_reached"] = True
         return result
