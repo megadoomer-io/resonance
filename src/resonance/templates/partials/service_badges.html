@@ -1,0 +1,51 @@
+{# Usage:
+   {% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
+   In <thead>: {{ service_badge_headers() }}
+   In <tbody>: {{ service_badge_cells(entity.service_links, entity_type="artist", entity_name=entity.name) }}
+#}
+
+{% macro service_badge_headers() %}
+<th style="width: 3em; text-align: center;">SP</th>
+<th style="width: 3em; text-align: center;">LF</th>
+<th style="width: 3em; text-align: center;">LB</th>
+{% endmacro %}
+
+{% macro service_badge_cells(service_links, entity_type, entity_name, track_title="") %}
+{% set badge_style = "text-decoration: none; font-size: 0.75em; font-weight: bold; color: white; padding: 2px 6px; border-radius: 4px;" %}
+{# Spotify #}
+<td style="text-align: center;">
+{%- if service_links and service_links.get("spotify") -%}
+  <a href="https://open.spotify.com/{{ entity_type }}/{{ service_links['spotify'] }}"
+     target="_blank" rel="noopener"
+     style="background: #1DB954; {{ badge_style }}">SP</a>
+{%- endif -%}
+</td>
+{# Last.fm #}
+<td style="text-align: center;">
+{%- if service_links and service_links.get("lastfm") is not none -%}
+  {%- if entity_type == "track" -%}
+  <a href="https://www.last.fm/music/{{ entity_name | urlencode }}/_/{{ track_title | urlencode }}"
+     target="_blank" rel="noopener"
+     style="background: #D51007; {{ badge_style }}">LF</a>
+  {%- else -%}
+  <a href="https://www.last.fm/music/{{ entity_name | urlencode }}"
+     target="_blank" rel="noopener"
+     style="background: #D51007; {{ badge_style }}">LF</a>
+  {%- endif -%}
+{%- endif -%}
+</td>
+{# ListenBrainz #}
+<td style="text-align: center;">
+{%- if service_links and service_links.get("listenbrainz") -%}
+  {%- if entity_type == "track" -%}
+  <a href="https://musicbrainz.org/recording/{{ service_links['listenbrainz'] }}"
+     target="_blank" rel="noopener"
+     style="background: #E66000; {{ badge_style }}">LB</a>
+  {%- else -%}
+  <a href="https://listenbrainz.org/artist/{{ service_links['listenbrainz'] }}"
+     target="_blank" rel="noopener"
+     style="background: #E66000; {{ badge_style }}">LB</a>
+  {%- endif -%}
+{%- endif -%}
+</td>
+{% endmacro %}
