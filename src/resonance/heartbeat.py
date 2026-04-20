@@ -63,8 +63,9 @@ def with_heartbeat(
             worker_key = f"{_WORKER_KEY_PREFIX}{worker_id}"
 
             async def _heartbeat_loop() -> None:
+                # Immediately overwrite arq's b'1' lock with our worker ID
+                # and short TTL, then continue refreshing on the interval.
                 while True:
-                    await asyncio.sleep(interval)
                     try:
                         await redis.psetex(lock_key, ttl_ms, worker_id_bytes)
                         await redis.psetex(worker_key, ttl_ms, b"1")
@@ -74,6 +75,7 @@ def with_heartbeat(
                             job_id=job_id,
                             worker_id=worker_id,
                         )
+                    await asyncio.sleep(interval)
 
             heartbeat_task = asyncio.create_task(_heartbeat_loop())
             try:
