@@ -461,3 +461,35 @@ async def delete_cross_service_duplicate_events(
     await session.commit()
     logger.info("event_dedup_completed", events_deleted=deleted)
     return deleted
+
+
+async def dedup_all(session: AsyncSession) -> dict[str, int]:
+    """Run artist, track, and event dedup in sequence.
+
+    Order matters: artist merges affect track grouping (title + artist_id),
+    and track merges affect event dedup (same track + same user).
+
+    Args:
+        session: Active database session.
+
+    Returns:
+        Combined stats from all three operations.
+    """
+    artist_stats = await find_and_merge_duplicate_artists(session)
+    track_stats = await find_and_merge_duplicate_tracks(session)
+    events_deleted = await delete_cross_service_duplicate_events(session)
+
+    result: dict[str, int] = {
+        "artists_merged": artist_stats.artists_merged,
+        "tracks_repointed": artist_stats.tracks_repointed,
+        "artist_relations_repointed": artist_stats.artist_relations_repointed,
+        "artist_relations_deleted": artist_stats.artist_relations_deleted,
+        "tracks_merged": track_stats.tracks_merged,
+        "events_repointed": track_stats.events_repointed,
+        "track_relations_repointed": track_stats.track_relations_repointed,
+        "track_relations_deleted": track_stats.track_relations_deleted,
+        "events_deleted": events_deleted,
+    }
+
+    logger.info("dedup_all_complete", **result)
+    return result
