@@ -31,10 +31,11 @@ class TestServiceType:
         assert types_module.ServiceType.BANDSINTOWN == "bandsintown"
         assert types_module.ServiceType.BANDCAMP == "bandcamp"
         assert types_module.ServiceType.SOUNDCLOUD == "soundcloud"
+        assert types_module.ServiceType.ICAL == "ical"
         assert types_module.ServiceType.TEST == "test"
 
     def test_service_type_count(self) -> None:
-        assert len(types_module.ServiceType) == 8
+        assert len(types_module.ServiceType) == 9
 
 
 class TestArtistRelationType:
@@ -81,6 +82,58 @@ class TestSyncStatus:
         assert types_module.SyncStatus.RUNNING == "running"
         assert types_module.SyncStatus.COMPLETED == "completed"
         assert types_module.SyncStatus.FAILED == "failed"
+
+
+class TestTaskType:
+    """Verify TaskType enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.TaskType.SYNC_JOB == "sync_job"
+        assert types_module.TaskType.TIME_RANGE == "time_range"
+        assert types_module.TaskType.PAGE_FETCH == "page_fetch"
+        assert types_module.TaskType.BULK_JOB == "bulk_job"
+        assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
+
+    def test_task_type_count(self) -> None:
+        assert len(types_module.TaskType) == 5
+
+
+class TestFeedType:
+    """Verify FeedType enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.FeedType.SONGKICK_ATTENDANCE == "songkick_attendance"
+        assert (
+            types_module.FeedType.SONGKICK_TRACKED_ARTIST == "songkick_tracked_artist"
+        )
+        assert types_module.FeedType.ICAL_GENERIC == "ical_generic"
+
+    def test_feed_type_count(self) -> None:
+        assert len(types_module.FeedType) == 3
+
+
+class TestAttendanceStatus:
+    """Verify AttendanceStatus enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.AttendanceStatus.GOING == "going"
+        assert types_module.AttendanceStatus.INTERESTED == "interested"
+        assert types_module.AttendanceStatus.NONE == "none"
+
+    def test_attendance_status_count(self) -> None:
+        assert len(types_module.AttendanceStatus) == 3
+
+
+class TestCandidateStatus:
+    """Verify CandidateStatus enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.CandidateStatus.PENDING == "pending"
+        assert types_module.CandidateStatus.ACCEPTED == "accepted"
+        assert types_module.CandidateStatus.REJECTED == "rejected"
+
+    def test_candidate_status_count(self) -> None:
+        assert len(types_module.CandidateStatus) == 3
 
 
 # ---------------------------------------------------------------------------
