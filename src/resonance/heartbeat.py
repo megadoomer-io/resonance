@@ -130,3 +130,49 @@ def start_idle_heartbeat(
                 )
 
     return asyncio.create_task(_idle_loop())
+
+
+async def cleanup_stale_locks(redis: Any) -> int:
+    """Scan arq in-progress locks and delete those held by dead workers.
+
+    Locks whose value is a worker ID (``worker:…``) are checked against the
+    worker registry — if the corresponding ``arq:worker:*`` key is missing the
+    lock is deleted.  Legacy locks (value ``b'1'``, from before the heartbeat
+    system) are always deleted.
+
+    Returns:
+        Number of locks deleted.
+    """
+    keys: list[bytes] = await redis.keys(_LOCK_KEY_PREFIX + b"*")
+    deleted = 0
+
+    for key in keys:
+        value: bytes | None = await redis.get(key)
+        if value is None:
+            # Key expired between scan and read.
+            continue
+
+        value_str = value.decode()
+
+        if not value_str.startswith("worker:"):
+            # Legacy lock (pre-heartbeat, typically b"1") — treat as stale.
+            await redis.delete(key)
+            deleted += 1
+            logger.info("stale_lock_deleted", key=key.decode(), reason="legacy_lock")
+            continue
+
+        # Check whether the owning worker is still alive.
+        worker_key = f"{_WORKER_KEY_PREFIX}{value_str}"
+        alive: bool = await redis.exists(worker_key)
+        if not alive:
+            await redis.delete(key)
+            deleted += 1
+            logger.info(
+                "stale_lock_deleted",
+                key=key.decode(),
+                worker_id=value_str,
+                reason="dead_worker",
+            )
+
+    logger.info("stale_lock_cleanup_complete", deleted=deleted, scanned=len(keys))
+    return deleted

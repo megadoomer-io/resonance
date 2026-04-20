@@ -134,3 +134,54 @@ class TestWorkerRegistry:
             c for c in redis.psetex.call_args_list if c.args[0] == expected_key
         ]
         assert len(worker_calls) >= 1
+
+
+class TestStaleLockCleanup:
+    """Tests for cleanup_stale_locks()."""
+
+    @pytest.mark.asyncio
+    async def test_clears_lock_from_dead_worker(self) -> None:
+        redis = AsyncMock()
+        lock_key = heartbeat_module._LOCK_KEY_PREFIX + b"job-1"
+        redis.keys.return_value = [lock_key]
+        redis.get.return_value = b"worker:host1:1234"
+        redis.exists.return_value = False  # worker is dead
+
+        count = await heartbeat_module.cleanup_stale_locks(redis)
+
+        assert count == 1
+        redis.delete.assert_called_once_with(lock_key)
+
+    @pytest.mark.asyncio
+    async def test_preserves_lock_from_live_worker(self) -> None:
+        redis = AsyncMock()
+        lock_key = heartbeat_module._LOCK_KEY_PREFIX + b"job-2"
+        redis.keys.return_value = [lock_key]
+        redis.get.return_value = b"worker:host1:1234"
+        redis.exists.return_value = True  # worker is alive
+
+        count = await heartbeat_module.cleanup_stale_locks(redis)
+
+        assert count == 0
+        redis.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clears_legacy_lock_without_worker_id(self) -> None:
+        redis = AsyncMock()
+        lock_key = heartbeat_module._LOCK_KEY_PREFIX + b"job-3"
+        redis.keys.return_value = [lock_key]
+        redis.get.return_value = b"1"  # legacy lock value
+
+        count = await heartbeat_module.cleanup_stale_locks(redis)
+
+        assert count == 1
+        redis.delete.assert_called_once_with(lock_key)
+
+    @pytest.mark.asyncio
+    async def test_no_locks_returns_zero(self) -> None:
+        redis = AsyncMock()
+        redis.keys.return_value = []
+
+        count = await heartbeat_module.cleanup_stale_locks(redis)
+
+        assert count == 0
