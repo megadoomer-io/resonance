@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime
 import traceback
 import typing
@@ -21,6 +23,7 @@ import resonance.connectors.registry as registry_module
 import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
+import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
 import resonance.models.task as task_module
 import resonance.models.user as user_models
@@ -807,6 +810,13 @@ async def startup(ctx: dict[str, Any]) -> None:
         types_module.ServiceType.TEST: test_sync.TestSyncStrategy(),
     }
 
+    # Register this worker and clean up stale locks from dead workers
+    await heartbeat_module.register_worker(wctx["redis"])
+    ctx["_idle_heartbeat"] = heartbeat_module.start_idle_heartbeat(wctx["redis"])
+    cleaned = await heartbeat_module.cleanup_stale_locks(wctx["redis"])
+    if cleaned:
+        logger.info("startup_cleaned_stale_locks", count=cleaned)
+
     # Re-enqueue orphaned tasks that lost their arq jobs
     await _reenqueue_orphaned_tasks(session_factory, wctx["redis"])
 
@@ -826,6 +836,16 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     sync_base.shutdown_requested.set()
 
     wctx = typing.cast("WorkerContext", ctx)
+
+    # Cancel idle heartbeat and unregister from worker registry
+    idle_heartbeat: asyncio.Task[None] | None = ctx.get("_idle_heartbeat")
+    if idle_heartbeat is not None:
+        idle_heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await idle_heartbeat
+
+    await heartbeat_module.unregister_worker(wctx["redis"])
+
     engine = wctx["engine"]
     await engine.dispose()
     logger.info("worker_shutdown")
@@ -844,9 +864,9 @@ class WorkerSettings:
     """
 
     functions: typing.ClassVar[list[typing.Any]] = [
-        arq.func(plan_sync, timeout=86400),  # 24h — orchestrator, duration varies
-        arq.func(sync_range, timeout=86400),  # 24h — duration depends on user data
-        arq.func(run_bulk_job, timeout=86400),  # 24h — dedup can be slow on large DBs
+        arq.func(heartbeat_module.with_heartbeat(plan_sync), timeout=3600),
+        arq.func(heartbeat_module.with_heartbeat(sync_range), timeout=3600),
+        arq.func(heartbeat_module.with_heartbeat(run_bulk_job), timeout=3600),
     ]
     on_startup = startup
     on_shutdown = shutdown

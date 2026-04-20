@@ -43,9 +43,10 @@ class TestWorkerSettings:
     """Verify WorkerSettings has the expected attributes."""
 
     def test_functions_registered(self) -> None:
-        coroutines = [f.coroutine for f in worker_module.WorkerSettings.functions]
-        assert worker_module.plan_sync in coroutines
-        assert worker_module.sync_range in coroutines
+        funcs = worker_module.WorkerSettings.functions
+        assert len(funcs) == 3
+        names = {f.name for f in funcs}
+        assert names == {"plan_sync", "sync_range", "run_bulk_job"}
 
     def test_lifecycle_hooks(self) -> None:
         assert worker_module.WorkerSettings.on_startup is worker_module.startup
@@ -1717,7 +1718,10 @@ class TestWorkerShutdown:
         sync_base.shutdown_requested.clear()
         try:
             mock_engine = AsyncMock()
-            ctx: dict[str, Any] = {"engine": mock_engine}
+            ctx: dict[str, Any] = {
+                "engine": mock_engine,
+                "redis": AsyncMock(),
+            }
             await worker_module.shutdown(ctx)
             assert sync_base.shutdown_requested.is_set()
         finally:
@@ -1729,7 +1733,10 @@ class TestWorkerShutdown:
         sync_base.shutdown_requested.clear()
         try:
             mock_engine = AsyncMock()
-            ctx: dict[str, Any] = {"engine": mock_engine}
+            ctx: dict[str, Any] = {
+                "engine": mock_engine,
+                "redis": AsyncMock(),
+            }
             await worker_module.shutdown(ctx)
             mock_engine.dispose.assert_awaited_once()
         finally:
