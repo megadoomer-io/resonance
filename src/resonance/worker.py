@@ -381,6 +381,8 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                     session
                 )
                 task.result = {"events_deleted": deleted}
+            elif operation == "dedup_all":
+                task.result = {**await dedup_module.dedup_all(session)}
             else:
                 msg = f"Unknown bulk operation: {operation}"
                 raise ValueError(msg)
@@ -519,8 +521,8 @@ async def _check_parent_completion(
         dedup_task = task_module.Task(
             task_type=types_module.TaskType.BULK_JOB,
             status=types_module.SyncStatus.PENDING,
-            params={"operation": "dedup_events"},
-            description="Post-sync event dedup",
+            params={"operation": "dedup_all"},
+            description="Post-sync entity resolution",
         )
         session.add(dedup_task)
         await session.commit()
