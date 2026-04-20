@@ -16,6 +16,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
+import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -869,6 +870,10 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(plan_sync), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(sync_range), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(run_bulk_job), timeout=3600),
+        arq.func(
+            heartbeat_module.with_heartbeat(concert_worker.sync_calendar_feed),
+            timeout=3600,
+        ),
     ]
     on_startup = startup
     on_shutdown = shutdown
