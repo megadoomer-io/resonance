@@ -87,9 +87,10 @@ def _make_lb_connector() -> MagicMock:
 class TestConcurrency:
     """Tests for the concurrency class attribute."""
 
-    def test_concurrency_is_parallel(self) -> None:
+    def test_concurrency_is_sequential(self) -> None:
+        """Sequential prevents parallel watermark writes from racing."""
         strategy = lb_sync_module.ListenBrainzSyncStrategy()
-        assert strategy.concurrency == "parallel"
+        assert strategy.concurrency == "sequential"
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ _GAP_SKIP_LOWER_BOUND = 946684800  # 2000-01-01T00:00:00Z
 class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
     """Sync strategy for ListenBrainz listening history."""
 
-    concurrency = "parallel"
+    concurrency = "sequential"
 
     async def plan(
         self,
