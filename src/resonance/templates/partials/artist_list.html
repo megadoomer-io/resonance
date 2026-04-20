@@ -1,23 +1,18 @@
+{% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
 {% if artists %}
 <figure>
     <table>
         <thead>
             <tr>
                 <th>Name</th>
-                <th>Services</th>
+                {{ service_badge_headers() }}
             </tr>
         </thead>
         <tbody>
             {% for artist in artists %}
             <tr>
                 <td>{{ artist.name }}</td>
-                <td>
-                    {% if artist.service_links %}
-                    {{ artist.service_links.keys() | join(', ') }}
-                    {% else %}
-                    --
-                    {% endif %}
-                </td>
+                {{ service_badge_cells(artist.service_links, entity_type="artist", entity_name=artist.name) }}
             </tr>
             {% endfor %}
         </tbody>
