@@ -325,6 +325,26 @@ class TestParseSongkickLocation:
         assert result.city == "New York"
         assert result.state is None
 
+    def test_five_part_international(self) -> None:
+        result = ical_module._parse_songkick_location(
+            "The Lower Third, 26 Denmark Street, WC2H 8NJ, London, UK"
+        )
+        assert result is not None
+        assert result.name == "The Lower Third"
+        assert result.city == "London"
+        assert result.country == "UK"
+        assert result.state is None
+
+    def test_six_part_us(self) -> None:
+        result = ical_module._parse_songkick_location(
+            "Public Records, 233 Butler Street, 11217, New York (NYC), NY, US"
+        )
+        assert result is not None
+        assert result.name == "Public Records"
+        assert result.city == "New York (NYC)"
+        assert result.state == "NY"
+        assert result.country == "US"
+
     def test_empty_string(self) -> None:
         result = ical_module._parse_songkick_location("")
         assert result is None

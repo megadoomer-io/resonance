@@ -35,7 +35,15 @@ class ParsedEvent(pydantic.BaseModel):
 
 
 def _parse_songkick_location(location: str) -> VenueData | None:
-    """Parse Songkick LOCATION format: 'Venue, City, State, Country'.
+    """Parse Songkick LOCATION into venue data.
+
+    Songkick LOCATION varies in structure but venue name is always
+    first and the 2-letter country code is always last. Middle parts
+    may include street address, postal code, city, and/or state.
+
+    Strategy: first = venue name, last = country code.
+    For 4 parts (US): city=parts[1], state=parts[2].
+    For 5+: detect US state codes to distinguish city vs state.
 
     Args:
         location: The raw LOCATION string from a Songkick iCal event.
@@ -48,11 +56,41 @@ def _parse_songkick_location(location: str) -> VenueData | None:
         return None
 
     name = parts[0]
-    city = parts[1] if len(parts) > 1 else None
-    state = parts[2] if len(parts) > 2 else None
-    country = parts[3] if len(parts) > 3 else None
 
-    return VenueData(name=name, city=city, state=state, country=country)
+    if len(parts) == 1:
+        return VenueData(name=name)
+
+    country = parts[-1][:2]  # Always 2-letter code in Songkick
+
+    if len(parts) == 2:
+        # 2-char uppercase = country code; otherwise treat as city
+        if len(parts[1]) == 2 and parts[1].isupper():
+            return VenueData(name=name, country=country)
+        return VenueData(name=name, city=parts[1])
+
+    if len(parts) == 3:
+        # "Venue, City, Country"
+        return VenueData(name=name, city=parts[1], country=country)
+
+    if len(parts) == 4:
+        # "Venue, City, State, Country" (US standard)
+        return VenueData(name=name, city=parts[1], state=parts[2], country=country)
+
+    # 5+ parts: address/postal mixed in. Last=country, second-to-last=state or city.
+    # Use second-to-last as state if it looks like a US state code (2 uppercase chars),
+    # otherwise treat it as the city.
+    second_to_last = parts[-2]
+    if len(second_to_last) == 2 and second_to_last.isupper():
+        # Looks like a US state code — city is third-to-last
+        return VenueData(
+            name=name,
+            city=parts[-3] if len(parts) > 4 else None,
+            state=second_to_last,
+            country=country,
+        )
+
+    # International — second-to-last is the city
+    return VenueData(name=name, city=second_to_last, country=country)
 
 
 def _is_songkick_feed(feed_type: types_module.FeedType) -> bool:
