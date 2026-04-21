@@ -492,6 +492,101 @@ class TestDeleteCalendarFeed:
         assert response.status_code == 404
 
 
+class TestDeleteSongkickFeeds:
+    """Tests for DELETE /api/v1/calendar-feeds/songkick/{username}."""
+
+    async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
+        response = await client.delete("/api/v1/calendar-feeds/songkick/mike123")
+        assert response.status_code == 401
+
+    async def test_deletes_both_feeds(self) -> None:
+        """Deletes both Songkick feeds for the given username and returns count."""
+        user_id = uuid.uuid4()
+        feed1 = _make_fake_feed(
+            user_id,
+            feed_type=types_module.FeedType.SONGKICK_ATTENDANCE,
+            url="https://www.songkick.com/users/mike123/calendars.ics?filter=attendance",
+        )
+        feed2 = _make_fake_feed(
+            user_id,
+            feed_type=types_module.FeedType.SONGKICK_TRACKED_ARTIST,
+            url="https://www.songkick.com/users/mike123/calendars.ics?filter=tracked_artist",
+        )
+
+        db_session = FakeAsyncSession()
+        scalars_result = FakeScalarsResult([feed1, feed2])
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalars_result
+        db_session.set_execute_results([execute_result])
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.delete("/api/v1/calendar-feeds/songkick/mike123")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"status": "deleted", "count": "2"}
+        assert len(db_session._deleted) == 2
+
+    async def test_unknown_username_returns_404(self) -> None:
+        """Returns 404 when no feeds exist for the given username."""
+        user_id = uuid.uuid4()
+
+        db_session = FakeAsyncSession()
+        scalars_result = FakeScalarsResult([])
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalars_result
+        db_session.set_execute_results([execute_result])
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.delete("/api/v1/calendar-feeds/songkick/unknownuser")
+
+        assert response.status_code == 404
+        assert "no songkick feeds" in response.json()["detail"].lower()
+
+    async def test_only_deletes_matching_username(self) -> None:
+        """Only deletes feeds for the specified username, not other usernames."""
+        user_id = uuid.uuid4()
+        # Only the matching username's feed is returned by the query
+        feed1 = _make_fake_feed(
+            user_id,
+            feed_type=types_module.FeedType.SONGKICK_ATTENDANCE,
+            url="https://www.songkick.com/users/mike123/calendars.ics?filter=attendance",
+        )
+
+        db_session = FakeAsyncSession()
+        scalars_result = FakeScalarsResult([feed1])
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalars_result
+        db_session.set_execute_results([execute_result])
+
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            response = await c.delete("/api/v1/calendar-feeds/songkick/mike123")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"status": "deleted", "count": "1"}
+        # Only 1 feed was deleted (the DB query already filters by username)
+        assert len(db_session._deleted) == 1
+
+
 class TestSyncCalendarFeed:
     """Tests for POST /api/v1/calendar-feeds/{feed_id}/sync."""
 

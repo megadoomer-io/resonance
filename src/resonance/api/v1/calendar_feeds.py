@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated
 
 import fastapi
+import httpx
 import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
@@ -48,6 +49,14 @@ class FeedResponse(pydantic.BaseModel):
     label: str | None
     enabled: bool
     last_synced_at: str | None
+
+
+class SongkickLookupResponse(pydantic.BaseModel):
+    """Response model for Songkick username lookup validation."""
+
+    username: str
+    plans_count: int
+    tracked_artist_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +154,55 @@ async def add_songkick_feeds(
 
 
 @router.post(
+    "/songkick/lookup",
+    summary="Validate Songkick username",
+    description=(
+        "Fetches attendance and tracked-artist iCal feeds from Songkick "
+        "to verify a username exists and returns event counts."
+    ),
+)
+async def lookup_songkick_user(
+    body: SongkickFeedRequest,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+) -> SongkickLookupResponse:
+    """Look up a Songkick username and return event counts.
+
+    Fetches both the attendance and tracked-artist iCal feeds from
+    Songkick to verify the username exists, then counts VEVENT entries.
+
+    Args:
+        body: Request containing the Songkick username.
+        user_id: The authenticated user's ID.
+
+    Returns:
+        A SongkickLookupResponse with plans and tracked artist counts.
+
+    Raises:
+        HTTPException: 404 if Songkick user not found, 502 if Songkick
+            is unreachable.
+    """
+    base = f"https://www.songkick.com/users/{body.username}/calendars.ics"
+    async with httpx.AsyncClient() as client:
+        try:
+            att_resp = await client.get(f"{base}?filter=attendance")
+            att_resp.raise_for_status()
+            trk_resp = await client.get(f"{base}?filter=tracked_artist")
+            trk_resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise fastapi.HTTPException(404, "Songkick user not found") from exc
+            raise fastapi.HTTPException(502, "Songkick unavailable") from exc
+        except httpx.ConnectError as exc:
+            raise fastapi.HTTPException(502, "Songkick unavailable") from exc
+
+    return SongkickLookupResponse(
+        username=body.username,
+        plans_count=att_resp.text.count("BEGIN:VEVENT"),
+        tracked_artist_count=trk_resp.text.count("BEGIN:VEVENT"),
+    )
+
+
+@router.post(
     "/ical",
     summary="Add generic iCal feed",
     description=(
@@ -221,6 +279,48 @@ async def list_feeds(
     result = await db.execute(stmt)
     feeds = result.scalars().all()
     return [_feed_to_response(feed) for feed in feeds]
+
+
+@router.delete(
+    "/songkick/{username}",
+    summary="Delete Songkick feeds by username",
+    description=(
+        "Deletes all Songkick calendar feeds for the given username. "
+        "Returns 404 if no feeds are found. "
+        "Requires session authentication."
+    ),
+)
+async def delete_songkick_feeds(
+    username: str,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Delete all Songkick calendar feeds for a given username.
+
+    Args:
+        username: The Songkick username whose feeds to delete.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+
+    Returns:
+        A dict with status "deleted" and the count of deleted feeds.
+
+    Raises:
+        HTTPException: 404 if no feeds found for this username.
+    """
+    base = f"https://www.songkick.com/users/{username}/calendars.ics"
+    stmt = sa.select(concert_models.UserCalendarFeed).where(
+        concert_models.UserCalendarFeed.user_id == user_id,
+        concert_models.UserCalendarFeed.url.like(f"{base}%"),
+    )
+    result = await db.execute(stmt)
+    feeds = list(result.scalars().all())
+    if not feeds:
+        raise fastapi.HTTPException(404, "No Songkick feeds for this username")
+    for feed in feeds:
+        await db.delete(feed)
+    await db.commit()
+    return {"status": "deleted", "count": str(len(feeds))}
 
 
 @router.delete(
