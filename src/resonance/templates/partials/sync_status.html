@@ -16,7 +16,13 @@
         <tbody>
             {% for job in sync_jobs %}
             <tr>
-                <td>{{ job.service_connection.service_type.value | capitalize }}</td>
+                <td>
+                    {% if job.task_type.value == 'calendar_sync' %}
+                    Songkick
+                    {% else %}
+                    {{ job.service_connection.service_type.value | capitalize }}
+                    {% endif %}
+                </td>
                 <td>
                     {% if job.status.value == 'deferred' %}
                     Deferred{% if job.deferred_until %} until {{ (job.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}
@@ -28,6 +34,9 @@
                 </td>
                 <td>
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
+                        {% if job.task_type.value == 'calendar_sync' %}
+                        <small>{{ job.description or 'Syncing calendar feed...' }}</small>
+                        {% else %}
                         {% for child in job.children | sort(attribute='created_at') %}
                             {% if child.status.value == 'completed' %}
                             <div style="margin-bottom: 0.25rem;">
@@ -63,8 +72,13 @@
                             </div>
                             {% endif %}
                         {% endfor %}
+                        {% endif %}
                     {% elif job.status.value == 'completed' %}
+                        {% if job.task_type.value == 'calendar_sync' %}
+                        {{ job.result.get('events_created', 0) }} events / {{ job.result.get('candidates_matched', 0) }} matched
+                        {% else %}
                         {{ job.result.get('items_created', 0) }} new / {{ job.result.get('items_updated', 0) }} updated
+                        {% endif %}
                     {% elif job.status.value == 'failed' %}
                         {% if job.error_message %}
                         <small>{{ job.error_message[:80] }}</small>
