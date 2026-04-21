@@ -14,6 +14,7 @@ import structlog
 import resonance.concerts.ical as ical_module
 import resonance.concerts.sync as concert_sync
 import resonance.models.concert as concert_models
+import resonance.models.task as task_models
 import resonance.types as types_module
 
 if typing.TYPE_CHECKING:
@@ -29,7 +30,9 @@ _FEED_TYPE_TO_SERVICE: dict[types_module.FeedType, types_module.ServiceType] = {
 }
 
 
-async def sync_calendar_feed(ctx: dict[str, Any], feed_id: str) -> None:
+async def sync_calendar_feed(
+    ctx: dict[str, Any], feed_id: str, task_id: str | None = None
+) -> None:
     """Fetch, parse, and sync a calendar feed into the database.
 
     This is the main arq task for calendar feed syncing. It loads the feed
@@ -39,18 +42,33 @@ async def sync_calendar_feed(ctx: dict[str, Any], feed_id: str) -> None:
     Args:
         ctx: arq worker context dict (contains session_factory).
         feed_id: UUID string of the UserCalendarFeed to sync.
+        task_id: Optional UUID string of the Task tracking this sync.
     """
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
         "session_factory"
     ]
-    log = logger.bind(feed_id=feed_id)
+    log = logger.bind(feed_id=feed_id, task_id=task_id)
 
     async with session_factory() as session:
+        task: task_models.Task | None = None
         try:
+            # Load tracking task if provided
+            if task_id is not None:
+                task = await _load_task(session, task_id)
+                if task is not None:
+                    task.status = types_module.SyncStatus.RUNNING
+                    task.started_at = datetime.datetime.now(datetime.UTC)
+                    await session.commit()
+
             # 1. Load feed
             feed = await _load_feed(session, feed_id)
             if feed is None:
                 log.error("calendar_feed_not_found")
+                if task is not None:
+                    task.status = types_module.SyncStatus.FAILED
+                    task.error_message = f"Feed {feed_id} not found"
+                    task.completed_at = datetime.datetime.now(datetime.UTC)
+                    await session.commit()
                 return
 
             log = log.bind(
@@ -61,6 +79,11 @@ async def sync_calendar_feed(ctx: dict[str, Any], feed_id: str) -> None:
             # 2. Check enabled
             if not feed.enabled:
                 log.info("calendar_feed_disabled_skip")
+                if task is not None:
+                    task.status = types_module.SyncStatus.COMPLETED
+                    task.result = {"skipped": "feed disabled"}
+                    task.completed_at = datetime.datetime.now(datetime.UTC)
+                    await session.commit()
                 return
 
             # 3. HTTP GET the feed URL
@@ -120,21 +143,46 @@ async def sync_calendar_feed(ctx: dict[str, Any], feed_id: str) -> None:
             # 7. Update last_synced_at
             feed.last_synced_at = datetime.datetime.now(datetime.UTC)
 
-            # 8. Commit
+            # 8. Build result summary
+            result: dict[str, object] = {
+                "events_created": events_created,
+                "events_updated": events_updated,
+                "candidates_created": candidates_created,
+                "candidates_matched": candidates_matched,
+                "total_events": len(parsed_events),
+            }
+
+            # 9. Mark task completed
+            if task is not None:
+                task.status = types_module.SyncStatus.COMPLETED
+                task.result = result
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+
+            # 10. Commit
             await session.commit()
 
-            # 9. Log summary
-            log.info(
-                "calendar_feed_sync_completed",
-                events_created=events_created,
-                events_updated=events_updated,
-                candidates_created=candidates_created,
-                candidates_matched=candidates_matched,
-                total_events=len(parsed_events),
-            )
+            log.info("calendar_feed_sync_completed", **result)
 
         except Exception:
             log.exception("calendar_feed_sync_failed")
+            if task is not None:
+                import traceback
+
+                task.status = types_module.SyncStatus.FAILED
+                task.error_message = traceback.format_exc()
+                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await session.commit()
+
+
+async def _load_task(
+    session: sa_async.AsyncSession,
+    task_id: str,
+) -> task_models.Task | None:
+    """Load a Task by ID."""
+    result = await session.execute(
+        sa.select(task_models.Task).where(task_models.Task.id == uuid.UUID(task_id))
+    )
+    return result.scalar_one_or_none()
 
 
 async def _load_feed(

@@ -339,11 +339,12 @@ async def trigger_feed_sync(
     db.add(task)
     await db.commit()
 
-    # Enqueue arq job
+    # Enqueue arq job with task_id for status tracking
     arq_redis = request.app.state.arq_redis
     await arq_redis.enqueue_job(
         "sync_calendar_feed",
         str(feed_id),
+        str(task.id),
         _job_id=f"sync_calendar_feed:{feed_id}",
     )
 
