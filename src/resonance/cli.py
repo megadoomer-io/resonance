@@ -67,14 +67,17 @@ _USAGE = """\
 Usage: resonance-api <command> [args]
 
 Commands:
-  healthz                   Health + deployed revision
-  status                    Recent sync job overview
-  stats                     Database statistics
-  sync <service> [--full]   Trigger a sync
-  dedup <type> [--no-wait]  Run deduplication
-  task <task_id>            Check task status
-  track <query>             Search tracks by title
-  set-role <user_id> <role> Set user role (direct DB)
+  healthz                      Health + deployed revision
+  status                       Recent sync job overview
+  stats                        Database statistics
+  sync <service> [--full]      Trigger a sync
+  feeds                        List calendar feeds
+  feed-add <username>          Add Songkick feeds by username
+  feed-sync <feed_id|all>      Sync a calendar feed (or all)
+  dedup <type> [--no-wait]     Run deduplication
+  task <task_id>               Check task status
+  track <query>                Search tracks by title
+  set-role <user_id> <role>    Set user role (direct DB)
 """
 
 _DEDUP_USAGE = """\
@@ -305,6 +308,77 @@ def _cmd_track() -> None:
         print()
 
 
+def _cmd_feeds() -> None:
+    resp = _api_request("GET", "/api/v1/calendar-feeds")
+    feeds = resp.json()
+    if not feeds:
+        print("No calendar feeds configured.")
+        return
+    for f in feeds:
+        synced = f["last_synced_at"] or "never"
+        enabled = "" if f["enabled"] else " [DISABLED]"
+        label = f" ({f['label']})" if f.get("label") else ""
+        print(f"{f['feed_type']}{label}{enabled}")
+        print(f"  id:     {f['id']}")
+        print(f"  url:    {f['url']}")
+        print(f"  synced: {synced}")
+        print()
+
+
+def _cmd_feed_add() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api feed-add <songkick-username>")
+        sys.exit(1)
+    username = sys.argv[2]
+    print(f"Adding Songkick feeds for {username}...")
+    resp = _api_request(
+        "POST",
+        "/api/v1/calendar-feeds/songkick",
+        json={"username": username},
+    )
+    feeds = resp.json()
+    for f in feeds:
+        print(f"  Created: {f['feed_type']} — {f['url']}")
+
+
+def _cmd_feed_sync() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api feed-sync <feed_id|all>")
+        sys.exit(1)
+    target = sys.argv[2]
+
+    if target == "all":
+        feeds_resp = _api_request("GET", "/api/v1/calendar-feeds")
+        feeds = feeds_resp.json()
+        if not feeds:
+            print("No feeds configured.")
+            return
+        for f in feeds:
+            if not f["enabled"]:
+                print(f"Skipping disabled feed: {f['feed_type']}")
+                continue
+            print(f"Syncing {f['feed_type']}...")
+            resp = _api_request(
+                "POST",
+                f"/api/v1/calendar-feeds/{f['id']}/sync",
+            )
+            data = resp.json()
+            task_id = data.get("task_id", "")
+            result = _poll_task(task_id, f"  {f['feed_type']}")
+            print(f"  Done: {json.dumps(result)}")
+            print()
+    else:
+        print(f"Syncing feed {target}...")
+        resp = _api_request(
+            "POST",
+            f"/api/v1/calendar-feeds/{target}/sync",
+        )
+        data = resp.json()
+        task_id = data.get("task_id", "")
+        result = _poll_task(task_id, "Syncing")
+        print(json.dumps(result, indent=2))
+
+
 def _cmd_set_role() -> None:
     if len(sys.argv) != 4:
         print("Usage: resonance-api set-role <user_id> <role>")
@@ -319,6 +393,9 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "status": ("Recent sync job overview", _cmd_status),
     "stats": ("Database statistics", _cmd_stats),
     "sync": ("Trigger a sync", _cmd_sync),
+    "feeds": ("List calendar feeds", _cmd_feeds),
+    "feed-add": ("Add Songkick feeds", _cmd_feed_add),
+    "feed-sync": ("Sync a calendar feed", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
