@@ -135,6 +135,49 @@ class TestAdminPage:
         assert response.status_code == 403
 
 
+class TestSongkickConnectPartials:
+    """Tests for the Songkick connect HTMX partial endpoints."""
+
+    async def test_songkick_connect_button_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.get(
+            "/partials/songkick-connect", follow_redirects=False
+        )
+        # Returns empty HTML for unauthenticated users
+        assert response.status_code == 200
+        assert response.text == ""
+
+    async def test_songkick_lookup_form_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.get("/partials/songkick-lookup", follow_redirects=False)
+        assert response.status_code == 200
+        assert response.text == ""
+
+    async def test_songkick_lookup_submit_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/partials/songkick-lookup",
+            data={"username": "testuser"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+        assert response.text == ""
+
+    async def test_songkick_confirm_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/partials/songkick-confirm",
+            data={"username": "testuser"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+        assert response.text == ""
+
+
 class TestTaskCloning:
     """Tests for task cloning and resume endpoints."""
 

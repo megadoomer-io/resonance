@@ -1,0 +1,47 @@
+{% if state == "button" %}
+<button
+    hx-get="/partials/songkick-lookup"
+    hx-target="#songkick-connect"
+    hx-swap="innerHTML"
+    class="outline"
+>Connect Songkick</button>
+
+{% elif state == "form" %}
+<form hx-post="/partials/songkick-lookup" hx-target="#songkick-connect" hx-swap="innerHTML">
+    <fieldset role="group">
+        <input name="username" placeholder="Songkick username" required autofocus>
+        <button type="submit">Look up</button>
+    </fieldset>
+</form>
+
+{% elif state == "confirm" %}
+<article>
+    <header>Songkick account found</header>
+    <p><strong>{{ username }}</strong> &mdash; {{ plans_count }} upcoming plans, {{ tracked_artist_count }} tracked artist shows</p>
+    <footer>
+        <div class="grid">
+            <button
+                hx-post="/partials/songkick-confirm"
+                hx-vals='{"username": "{{ username }}"}'
+                hx-target="#songkick-connect"
+                hx-swap="innerHTML"
+            >Connect</button>
+            <button
+                hx-get="/partials/songkick-connect"
+                hx-target="#songkick-connect"
+                hx-swap="innerHTML"
+                class="secondary outline"
+            >Cancel</button>
+        </div>
+    </footer>
+</article>
+
+{% elif state == "error" %}
+<p><mark>{{ error_message | default("No Songkick user found with that username.") }}</mark></p>
+<button
+    hx-get="/partials/songkick-lookup"
+    hx-target="#songkick-connect"
+    hx-swap="innerHTML"
+    class="outline"
+>Try Again</button>
+{% endif %}

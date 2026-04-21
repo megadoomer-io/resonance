@@ -45,11 +45,56 @@
                 </td>
             </tr>
             {% endfor %}
+            {% for sk in songkick_accounts %}
+            <tr>
+                <td>Songkick</td>
+                <td>{{ sk.username }}</td>
+                <td>{{ (sk.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
+                <td>
+                    <button
+                        hx-delete="/api/v1/calendar-feeds/songkick/{{ sk.username }}"
+                        hx-confirm="Disconnect Songkick account {{ sk.username }}?"
+                        hx-on::after-request="location.reload()"
+                    >Disconnect</button>
+                </td>
+            </tr>
+            {% endfor %}
         </tbody>
     </table>
 </figure>
 {% else %}
+{% if not songkick_accounts %}
 <p>No services connected.</p>
+{% else %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>Account ID</th>
+                <th>Connected</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for sk in songkick_accounts %}
+            <tr>
+                <td>Songkick</td>
+                <td>{{ sk.username }}</td>
+                <td>{{ (sk.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
+                <td>
+                    <button
+                        hx-delete="/api/v1/calendar-feeds/songkick/{{ sk.username }}"
+                        hx-confirm="Disconnect Songkick account {{ sk.username }}?"
+                        hx-on::after-request="location.reload()"
+                    >Disconnect</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
 {% endif %}
 
 <h2>Preferences</h2>
@@ -98,6 +143,9 @@
     >Connect Test Service</button>
     {% endif %}
 </p>
+<div id="songkick-connect">
+    {% include "partials/songkick_connect.html" %}
+</div>
 
 <h2>Log Out</h2>
 <form method="post" action="/api/v1/auth/logout">

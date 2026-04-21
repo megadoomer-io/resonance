@@ -11,6 +11,7 @@ import fastapi
 import fastapi.requests
 import fastapi.responses
 import fastapi.templating
+import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
@@ -18,6 +19,7 @@ import sqlalchemy.orm as sa_orm
 import resonance.dependencies as deps_module
 import resonance.merge as merge_module
 import resonance.middleware.session as session_module
+import resonance.models.concert as concert_models
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
@@ -331,6 +333,36 @@ async def account_page(
             connections_result.scalars().all()
         )
 
+        # Query Songkick calendar feeds
+        sk_feeds_result = await db.execute(
+            sa.select(concert_models.UserCalendarFeed).where(
+                concert_models.UserCalendarFeed.user_id == user_uuid,
+                concert_models.UserCalendarFeed.feed_type.in_(
+                    [
+                        types_module.FeedType.SONGKICK_ATTENDANCE,
+                        types_module.FeedType.SONGKICK_TRACKED_ARTIST,
+                    ]
+                ),
+            )
+        )
+        sk_feeds = sk_feeds_result.scalars().all()
+
+        # Group by username (extracted from URL)
+        songkick_accounts: list[dict[str, object]] = []
+        seen_usernames: set[str] = set()
+        for feed in sk_feeds:
+            parts = feed.url.split("/users/")
+            if len(parts) > 1:
+                username = parts[1].split("/")[0]
+                if username not in seen_usernames:
+                    seen_usernames.add(username)
+                    songkick_accounts.append(
+                        {
+                            "username": username,
+                            "created_at": feed.created_at,
+                        }
+                    )
+
     return templates.TemplateResponse(
         request,
         "account.html",
@@ -340,8 +372,147 @@ async def account_page(
             "user_role": _user_role(request),
             "user": user,
             "connections": connections,
+            "songkick_accounts": songkick_accounts,
+            "state": "button",
         },
     )
+
+
+@router.get("/partials/songkick-connect", response_model=None)
+async def songkick_connect_button(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Return the Songkick connect button partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/songkick_connect.html",
+        {"state": "button"},
+    )
+
+
+@router.get("/partials/songkick-lookup", response_model=None)
+async def songkick_lookup_form(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Return the Songkick username lookup form partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/songkick_connect.html",
+        {"state": "form"},
+    )
+
+
+@router.post("/partials/songkick-lookup", response_model=None)
+async def songkick_lookup_submit(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Validate a Songkick username and return confirm or error state."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    form = await request.form()
+    username = str(form.get("username", "")).strip()
+    if not username:
+        return templates.TemplateResponse(
+            request,
+            "partials/songkick_connect.html",
+            {"state": "error", "error_message": "Please enter a username."},
+        )
+
+    base = f"https://www.songkick.com/users/{username}/calendars.ics"
+    try:
+        async with httpx.AsyncClient() as client:
+            att_resp = await client.get(f"{base}?filter=attendance")
+            att_resp.raise_for_status()
+            trk_resp = await client.get(f"{base}?filter=tracked_artist")
+            trk_resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        return templates.TemplateResponse(
+            request,
+            "partials/songkick_connect.html",
+            {"state": "error"},
+        )
+    except httpx.ConnectError:
+        return templates.TemplateResponse(
+            request,
+            "partials/songkick_connect.html",
+            {
+                "state": "error",
+                "error_message": (
+                    "Could not connect to Songkick. Please try again later."
+                ),
+            },
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "partials/songkick_connect.html",
+        {
+            "state": "confirm",
+            "username": username,
+            "plans_count": att_resp.text.count("BEGIN:VEVENT"),
+            "tracked_artist_count": trk_resp.text.count("BEGIN:VEVENT"),
+        },
+    )
+
+
+@router.post("/partials/songkick-confirm", response_model=None)
+async def songkick_confirm(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Create Songkick feeds and reload the page."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    form = await request.form()
+    username = str(form.get("username", "")).strip()
+    if not username:
+        return fastapi.responses.HTMLResponse("")
+
+    user_uuid = uuid.UUID(user_id)
+    base = f"https://www.songkick.com/users/{username}/calendars.ics"
+    feed_specs: list[tuple[types_module.FeedType, str]] = [
+        (types_module.FeedType.SONGKICK_ATTENDANCE, f"{base}?filter=attendance"),
+        (
+            types_module.FeedType.SONGKICK_TRACKED_ARTIST,
+            f"{base}?filter=tracked_artist",
+        ),
+    ]
+
+    async with _get_db(request) as db:
+        # Check for duplicates
+        for _feed_type, url in feed_specs:
+            stmt = sa.select(concert_models.UserCalendarFeed).where(
+                concert_models.UserCalendarFeed.user_id == user_uuid,
+                concert_models.UserCalendarFeed.url == url,
+            )
+            result = await db.execute(stmt)
+            if result.scalar_one_or_none() is not None:
+                msg = "Songkick feeds already exist for this username."
+                return fastapi.responses.HTMLResponse(f"<p><mark>{msg}</mark></p>")
+
+        # Create feeds
+        for feed_type, url in feed_specs:
+            feed = concert_models.UserCalendarFeed(
+                user_id=user_uuid,
+                feed_type=feed_type,
+                url=url,
+            )
+            db.add(feed)
+
+        await db.commit()
+
+    return fastapi.responses.HTMLResponse("<script>location.reload()</script>")
 
 
 @router.get("/partials/sync-status", response_model=None)
