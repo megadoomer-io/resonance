@@ -317,6 +317,50 @@ async def tracks_page(
     return templates.TemplateResponse(request, "tracks.html", context)
 
 
+@router.get("/events", response_model=None)
+async def events_page(
+    request: fastapi.Request,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render paginated events list with venue and artist info, or redirect to login."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(concert_models.Event)
+            .options(
+                sa_orm.joinedload(concert_models.Event.venue),
+                sa_orm.joinedload(concert_models.Event.artists),
+                sa_orm.joinedload(concert_models.Event.artist_candidates),
+            )
+            .order_by(concert_models.Event.event_date.desc())
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        events = list(result.unique().scalars().all())
+
+    has_next = len(events) > _PAGE_SIZE
+    events = events[:_PAGE_SIZE]
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "events": events,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/event_list.html", context)
+    return templates.TemplateResponse(request, "events.html", context)
+
+
 @router.get("/history", response_model=None)
 async def history_page(
     request: fastapi.Request,

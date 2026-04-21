@@ -65,6 +65,17 @@ class TestTracksPage:
         assert response.headers["location"] == "/login"
 
 
+class TestEventsPage:
+    """Tests for the events page."""
+
+    async def test_redirects_to_login_when_unauthenticated(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.get("/events", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
+
+
 class TestHistoryPage:
     """Tests for the listening history page."""
 

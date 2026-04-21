@@ -1,0 +1,53 @@
+{% if events %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Event</th>
+                <th>Venue</th>
+                <th>Artists</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for event in events %}
+            <tr>
+                <td>{{ event.event_date }}</td>
+                <td>
+                    {% if event.external_url %}
+                    <a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.title }}</a>
+                    {% else %}
+                    {{ event.title }}
+                    {% endif %}
+                </td>
+                <td>{{ event.venue.name if event.venue else "" }}</td>
+                <td>
+                    {% for artist in event.artists %}{{ ", " if not loop.first }}{{ artist.raw_name }}{% endfor %}
+                    {% if event.artists and event.artist_candidates %}, {% endif %}
+                    {% for candidate in event.artist_candidates %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if has_prev %}
+    <a href="/events?page={{ page - 1 }}"
+       hx-get="/events?page={{ page - 1 }}"
+       hx-target="#event-list"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/events?page={{ page + 1 }}"
+       hx-get="/events?page={{ page + 1 }}"
+       hx-target="#event-list"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No events synced yet. <a href="/account">Connect Songkick</a> to import concert data.</p>
+{% endif %}
