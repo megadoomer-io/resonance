@@ -22,7 +22,7 @@ def upgrade() -> None:
         "sync_tasks",
         "task_type",
         existing_type=sa.String(10),
-        type_=sa.String(20),
+        type_=sa.String(255),
     )
 
 
@@ -30,6 +30,6 @@ def downgrade() -> None:
     op.alter_column(
         "sync_tasks",
         "task_type",
-        existing_type=sa.String(20),
+        existing_type=sa.String(255),
         type_=sa.String(10),
     )

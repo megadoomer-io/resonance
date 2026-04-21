@@ -69,7 +69,7 @@ def _feed_to_response(feed: concert_models.UserCalendarFeed) -> FeedResponse:
         feed_type=str(feed.feed_type),
         url=feed.url,
         label=feed.label,
-        enabled=feed.enabled,
+        enabled=feed.enabled if feed.enabled is not None else True,
         last_synced_at=(
             feed.last_synced_at.isoformat() if feed.last_synced_at is not None else None
         ),
@@ -130,7 +130,7 @@ async def add_songkick_feeds(
             )
 
     # Create feeds
-    created: list[FeedResponse] = []
+    feeds: list[concert_models.UserCalendarFeed] = []
     for feed_type, url in feed_specs:
         feed = concert_models.UserCalendarFeed(
             user_id=user_id,
@@ -138,19 +138,10 @@ async def add_songkick_feeds(
             url=url,
         )
         db.add(feed)
-        created.append(
-            FeedResponse(
-                id=str(feed.id),
-                feed_type=str(feed_type),
-                url=url,
-                label=None,
-                enabled=True,
-                last_synced_at=None,
-            )
-        )
+        feeds.append(feed)
 
     await db.commit()
-    return created
+    return [_feed_to_response(f) for f in feeds]
 
 
 @router.post(
@@ -200,14 +191,7 @@ async def add_generic_feed(
     db.add(feed)
     await db.commit()
 
-    return FeedResponse(
-        id=str(feed.id),
-        feed_type=str(types_module.FeedType.ICAL_GENERIC),
-        url=body.url,
-        label=body.label,
-        enabled=True,
-        last_synced_at=None,
-    )
+    return _feed_to_response(feed)
 
 
 @router.get(
