@@ -178,6 +178,18 @@ class TestSongkickConnectPartials:
         assert response.text == ""
 
 
+class TestSongkickSyncTrigger:
+    """Tests for the Songkick sync trigger endpoint."""
+
+    async def test_songkick_sync_trigger_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/partials/songkick-sync/testuser", follow_redirects=False
+        )
+        assert response.status_code == 401
+
+
 class TestTaskCloning:
     """Tests for task cloning and resume endpoints."""
 

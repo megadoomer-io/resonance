@@ -21,7 +21,7 @@
 </div>
 
 <h2>Connected Services</h2>
-{% if connections %}
+{% if connections or songkick_accounts %}
 <figure>
     <table>
         <thead>
@@ -57,6 +57,24 @@
                     {% else %}
                     <button
                         hx-post="/api/v1/sync/{{ conn.service_type.value }}"
+                        hx-swap="none"
+                        hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
+                    >Sync Now</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% for username, sk in songkick_accounts.items() %}
+            <tr>
+                <td>Songkick</td>
+                <td>{{ username }}</td>
+                <td>{{ (sk.last_synced_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if sk.last_synced_at else 'Never' }}</td>
+                <td>
+                    {% if active_feed_syncs.get(username) %}
+                    <span aria-busy="true">Syncing...</span>
+                    {% else %}
+                    <button
+                        hx-post="/partials/songkick-sync/{{ username }}"
                         hx-swap="none"
                         hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
                     >Sync Now</button>
