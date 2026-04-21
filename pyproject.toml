@@ -19,6 +19,7 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "python-multipart>=0.0.18",
     "structlog>=25.1",
+    "icalendar>=7.0.3",
 ]
 
 [project.optional-dependencies]
@@ -76,3 +77,8 @@ strict = true
 warn_return_any = true
 disallow_untyped_defs = true
 plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = "resonance.concerts.ical"
+# icalendar's Component.get() is untyped
+disallow_untyped_calls = false

@@ -9,6 +9,7 @@ import sqlalchemy.orm as orm
 
 import resonance.models as models_module
 import resonance.models.base as base_module
+import resonance.models.concert as concert_module
 import resonance.models.music as music_module
 import resonance.models.task as task_module
 import resonance.models.taste as taste_module
@@ -31,10 +32,11 @@ class TestServiceType:
         assert types_module.ServiceType.BANDSINTOWN == "bandsintown"
         assert types_module.ServiceType.BANDCAMP == "bandcamp"
         assert types_module.ServiceType.SOUNDCLOUD == "soundcloud"
+        assert types_module.ServiceType.ICAL == "ical"
         assert types_module.ServiceType.TEST == "test"
 
     def test_service_type_count(self) -> None:
-        assert len(types_module.ServiceType) == 8
+        assert len(types_module.ServiceType) == 9
 
 
 class TestArtistRelationType:
@@ -81,6 +83,58 @@ class TestSyncStatus:
         assert types_module.SyncStatus.RUNNING == "running"
         assert types_module.SyncStatus.COMPLETED == "completed"
         assert types_module.SyncStatus.FAILED == "failed"
+
+
+class TestTaskType:
+    """Verify TaskType enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.TaskType.SYNC_JOB == "sync_job"
+        assert types_module.TaskType.TIME_RANGE == "time_range"
+        assert types_module.TaskType.PAGE_FETCH == "page_fetch"
+        assert types_module.TaskType.BULK_JOB == "bulk_job"
+        assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
+
+    def test_task_type_count(self) -> None:
+        assert len(types_module.TaskType) == 5
+
+
+class TestFeedType:
+    """Verify FeedType enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.FeedType.SONGKICK_ATTENDANCE == "songkick_attendance"
+        assert (
+            types_module.FeedType.SONGKICK_TRACKED_ARTIST == "songkick_tracked_artist"
+        )
+        assert types_module.FeedType.ICAL_GENERIC == "ical_generic"
+
+    def test_feed_type_count(self) -> None:
+        assert len(types_module.FeedType) == 3
+
+
+class TestAttendanceStatus:
+    """Verify AttendanceStatus enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.AttendanceStatus.GOING == "going"
+        assert types_module.AttendanceStatus.INTERESTED == "interested"
+        assert types_module.AttendanceStatus.NONE == "none"
+
+    def test_attendance_status_count(self) -> None:
+        assert len(types_module.AttendanceStatus) == 3
+
+
+class TestCandidateStatus:
+    """Verify CandidateStatus enum values."""
+
+    def test_values(self) -> None:
+        assert types_module.CandidateStatus.PENDING == "pending"
+        assert types_module.CandidateStatus.ACCEPTED == "accepted"
+        assert types_module.CandidateStatus.REJECTED == "rejected"
+
+    def test_candidate_status_count(self) -> None:
+        assert len(types_module.CandidateStatus) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +509,344 @@ class TestTask:
 
 
 # ---------------------------------------------------------------------------
+# Concert models
+# ---------------------------------------------------------------------------
+
+
+class TestVenueModel:
+    """Tests for the Venue model."""
+
+    def test_table_name(self) -> None:
+        assert concert_module.Venue.__tablename__ == "venues"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.Venue.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "name",
+            "address",
+            "city",
+            "state",
+            "postal_code",
+            "country",
+            "service_links",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.Venue.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"name", "city", "state", "country"})
+        assert expected in uc_col_sets
+
+    def test_events_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.Venue] = orm.class_mapper(
+            concert_module.Venue
+        )
+        assert "events" in mapper.relationships
+
+
+class TestEventModel:
+    """Tests for the Event model."""
+
+    def test_table_name(self) -> None:
+        assert concert_module.Event.__tablename__ == "events"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.Event.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "title",
+            "event_date",
+            "venue_id",
+            "source_service",
+            "external_id",
+            "external_url",
+            "service_links",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_venue_id_fk(self) -> None:
+        col = _get_column(concert_module.Event.__table__, "venue_id")  # type: ignore[arg-type]
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "venues.id" in fk_targets
+
+    def test_source_service_is_enum(self) -> None:
+        col = _get_column(
+            concert_module.Event.__table__,  # type: ignore[arg-type]
+            "source_service",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.Event.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"source_service", "external_id"})
+        assert expected in uc_col_sets
+
+    def test_venue_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.Event] = orm.class_mapper(
+            concert_module.Event
+        )
+        assert "venue" in mapper.relationships
+
+    def test_artist_candidates_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.Event] = orm.class_mapper(
+            concert_module.Event
+        )
+        assert "artist_candidates" in mapper.relationships
+
+    def test_artists_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.Event] = orm.class_mapper(
+            concert_module.Event
+        )
+        assert "artists" in mapper.relationships
+
+
+class TestEventArtistCandidateModel:
+    """Tests for the EventArtistCandidate model."""
+
+    def test_table_name(self) -> None:
+        assert (
+            concert_module.EventArtistCandidate.__tablename__
+            == "event_artist_candidates"
+        )
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.EventArtistCandidate.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "event_id",
+            "raw_name",
+            "matched_artist_id",
+            "position",
+            "confidence_score",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_event_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.EventArtistCandidate.__table__,  # type: ignore[arg-type]
+            "event_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "events.id" in fk_targets
+
+    def test_matched_artist_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.EventArtistCandidate.__table__,  # type: ignore[arg-type]
+            "matched_artist_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "artists.id" in fk_targets
+
+    def test_status_is_enum(self) -> None:
+        col = _get_column(
+            concert_module.EventArtistCandidate.__table__,  # type: ignore[arg-type]
+            "status",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.EventArtistCandidate.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"event_id", "raw_name"})
+        assert expected in uc_col_sets
+
+    def test_event_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.EventArtistCandidate] = orm.class_mapper(
+            concert_module.EventArtistCandidate
+        )
+        assert "event" in mapper.relationships
+
+
+class TestEventArtistModel:
+    """Tests for the EventArtist model."""
+
+    def test_table_name(self) -> None:
+        assert concert_module.EventArtist.__tablename__ == "event_artists"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.EventArtist.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "event_id",
+            "artist_id",
+            "position",
+            "raw_name",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_event_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.EventArtist.__table__,  # type: ignore[arg-type]
+            "event_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "events.id" in fk_targets
+
+    def test_artist_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.EventArtist.__table__,  # type: ignore[arg-type]
+            "artist_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "artists.id" in fk_targets
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.EventArtist.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"event_id", "artist_id"})
+        assert expected in uc_col_sets
+
+    def test_event_relationship(self) -> None:
+        mapper: orm.Mapper[concert_module.EventArtist] = orm.class_mapper(
+            concert_module.EventArtist
+        )
+        assert "event" in mapper.relationships
+
+
+class TestUserEventAttendanceModel:
+    """Tests for the UserEventAttendance model."""
+
+    def test_table_name(self) -> None:
+        assert (
+            concert_module.UserEventAttendance.__tablename__ == "user_event_attendance"
+        )
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.UserEventAttendance.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "user_id",
+            "event_id",
+            "status",
+            "source_service",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_user_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.UserEventAttendance.__table__,  # type: ignore[arg-type]
+            "user_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "users.id" in fk_targets
+
+    def test_event_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.UserEventAttendance.__table__,  # type: ignore[arg-type]
+            "event_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "events.id" in fk_targets
+
+    def test_status_is_enum(self) -> None:
+        col = _get_column(
+            concert_module.UserEventAttendance.__table__,  # type: ignore[arg-type]
+            "status",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_source_service_is_enum(self) -> None:
+        col = _get_column(
+            concert_module.UserEventAttendance.__table__,  # type: ignore[arg-type]
+            "source_service",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.UserEventAttendance.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"user_id", "event_id"})
+        assert expected in uc_col_sets
+
+
+class TestUserCalendarFeedModel:
+    """Tests for the UserCalendarFeed model."""
+
+    def test_table_name(self) -> None:
+        assert concert_module.UserCalendarFeed.__tablename__ == "user_calendar_feeds"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "user_id",
+            "feed_type",
+            "url",
+            "label",
+            "last_synced_at",
+            "enabled",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_user_id_fk(self) -> None:
+        col = _get_column(
+            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
+            "user_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "users.id" in fk_targets
+
+    def test_feed_type_is_enum(self) -> None:
+        col = _get_column(
+            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
+            "feed_type",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_unique_constraint(self) -> None:
+        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
+        unique_constraints = [
+            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
+        ]
+        uc_col_sets = [
+            frozenset(col.name for col in uc.columns) for uc in unique_constraints
+        ]
+        expected = frozenset({"user_id", "url"})
+        assert expected in uc_col_sets
+
+
+# ---------------------------------------------------------------------------
 # Package re-exports
 # ---------------------------------------------------------------------------
 
@@ -488,3 +880,21 @@ class TestModelsPackageExports:
 
     def test_sync_task_exported(self) -> None:
         assert models_module.Task is task_module.Task
+
+    def test_venue_exported(self) -> None:
+        assert models_module.Venue is concert_module.Venue
+
+    def test_event_exported(self) -> None:
+        assert models_module.Event is concert_module.Event
+
+    def test_event_artist_exported(self) -> None:
+        assert models_module.EventArtist is concert_module.EventArtist
+
+    def test_event_artist_candidate_exported(self) -> None:
+        assert models_module.EventArtistCandidate is concert_module.EventArtistCandidate
+
+    def test_user_event_attendance_exported(self) -> None:
+        assert models_module.UserEventAttendance is concert_module.UserEventAttendance
+
+    def test_user_calendar_feed_exported(self) -> None:
+        assert models_module.UserCalendarFeed is concert_module.UserCalendarFeed

@@ -44,9 +44,14 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 3
+        assert len(funcs) == 4
         names = {f.name for f in funcs}
-        assert names == {"plan_sync", "sync_range", "run_bulk_job"}
+        assert names == {
+            "plan_sync",
+            "sync_range",
+            "run_bulk_job",
+            "sync_calendar_feed",
+        }
 
     def test_lifecycle_hooks(self) -> None:
         assert worker_module.WorkerSettings.on_startup is worker_module.startup

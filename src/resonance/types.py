@@ -13,6 +13,7 @@ class ServiceType(enum.StrEnum):
     BANDSINTOWN = "bandsintown"
     BANDCAMP = "bandcamp"
     SOUNDCLOUD = "soundcloud"
+    ICAL = "ical"
     TEST = "test"
 
 
@@ -52,6 +53,7 @@ class TaskType(enum.StrEnum):
     TIME_RANGE = "time_range"
     PAGE_FETCH = "page_fetch"
     BULK_JOB = "bulk_job"
+    CALENDAR_SYNC = "calendar_sync"
 
 
 class SyncStatus(enum.StrEnum):
@@ -62,3 +64,27 @@ class SyncStatus(enum.StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     DEFERRED = "deferred"
+
+
+class FeedType(enum.StrEnum):
+    """Types of calendar feeds."""
+
+    SONGKICK_ATTENDANCE = "songkick_attendance"
+    SONGKICK_TRACKED_ARTIST = "songkick_tracked_artist"
+    ICAL_GENERIC = "ical_generic"
+
+
+class AttendanceStatus(enum.StrEnum):
+    """User attendance status for an event."""
+
+    GOING = "going"
+    INTERESTED = "interested"
+    NONE = "none"
+
+
+class CandidateStatus(enum.StrEnum):
+    """Status of an artist-to-event candidate."""
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
