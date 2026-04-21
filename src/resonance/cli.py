@@ -72,7 +72,8 @@ Commands:
   stats                        Database statistics
   sync <service> [--full]      Trigger a sync
   feeds                        List calendar feeds
-  feed-add <username>          Add Songkick feeds by username
+  feed-add songkick <username>  Add Songkick feeds by username
+  feed-add ical <url> [--label] Add generic iCal feed
   feed-sync <feed_id|all>      Sync a calendar feed (or all)
   dedup <type> [--no-wait]     Run deduplication
   task <task_id>               Check task status
@@ -325,20 +326,55 @@ def _cmd_feeds() -> None:
         print()
 
 
+_FEED_ADD_USAGE = """\
+Usage: resonance-api feed-add <type> [args]
+
+Types:
+  songkick <username>        Add attendance + tracked artist feeds
+  ical <url> [--label NAME]  Add a generic iCal feed
+"""
+
+
 def _cmd_feed_add() -> None:
-    if len(sys.argv) < 3:
-        print("Usage: resonance-api feed-add <songkick-username>")
+    if len(sys.argv) < 4:
+        print(_FEED_ADD_USAGE)
         sys.exit(1)
-    username = sys.argv[2]
-    print(f"Adding Songkick feeds for {username}...")
-    resp = _api_request(
-        "POST",
-        "/api/v1/calendar-feeds/songkick",
-        json={"username": username},
-    )
-    feeds = resp.json()
-    for f in feeds:
+    feed_type = sys.argv[2]
+
+    if feed_type == "songkick":
+        username = sys.argv[3]
+        print(f"Adding Songkick feeds for {username}...")
+        resp = _api_request(
+            "POST",
+            "/api/v1/calendar-feeds/songkick",
+            json={"username": username},
+        )
+        for f in resp.json():
+            print(f"  Created: {f['feed_type']} — {f['url']}")
+
+    elif feed_type == "ical":
+        url = sys.argv[3]
+        label = None
+        if "--label" in sys.argv[4:]:
+            idx = sys.argv.index("--label")
+            if idx + 1 < len(sys.argv):
+                label = sys.argv[idx + 1]
+        body: dict[str, str | None] = {"url": url}
+        if label:
+            body["label"] = label
+        print(f"Adding iCal feed: {url}")
+        resp = _api_request(
+            "POST",
+            "/api/v1/calendar-feeds/ical",
+            json=body,
+        )
+        f = resp.json()
         print(f"  Created: {f['feed_type']} — {f['url']}")
+
+    else:
+        print(f"Unknown feed type: {feed_type}")
+        print(_FEED_ADD_USAGE)
+        sys.exit(1)
 
 
 def _cmd_feed_sync() -> None:
