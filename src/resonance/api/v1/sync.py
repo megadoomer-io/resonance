@@ -197,6 +197,103 @@ def _apply_watermark_override(
 
 
 @router.post(
+    "/connection/{connection_id}",
+    summary="Trigger sync by connection",
+    description=(
+        "Trigger a sync for any connection type using the connector's config."
+        " Works for OAuth, username-based, and URL-based connections."
+        " Requires session authentication."
+    ),
+)
+async def trigger_sync_by_connection(
+    connection_id: uuid.UUID,
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Trigger a sync for any connection type via the connector registry.
+
+    Dispatches the correct arq job based on the connector's ConnectionConfig.
+
+    Args:
+        connection_id: The service connection UUID.
+        request: The FastAPI request object.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+
+    Returns:
+        A dict with status and task_id.
+
+    Raises:
+        HTTPException: 404 if connection not found, 400 if no sync config,
+            409 if sync already in progress.
+    """
+    # 1. Load connection
+    result = await db.execute(
+        sa.select(user_models.ServiceConnection).where(
+            user_models.ServiceConnection.id == connection_id,
+            user_models.ServiceConnection.user_id == user_id,
+        )
+    )
+    connection = result.scalar_one_or_none()
+    if connection is None:
+        raise fastapi.HTTPException(status_code=404, detail="Connection not found")
+
+    # 2. Get connector config
+    registry = request.app.state.connector_registry
+    config = registry.get_config(connection.service_type)
+    if config is None:
+        raise fastapi.HTTPException(
+            status_code=400, detail="No sync config for this service"
+        )
+
+    # 3. Check for running sync
+    existing = await db.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.service_connection_id == connection_id,
+            task_models.Task.status.in_(
+                [
+                    types_module.SyncStatus.PENDING,
+                    types_module.SyncStatus.RUNNING,
+                    types_module.SyncStatus.DEFERRED,
+                ]
+            ),
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise fastapi.HTTPException(status_code=409, detail="Sync already in progress")
+
+    # 4. Create task
+    task = task_models.Task(
+        user_id=user_id,
+        service_connection_id=connection.id,
+        task_type=(
+            types_module.TaskType.SYNC_JOB
+            if config.sync_style == "incremental"
+            else types_module.TaskType.CALENDAR_SYNC
+        ),
+        status=types_module.SyncStatus.PENDING,
+    )
+    db.add(task)
+    await db.flush()
+
+    # 5. Enqueue — plan_sync takes (task_id,), others take (connection_id, task_id)
+    arq_redis = request.app.state.arq_redis
+    if config.sync_function == "plan_sync":
+        args: tuple[str, ...] = (str(task.id),)
+    else:
+        args = (str(connection.id), str(task.id))
+    await arq_redis.enqueue_job(
+        config.sync_function,
+        *args,
+        _job_id=f"{config.sync_function}:{task.id}",
+    )
+
+    await db.commit()
+    return {"status": "started", "task_id": str(task.id)}
+
+
+@router.post(
     "/cancel/{job_id}",
     summary="Cancel sync",
     description=(

@@ -56,11 +56,7 @@
                         >Cancel</button>
                     {% else %}
                     <button
-                        {% if conn.service_type.value in ('songkick', 'ical') %}
-                        hx-post="/api/v1/sync/{{ conn.id }}"
-                        {% else %}
-                        hx-post="/api/v1/sync/{{ conn.service_type.value }}"
-                        {% endif %}
+                        hx-post="/api/v1/sync/connection/{{ conn.id }}"
                         hx-swap="none"
                         hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
                     >Sync Now</button>
