@@ -5,7 +5,6 @@ from resonance.models.concert import (
     Event,
     EventArtist,
     EventArtistCandidate,
-    UserCalendarFeed,
     UserEventAttendance,
     Venue,
 )
@@ -26,7 +25,6 @@ __all__ = [
     "Track",
     "User",
     "UserArtistRelation",
-    "UserCalendarFeed",
     "UserEventAttendance",
     "UserTrackRelation",
     "Venue",

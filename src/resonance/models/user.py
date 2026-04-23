@@ -106,9 +106,6 @@ class ServiceConnection(base_module.TimestampMixin, base_module.Base):
     connected_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
     )
-    last_used_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
-        sa.DateTime(timezone=True), nullable=True, default=None
-    )
     last_synced_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None
     )

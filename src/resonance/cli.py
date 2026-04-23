@@ -71,10 +71,10 @@ Commands:
   status                       Recent sync job overview
   stats                        Database statistics
   sync <service> [--full]      Trigger a sync
-  feeds                        List calendar feeds
-  feed-add songkick <username>  Add Songkick feeds by username
-  feed-add ical <url> [--label] Add generic iCal feed
-  feed-sync <feed_id|all>      Sync a calendar feed (or all)
+  feeds                        List calendar connections
+  feed-add songkick <username>  Add Songkick connection
+  feed-add ical <url> [--label] Add generic iCal connection
+  feed-sync <conn_id|all>      Sync a calendar connection (or all)
   dedup <type> [--no-wait]     Run deduplication
   task <task_id>               Check task status
   track <query>                Search tracks by title
@@ -311,17 +311,22 @@ def _cmd_track() -> None:
 
 def _cmd_feeds() -> None:
     resp = _api_request("GET", "/api/v1/calendar-feeds")
-    feeds = resp.json()
-    if not feeds:
-        print("No calendar feeds configured.")
+    connections = resp.json()
+    if not connections:
+        print("No calendar connections configured.")
         return
-    for f in feeds:
-        synced = f["last_synced_at"] or "never"
-        enabled = "" if f["enabled"] else " [DISABLED]"
-        label = f" ({f['label']})" if f.get("label") else ""
-        print(f"{f['feed_type']}{label}{enabled}")
-        print(f"  id:     {f['id']}")
-        print(f"  url:    {f['url']}")
+    for c in connections:
+        synced = c["last_synced_at"] or "never"
+        enabled = "" if c["enabled"] else " [DISABLED]"
+        label = f" ({c['label']})" if c.get("label") else ""
+        ext_id = c.get("external_user_id") or ""
+        name = f"{c['service_type']}"
+        if ext_id:
+            name += f" ({ext_id})"
+        print(f"{name}{label}{enabled}")
+        print(f"  id:     {c['id']}")
+        if c.get("url"):
+            print(f"  url:    {c['url']}")
         print(f"  synced: {synced}")
         print()
 
@@ -330,8 +335,8 @@ _FEED_ADD_USAGE = """\
 Usage: resonance-api feed-add <type> [args]
 
 Types:
-  songkick <username>        Add attendance + tracked artist feeds
-  ical <url> [--label NAME]  Add a generic iCal feed
+  songkick <username>        Add Songkick connection
+  ical <url> [--label NAME]  Add a generic iCal connection
 """
 
 
@@ -343,14 +348,14 @@ def _cmd_feed_add() -> None:
 
     if feed_type == "songkick":
         username = sys.argv[3]
-        print(f"Adding Songkick feeds for {username}...")
+        print(f"Adding Songkick connection for {username}...")
         resp = _api_request(
             "POST",
             "/api/v1/calendar-feeds/songkick",
             json={"username": username},
         )
-        for f in resp.json():
-            print(f"  Created: {f['feed_type']} — {f['url']}")
+        c = resp.json()
+        print(f"  Created: {c['service_type']} ({c.get('external_user_id', '')})")
 
     elif feed_type == "ical":
         url = sys.argv[3]
@@ -362,14 +367,14 @@ def _cmd_feed_add() -> None:
         body: dict[str, str | None] = {"url": url}
         if label:
             body["label"] = label
-        print(f"Adding iCal feed: {url}")
+        print(f"Adding iCal connection: {url}")
         resp = _api_request(
             "POST",
             "/api/v1/calendar-feeds/ical",
             json=body,
         )
-        f = resp.json()
-        print(f"  Created: {f['feed_type']} — {f['url']}")
+        c = resp.json()
+        print(f"  Created: {c['service_type']} — {c.get('url', '')}")
 
     else:
         print(f"Unknown feed type: {feed_type}")
@@ -379,35 +384,39 @@ def _cmd_feed_add() -> None:
 
 def _cmd_feed_sync() -> None:
     if len(sys.argv) < 3:
-        print("Usage: resonance-api feed-sync <feed_id|all>")
+        print("Usage: resonance-api feed-sync <connection_id|all>")
         sys.exit(1)
     target = sys.argv[2]
 
     if target == "all":
         feeds_resp = _api_request("GET", "/api/v1/calendar-feeds")
-        feeds = feeds_resp.json()
-        if not feeds:
-            print("No feeds configured.")
+        connections = feeds_resp.json()
+        if not connections:
+            print("No calendar connections configured.")
             return
-        for f in feeds:
-            if not f["enabled"]:
-                print(f"Skipping disabled feed: {f['feed_type']}")
+        for c in connections:
+            if not c["enabled"]:
+                print(f"Skipping disabled: {c['service_type']}")
                 continue
-            print(f"Syncing {f['feed_type']}...")
+            name = c["service_type"]
+            ext_id = c.get("external_user_id")
+            if ext_id:
+                name += f" ({ext_id})"
+            print(f"Syncing {name}...")
             resp = _api_request(
                 "POST",
-                f"/api/v1/calendar-feeds/{f['id']}/sync",
+                f"/api/v1/sync/connection/{c['id']}",
             )
             data = resp.json()
             task_id = data.get("task_id", "")
-            result = _poll_task(task_id, f"  {f['feed_type']}")
+            result = _poll_task(task_id, f"  {name}")
             print(f"  Done: {json.dumps(result)}")
             print()
     else:
-        print(f"Syncing feed {target}...")
+        print(f"Syncing connection {target}...")
         resp = _api_request(
             "POST",
-            f"/api/v1/calendar-feeds/{target}/sync",
+            f"/api/v1/sync/connection/{target}",
         )
         data = resp.json()
         task_id = data.get("task_id", "")
@@ -429,9 +438,9 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "status": ("Recent sync job overview", _cmd_status),
     "stats": ("Database statistics", _cmd_stats),
     "sync": ("Trigger a sync", _cmd_sync),
-    "feeds": ("List calendar feeds", _cmd_feeds),
-    "feed-add": ("Add Songkick feeds", _cmd_feed_add),
-    "feed-sync": ("Sync a calendar feed", _cmd_feed_sync),
+    "feeds": ("List calendar connections", _cmd_feeds),
+    "feed-add": ("Add calendar connection", _cmd_feed_add),
+    "feed-sync": ("Sync a calendar connection", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),

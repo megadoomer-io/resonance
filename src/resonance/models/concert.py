@@ -1,4 +1,4 @@
-"""Concert domain models: venues, events, artist candidates, attendance, and feeds."""
+"""Concert domain models: venues, events, artist candidates, and attendance."""
 
 from __future__ import annotations
 
@@ -181,37 +181,4 @@ class UserEventAttendance(base_module.TimestampMixin, base_module.Base):
     )
     source_service: orm.Mapped[types_module.ServiceType] = orm.mapped_column(
         sa.Enum(types_module.ServiceType, native_enum=False), nullable=False
-    )
-
-
-class UserCalendarFeed(base_module.TimestampMixin, base_module.Base):
-    """A user-configured calendar feed URL for importing events."""
-
-    __tablename__ = "user_calendar_feeds"
-    __table_args__ = (
-        sa.UniqueConstraint(
-            "user_id",
-            "url",
-            name="uq_user_calendar_feeds_user_url",
-        ),
-    )
-
-    id: orm.Mapped[uuid.UUID] = orm.mapped_column(
-        sa.Uuid, primary_key=True, default=uuid.uuid4
-    )
-    user_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
-        sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    feed_type: orm.Mapped[types_module.FeedType] = orm.mapped_column(
-        sa.Enum(types_module.FeedType, native_enum=False), nullable=False
-    )
-    url: orm.Mapped[str] = orm.mapped_column(sa.String(2048), nullable=False)
-    label: orm.Mapped[str | None] = orm.mapped_column(
-        sa.String(256), nullable=True, default=None
-    )
-    last_synced_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
-        sa.DateTime(timezone=True), nullable=True, default=None
-    )
-    enabled: orm.Mapped[bool] = orm.mapped_column(
-        sa.Boolean, nullable=False, default=True
     )

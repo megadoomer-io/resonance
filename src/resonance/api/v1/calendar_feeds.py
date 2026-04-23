@@ -1,4 +1,9 @@
-"""Calendar feed management API routes."""
+"""Calendar feed management API routes.
+
+These endpoints manage Songkick and iCal connections via the unified
+ServiceConnection model.  The ``/songkick/lookup`` endpoint validates
+a Songkick username without creating a connection.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +17,9 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import structlog
 
+import resonance.connectors.songkick as songkick_module
 import resonance.dependencies as deps_module
-import resonance.models.concert as concert_models
-import resonance.models.task as task_models
+import resonance.models.user as user_models
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -28,24 +33,25 @@ router = fastapi.APIRouter(prefix="/calendar-feeds", tags=["calendar-feeds"])
 
 
 class SongkickFeedRequest(pydantic.BaseModel):
-    """Request body for creating Songkick calendar feeds."""
+    """Request body for creating a Songkick connection."""
 
     username: str
 
 
 class GenericFeedRequest(pydantic.BaseModel):
-    """Request body for creating a generic iCal feed."""
+    """Request body for creating a generic iCal connection."""
 
     url: str
     label: str | None = None
 
 
-class FeedResponse(pydantic.BaseModel):
-    """Response model for a calendar feed."""
+class ConnectionResponse(pydantic.BaseModel):
+    """Response model for a connection."""
 
     id: str
-    feed_type: str
-    url: str
+    service_type: str
+    external_user_id: str | None
+    url: str | None
     label: str | None
     enabled: bool
     last_synced_at: str | None
@@ -64,23 +70,24 @@ class SongkickLookupResponse(pydantic.BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _feed_to_response(feed: concert_models.UserCalendarFeed) -> FeedResponse:
-    """Convert a UserCalendarFeed ORM object to a FeedResponse.
+def _connection_to_response(conn: user_models.ServiceConnection) -> ConnectionResponse:
+    """Convert a ServiceConnection to a ConnectionResponse.
 
     Args:
-        feed: The ORM model instance.
+        conn: The ORM model instance.
 
     Returns:
-        A serialisable FeedResponse.
+        A serialisable ConnectionResponse.
     """
-    return FeedResponse(
-        id=str(feed.id),
-        feed_type=str(feed.feed_type),
-        url=feed.url,
-        label=feed.label,
-        enabled=feed.enabled if feed.enabled is not None else True,
+    return ConnectionResponse(
+        id=str(conn.id),
+        service_type=str(conn.service_type),
+        external_user_id=conn.external_user_id,
+        url=conn.url,
+        label=conn.label,
+        enabled=conn.enabled if conn.enabled is not None else True,
         last_synced_at=(
-            feed.last_synced_at.isoformat() if feed.last_synced_at is not None else None
+            conn.last_synced_at.isoformat() if conn.last_synced_at is not None else None
         ),
     )
 
@@ -92,18 +99,18 @@ def _feed_to_response(feed: concert_models.UserCalendarFeed) -> FeedResponse:
 
 @router.post(
     "/songkick",
-    summary="Add Songkick calendar feeds",
+    summary="Add Songkick connection",
     description=(
-        "Creates attendance and tracked-artist calendar feeds "
-        "for the given Songkick username. Requires session authentication."
+        "Creates a ServiceConnection for the given Songkick username. "
+        "Requires session authentication."
     ),
 )
-async def add_songkick_feeds(
+async def add_songkick_connection(
     body: SongkickFeedRequest,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> list[FeedResponse]:
-    """Create two Songkick calendar feeds (attendance + tracked artist).
+) -> ConnectionResponse:
+    """Create a Songkick ServiceConnection.
 
     Args:
         body: Request containing the Songkick username.
@@ -111,46 +118,34 @@ async def add_songkick_feeds(
         db: The async database session.
 
     Returns:
-        A list of two created FeedResponse objects.
+        The created ConnectionResponse.
 
     Raises:
-        HTTPException: 409 if feeds already exist for these URLs.
+        HTTPException: 409 if a connection already exists for this username.
     """
-    base = f"https://www.songkick.com/users/{body.username}/calendars.ics"
-    feed_specs: list[tuple[types_module.FeedType, str]] = [
-        (types_module.FeedType.SONGKICK_ATTENDANCE, f"{base}?filter=attendance"),
-        (
-            types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-            f"{base}?filter=tracked_artist",
-        ),
-    ]
-
-    # Check for duplicates
-    for _feed_type, url in feed_specs:
-        stmt = sa.select(concert_models.UserCalendarFeed).where(
-            concert_models.UserCalendarFeed.user_id == user_id,
-            concert_models.UserCalendarFeed.url == url,
+    # Check for duplicate
+    stmt = sa.select(user_models.ServiceConnection).where(
+        user_models.ServiceConnection.user_id == user_id,
+        user_models.ServiceConnection.service_type == types_module.ServiceType.SONGKICK,
+        user_models.ServiceConnection.external_user_id == body.username,
+    )
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is not None:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Songkick connection already exists for this username",
         )
-        result = await db.execute(stmt)
-        if result.scalar_one_or_none() is not None:
-            raise fastapi.HTTPException(
-                status_code=409,
-                detail="Songkick feeds already exist for this username",
-            )
 
-    # Create feeds
-    feeds: list[concert_models.UserCalendarFeed] = []
-    for feed_type, url in feed_specs:
-        feed = concert_models.UserCalendarFeed(
-            user_id=user_id,
-            feed_type=feed_type,
-            url=url,
-        )
-        db.add(feed)
-        feeds.append(feed)
-
+    conn = user_models.ServiceConnection(
+        user_id=user_id,
+        service_type=types_module.ServiceType.SONGKICK,
+        external_user_id=body.username,
+        enabled=True,
+    )
+    db.add(conn)
     await db.commit()
-    return [_feed_to_response(f) for f in feeds]
+
+    return _connection_to_response(conn)
 
 
 @router.post(
@@ -181,12 +176,12 @@ async def lookup_songkick_user(
         HTTPException: 404 if Songkick user not found, 502 if Songkick
             is unreachable.
     """
-    base = f"https://www.songkick.com/users/{body.username}/calendars.ics"
+    urls = songkick_module.derive_songkick_urls(body.username)
     async with httpx.AsyncClient() as client:
         try:
-            att_resp = await client.get(f"{base}?filter=attendance")
+            att_resp = await client.get(urls[0])
             att_resp.raise_for_status()
-            trk_resp = await client.get(f"{base}?filter=tracked_artist")
+            trk_resp = await client.get(urls[1])
             trk_resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -204,18 +199,18 @@ async def lookup_songkick_user(
 
 @router.post(
     "/ical",
-    summary="Add generic iCal feed",
+    summary="Add generic iCal connection",
     description=(
-        "Creates a generic iCal calendar feed from a URL. "
+        "Creates a generic iCal ServiceConnection from a URL. "
         "Requires session authentication."
     ),
 )
-async def add_generic_feed(
+async def add_generic_connection(
     body: GenericFeedRequest,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> FeedResponse:
-    """Create a generic iCal calendar feed.
+) -> ConnectionResponse:
+    """Create a generic iCal ServiceConnection.
 
     Args:
         body: Request containing the feed URL and optional label.
@@ -223,124 +218,87 @@ async def add_generic_feed(
         db: The async database session.
 
     Returns:
-        The created FeedResponse.
+        The created ConnectionResponse.
 
     Raises:
-        HTTPException: 409 if a feed already exists for this URL.
+        HTTPException: 409 if a connection already exists for this URL.
     """
     # Check for duplicate
-    stmt = sa.select(concert_models.UserCalendarFeed).where(
-        concert_models.UserCalendarFeed.user_id == user_id,
-        concert_models.UserCalendarFeed.url == body.url,
+    stmt = sa.select(user_models.ServiceConnection).where(
+        user_models.ServiceConnection.user_id == user_id,
+        user_models.ServiceConnection.service_type == types_module.ServiceType.ICAL,
+        user_models.ServiceConnection.url == body.url,
     )
     result = await db.execute(stmt)
     if result.scalar_one_or_none() is not None:
         raise fastapi.HTTPException(
             status_code=409,
-            detail="A feed already exists for this URL",
+            detail="A connection already exists for this URL",
         )
 
-    feed = concert_models.UserCalendarFeed(
+    conn = user_models.ServiceConnection(
         user_id=user_id,
-        feed_type=types_module.FeedType.ICAL_GENERIC,
+        service_type=types_module.ServiceType.ICAL,
         url=body.url,
         label=body.label,
+        enabled=True,
     )
-    db.add(feed)
+    db.add(conn)
     await db.commit()
 
-    return _feed_to_response(feed)
+    return _connection_to_response(conn)
 
 
 @router.get(
     "",
-    summary="List calendar feeds",
+    summary="List calendar connections",
     description=(
-        "Returns all calendar feeds for the authenticated user. "
-        "Requires session authentication."
+        "Returns all calendar-related connections (Songkick, iCal) "
+        "for the authenticated user. Requires session authentication."
     ),
 )
-async def list_feeds(
+async def list_connections(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> list[FeedResponse]:
-    """List all calendar feeds for the authenticated user.
+) -> list[ConnectionResponse]:
+    """List calendar connections for the authenticated user.
 
     Args:
         user_id: The authenticated user's ID.
         db: The async database session.
 
     Returns:
-        A list of FeedResponse objects.
+        A list of ConnectionResponse objects.
     """
-    stmt = sa.select(concert_models.UserCalendarFeed).where(
-        concert_models.UserCalendarFeed.user_id == user_id,
+    stmt = sa.select(user_models.ServiceConnection).where(
+        user_models.ServiceConnection.user_id == user_id,
+        user_models.ServiceConnection.service_type.in_(
+            [types_module.ServiceType.SONGKICK, types_module.ServiceType.ICAL]
+        ),
     )
     result = await db.execute(stmt)
-    feeds = result.scalars().all()
-    return [_feed_to_response(feed) for feed in feeds]
+    connections = result.scalars().all()
+    return [_connection_to_response(c) for c in connections]
 
 
 @router.delete(
     "/songkick/{username}",
-    summary="Delete Songkick feeds by username",
+    summary="Delete Songkick connection by username",
     description=(
-        "Deletes all Songkick calendar feeds for the given username. "
-        "Returns 404 if no feeds are found. "
+        "Deletes the Songkick connection for the given username. "
+        "Returns 404 if no connection is found. "
         "Requires session authentication."
     ),
 )
-async def delete_songkick_feeds(
+async def delete_songkick_connection(
     username: str,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
-    """Delete all Songkick calendar feeds for a given username.
+    """Delete a Songkick connection by username.
 
     Args:
-        username: The Songkick username whose feeds to delete.
-        user_id: The authenticated user's ID.
-        db: The async database session.
-
-    Returns:
-        A dict with status "deleted" and the count of deleted feeds.
-
-    Raises:
-        HTTPException: 404 if no feeds found for this username.
-    """
-    base = f"https://www.songkick.com/users/{username}/calendars.ics"
-    stmt = sa.select(concert_models.UserCalendarFeed).where(
-        concert_models.UserCalendarFeed.user_id == user_id,
-        concert_models.UserCalendarFeed.url.like(f"{base}%"),
-    )
-    result = await db.execute(stmt)
-    feeds = list(result.scalars().all())
-    if not feeds:
-        raise fastapi.HTTPException(404, "No Songkick feeds for this username")
-    for feed in feeds:
-        await db.delete(feed)
-    await db.commit()
-    return {"status": "deleted", "count": str(len(feeds))}
-
-
-@router.delete(
-    "/{feed_id}",
-    summary="Delete calendar feed",
-    description=(
-        "Deletes a calendar feed. Returns 404 if feed is not found "
-        "or not owned by the authenticated user. "
-        "Requires session authentication."
-    ),
-)
-async def delete_feed(
-    feed_id: uuid.UUID,
-    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
-    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> dict[str, str]:
-    """Delete a calendar feed owned by the authenticated user.
-
-    Args:
-        feed_id: The UUID of the feed to delete.
+        username: The Songkick username whose connection to delete.
         user_id: The authenticated user's ID.
         db: The async database session.
 
@@ -348,106 +306,63 @@ async def delete_feed(
         A dict with status "deleted".
 
     Raises:
-        HTTPException: 404 if feed not found or not owned by user.
+        HTTPException: 404 if no connection found for this username.
     """
-    stmt = sa.select(concert_models.UserCalendarFeed).where(
-        concert_models.UserCalendarFeed.id == feed_id,
-        concert_models.UserCalendarFeed.user_id == user_id,
+    stmt = sa.select(user_models.ServiceConnection).where(
+        user_models.ServiceConnection.user_id == user_id,
+        user_models.ServiceConnection.service_type == types_module.ServiceType.SONGKICK,
+        user_models.ServiceConnection.external_user_id == username,
     )
     result = await db.execute(stmt)
-    feed = result.scalar_one_or_none()
-
-    if feed is None:
-        raise fastapi.HTTPException(status_code=404, detail="Feed not found")
-
-    await db.delete(feed)
+    conn = result.scalar_one_or_none()
+    if conn is None:
+        raise fastapi.HTTPException(404, "No Songkick connection for this username")
+    await db.delete(conn)
     await db.commit()
-
     return {"status": "deleted"}
 
 
-@router.post(
-    "/{feed_id}/sync",
-    summary="Trigger calendar feed sync",
+@router.delete(
+    "/{connection_id}",
+    summary="Delete calendar connection",
     description=(
-        "Creates a task and enqueues a background job to sync a calendar feed. "
-        "Returns 409 if a sync is already running for this feed. "
+        "Deletes a calendar connection. Returns 404 if not found "
+        "or not owned by the authenticated user. "
         "Requires session authentication."
     ),
 )
-async def trigger_feed_sync(
-    feed_id: uuid.UUID,
-    request: fastapi.Request,
+async def delete_connection(
+    connection_id: uuid.UUID,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
-    """Trigger a sync for a calendar feed.
+    """Delete a calendar connection owned by the authenticated user.
 
     Args:
-        feed_id: The UUID of the feed to sync.
-        request: The FastAPI request object.
+        connection_id: The UUID of the connection to delete.
         user_id: The authenticated user's ID.
         db: The async database session.
 
     Returns:
-        A dict with status "started" and the task_id.
+        A dict with status "deleted".
 
     Raises:
-        HTTPException: 404 if feed not found or not owned by user,
-            409 if sync already running.
+        HTTPException: 404 if connection not found or not owned by user.
     """
-    # Find feed
-    stmt = sa.select(concert_models.UserCalendarFeed).where(
-        concert_models.UserCalendarFeed.id == feed_id,
-        concert_models.UserCalendarFeed.user_id == user_id,
+    stmt = sa.select(user_models.ServiceConnection).where(
+        user_models.ServiceConnection.id == connection_id,
+        user_models.ServiceConnection.user_id == user_id,
+        user_models.ServiceConnection.service_type.in_(
+            [types_module.ServiceType.SONGKICK, types_module.ServiceType.ICAL]
+        ),
     )
     result = await db.execute(stmt)
-    feed = result.scalar_one_or_none()
+    conn = result.scalar_one_or_none()
 
-    if feed is None:
-        raise fastapi.HTTPException(status_code=404, detail="Feed not found")
+    if conn is None:
+        raise fastapi.HTTPException(status_code=404, detail="Connection not found")
 
-    # Check for already-running sync
-    running_stmt = sa.select(task_models.Task).where(
-        task_models.Task.user_id == user_id,
-        task_models.Task.task_type == types_module.TaskType.CALENDAR_SYNC,
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-                types_module.SyncStatus.DEFERRED,
-            ]
-        ),
-        task_models.Task.params["feed_id"].as_string() == str(feed_id),
-    )
-    running_result = await db.execute(running_stmt)
-    existing_job = running_result.scalar_one_or_none()
-
-    if existing_job is not None:
-        raise fastapi.HTTPException(
-            status_code=409,
-            detail="A sync is already running for this feed",
-        )
-
-    # Create Task — uses feed_id in params for legacy compat (this endpoint
-    # will be replaced by the unified sync trigger in Task 12).
-    task = task_models.Task(
-        user_id=user_id,
-        task_type=types_module.TaskType.CALENDAR_SYNC,
-        status=types_module.SyncStatus.PENDING,
-        params={"feed_id": str(feed_id)},
-    )
-    db.add(task)
+    await db.delete(conn)
     await db.commit()
 
-    # Enqueue arq job — use task.id for dedup (not feed_id) to avoid
-    # collisions when the same feed is synced multiple times.
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "sync_calendar_feed",
-        str(feed_id),
-        str(task.id),
-        _job_id=f"sync_calendar_feed:{task.id}",
-    )
-
-    return {"status": "started", "task_id": str(task.id)}
+    return {"status": "deleted"}

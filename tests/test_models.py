@@ -100,20 +100,6 @@ class TestTaskType:
         assert len(types_module.TaskType) == 5
 
 
-class TestFeedType:
-    """Verify FeedType enum values."""
-
-    def test_values(self) -> None:
-        assert types_module.FeedType.SONGKICK_ATTENDANCE == "songkick_attendance"
-        assert (
-            types_module.FeedType.SONGKICK_TRACKED_ARTIST == "songkick_tracked_artist"
-        )
-        assert types_module.FeedType.ICAL_GENERIC == "ical_generic"
-
-    def test_feed_type_count(self) -> None:
-        assert len(types_module.FeedType) == 3
-
-
 class TestAttendanceStatus:
     """Verify AttendanceStatus enum values."""
 
@@ -231,7 +217,6 @@ class TestServiceConnectionModel:
             "label",
             "enabled",
             "connected_at",
-            "last_used_at",
             "last_synced_at",
             "sync_watermark",
             "created_at",
@@ -853,54 +838,6 @@ class TestUserEventAttendanceModel:
         assert expected in uc_col_sets
 
 
-class TestUserCalendarFeedModel:
-    """Tests for the UserCalendarFeed model."""
-
-    def test_table_name(self) -> None:
-        assert concert_module.UserCalendarFeed.__tablename__ == "user_calendar_feeds"
-
-    def test_expected_columns(self) -> None:
-        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
-        col_names = {c.name for c in table.columns}
-        assert col_names >= {
-            "id",
-            "user_id",
-            "feed_type",
-            "url",
-            "label",
-            "last_synced_at",
-            "enabled",
-            "created_at",
-            "updated_at",
-        }
-
-    def test_user_id_fk(self) -> None:
-        col = _get_column(
-            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
-            "user_id",
-        )
-        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
-        assert "users.id" in fk_targets
-
-    def test_feed_type_is_enum(self) -> None:
-        col = _get_column(
-            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
-            "feed_type",
-        )
-        assert isinstance(col.type, sa.Enum)
-
-    def test_unique_constraint(self) -> None:
-        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
-        unique_constraints = [
-            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
-        ]
-        uc_col_sets = [
-            frozenset(col.name for col in uc.columns) for uc in unique_constraints
-        ]
-        expected = frozenset({"user_id", "url"})
-        assert expected in uc_col_sets
-
-
 # ---------------------------------------------------------------------------
 # Package re-exports
 # ---------------------------------------------------------------------------
@@ -950,6 +887,3 @@ class TestModelsPackageExports:
 
     def test_user_event_attendance_exported(self) -> None:
         assert models_module.UserEventAttendance is concert_module.UserEventAttendance
-
-    def test_user_calendar_feed_exported(self) -> None:
-        assert models_module.UserCalendarFeed is concert_module.UserCalendarFeed

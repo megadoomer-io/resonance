@@ -1,4 +1,4 @@
-"""Tests for calendar feed API routes."""
+"""Tests for calendar feed API routes (unified ServiceConnection model)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ import pytest
 import resonance.config as config_module
 import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
-import resonance.models.concert as concert_models
-import resonance.models.task as task_models
+import resonance.models.user as user_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -211,24 +210,26 @@ def _make_session_cookie(secret_key: str, session_id: str = "test-session-id") -
     return signer.sign(session_id).decode("utf-8")
 
 
-def _make_fake_feed(
+def _make_fake_connection(
     user_id: uuid.UUID,
-    feed_type: types_module.FeedType = types_module.FeedType.SONGKICK_ATTENDANCE,
-    url: str = "https://www.songkick.com/users/mike123/calendars.ics?filter=attendance",
+    service_type: types_module.ServiceType = types_module.ServiceType.SONGKICK,
+    external_user_id: str | None = "mike123",
+    url: str | None = None,
     label: str | None = None,
     enabled: bool = True,
     last_synced_at: datetime.datetime | None = None,
 ) -> MagicMock:
-    """Create a fake UserCalendarFeed for testing."""
-    feed = MagicMock(spec=concert_models.UserCalendarFeed)
-    feed.id = uuid.uuid4()
-    feed.user_id = user_id
-    feed.feed_type = feed_type
-    feed.url = url
-    feed.label = label
-    feed.enabled = enabled
-    feed.last_synced_at = last_synced_at
-    return feed
+    """Create a fake ServiceConnection for testing."""
+    conn = MagicMock(spec=user_models.ServiceConnection)
+    conn.id = uuid.uuid4()
+    conn.user_id = user_id
+    conn.service_type = service_type
+    conn.external_user_id = external_user_id
+    conn.url = url
+    conn.label = label
+    conn.enabled = enabled
+    conn.last_synced_at = last_synced_at
+    return conn
 
 
 @pytest.fixture
@@ -240,7 +241,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         yield c
 
 
-class TestPostSongkickFeeds:
+class TestPostSongkickConnection:
     """Tests for POST /api/v1/calendar-feeds/songkick."""
 
     async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
@@ -250,12 +251,12 @@ class TestPostSongkickFeeds:
         )
         assert response.status_code == 401
 
-    async def test_creates_two_feeds(self) -> None:
-        """Creates attendance and tracked_artist feeds for the given username."""
+    async def test_creates_connection(self) -> None:
+        """Creates a Songkick ServiceConnection for the given username."""
         user_id = uuid.uuid4()
         db_session = FakeAsyncSession()
-        # First two queries: check for existing feeds -> None, None
-        db_session.set_execute_results([FakeScalarResult(None), FakeScalarResult(None)])
+        # Check for existing connection -> None
+        db_session.set_execute_results([FakeScalarResult(None)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -271,32 +272,17 @@ class TestPostSongkickFeeds:
 
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 2
-        assert len(db_session._added) == 2
-
-        # Verify feed types
-        feed_types = {item["feed_type"] for item in data}
-        assert feed_types == {"songkick_attendance", "songkick_tracked_artist"}
-
-        # Verify URLs
-        urls = {item["url"] for item in data}
-        assert (
-            "https://www.songkick.com/users/mike123/calendars.ics?filter=attendance"
-            in urls
-        )
-        assert (
-            "https://www.songkick.com/users/mike123/calendars.ics?filter=tracked_artist"
-            in urls
-        )
+        assert data["service_type"] == "songkick"
+        assert data["external_user_id"] == "mike123"
+        assert len(db_session._added) == 1
 
     async def test_duplicate_returns_409(self) -> None:
-        """Returns 409 when feeds already exist for this user+URL."""
+        """Returns 409 when connection already exists for this user+username."""
         user_id = uuid.uuid4()
-        existing_feed = _make_fake_feed(user_id)
+        existing = _make_fake_connection(user_id)
 
         db_session = FakeAsyncSession()
-        # First query finds an existing feed
-        db_session.set_execute_results([FakeScalarResult(existing_feed)])
+        db_session.set_execute_results([FakeScalarResult(existing)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -311,10 +297,10 @@ class TestPostSongkickFeeds:
             )
 
         assert response.status_code == 409
-        assert "already exist" in response.json()["detail"].lower()
+        assert "already exists" in response.json()["detail"].lower()
 
 
-class TestPostGenericFeed:
+class TestPostGenericConnection:
     """Tests for POST /api/v1/calendar-feeds/ical."""
 
     async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
@@ -324,11 +310,11 @@ class TestPostGenericFeed:
         )
         assert response.status_code == 401
 
-    async def test_creates_one_feed(self) -> None:
-        """Creates a single generic iCal feed."""
+    async def test_creates_one_connection(self) -> None:
+        """Creates a single iCal ServiceConnection."""
         user_id = uuid.uuid4()
         db_session = FakeAsyncSession()
-        # Check for existing feed -> None
+        # Check for existing -> None
         db_session.set_execute_results([FakeScalarResult(None)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
@@ -345,23 +331,24 @@ class TestPostGenericFeed:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["feed_type"] == "ical_generic"
+        assert data["service_type"] == "ical"
         assert data["url"] == "https://example.com/cal.ics"
         assert data["label"] == "My Calendar"
         assert data["enabled"] is True
         assert len(db_session._added) == 1
 
     async def test_duplicate_returns_409(self) -> None:
-        """Returns 409 when feed with same URL already exists for this user."""
+        """Returns 409 when connection with same URL already exists."""
         user_id = uuid.uuid4()
-        existing_feed = _make_fake_feed(
+        existing = _make_fake_connection(
             user_id,
-            feed_type=types_module.FeedType.ICAL_GENERIC,
+            service_type=types_module.ServiceType.ICAL,
+            external_user_id=None,
             url="https://example.com/cal.ics",
         )
 
         db_session = FakeAsyncSession()
-        db_session.set_execute_results([FakeScalarResult(existing_feed)])
+        db_session.set_execute_results([FakeScalarResult(existing)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -379,30 +366,31 @@ class TestPostGenericFeed:
         assert "already exists" in response.json()["detail"].lower()
 
 
-class TestListCalendarFeeds:
+class TestListCalendarConnections:
     """Tests for GET /api/v1/calendar-feeds."""
 
     async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
         response = await client.get("/api/v1/calendar-feeds")
         assert response.status_code == 401
 
-    async def test_returns_user_feeds(self) -> None:
-        """Lists feeds for the authenticated user."""
+    async def test_returns_user_connections(self) -> None:
+        """Lists calendar connections for the authenticated user."""
         user_id = uuid.uuid4()
-        feed1 = _make_fake_feed(
+        conn1 = _make_fake_connection(
             user_id,
-            feed_type=types_module.FeedType.SONGKICK_ATTENDANCE,
-            url="https://songkick.com/users/test/calendars.ics?filter=attendance",
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="test",
         )
-        feed2 = _make_fake_feed(
+        conn2 = _make_fake_connection(
             user_id,
-            feed_type=types_module.FeedType.ICAL_GENERIC,
+            service_type=types_module.ServiceType.ICAL,
+            external_user_id=None,
             url="https://example.com/cal.ics",
             label="My Calendar",
         )
 
         db_session = FakeAsyncSession()
-        scalars_result = FakeScalarsResult([feed1, feed2])
+        scalars_result = FakeScalarsResult([conn1, conn2])
         execute_result = MagicMock()
         execute_result.scalars.return_value = scalars_result
         db_session.set_execute_results([execute_result])
@@ -421,7 +409,7 @@ class TestListCalendarFeeds:
         assert len(data) == 2
 
     async def test_returns_empty_list(self) -> None:
-        """Returns empty list when user has no feeds."""
+        """Returns empty list when user has no calendar connections."""
         user_id = uuid.uuid4()
 
         db_session = FakeAsyncSession()
@@ -443,21 +431,21 @@ class TestListCalendarFeeds:
         assert response.json() == []
 
 
-class TestDeleteCalendarFeed:
-    """Tests for DELETE /api/v1/calendar-feeds/{feed_id}."""
+class TestDeleteCalendarConnection:
+    """Tests for DELETE /api/v1/calendar-feeds/{connection_id}."""
 
     async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
-        feed_id = uuid.uuid4()
-        response = await client.delete(f"/api/v1/calendar-feeds/{feed_id}")
+        conn_id = uuid.uuid4()
+        response = await client.delete(f"/api/v1/calendar-feeds/{conn_id}")
         assert response.status_code == 401
 
-    async def test_deletes_owned_feed(self) -> None:
-        """Deletes a feed owned by the authenticated user."""
+    async def test_deletes_owned_connection(self) -> None:
+        """Deletes a connection owned by the authenticated user."""
         user_id = uuid.uuid4()
-        feed = _make_fake_feed(user_id)
+        conn = _make_fake_connection(user_id)
 
         db_session = FakeAsyncSession()
-        db_session.set_execute_results([FakeScalarResult(feed)])
+        db_session.set_execute_results([FakeScalarResult(conn)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -466,14 +454,14 @@ class TestDeleteCalendarFeed:
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
-            response = await c.delete(f"/api/v1/calendar-feeds/{feed.id}")
+            response = await c.delete(f"/api/v1/calendar-feeds/{conn.id}")
 
         assert response.status_code == 200
         assert response.json() == {"status": "deleted"}
         assert len(db_session._deleted) == 1
 
     async def test_not_found_returns_404(self) -> None:
-        """Returns 404 when feed doesn't exist or isn't owned by user."""
+        """Returns 404 when connection doesn't exist or isn't owned by user."""
         user_id = uuid.uuid4()
 
         db_session = FakeAsyncSession()
@@ -486,38 +474,26 @@ class TestDeleteCalendarFeed:
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test", cookies={"session_id": cookie}
         ) as c:
-            feed_id = uuid.uuid4()
-            response = await c.delete(f"/api/v1/calendar-feeds/{feed_id}")
+            conn_id = uuid.uuid4()
+            response = await c.delete(f"/api/v1/calendar-feeds/{conn_id}")
 
         assert response.status_code == 404
 
 
-class TestDeleteSongkickFeeds:
+class TestDeleteSongkickConnection:
     """Tests for DELETE /api/v1/calendar-feeds/songkick/{username}."""
 
     async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
         response = await client.delete("/api/v1/calendar-feeds/songkick/mike123")
         assert response.status_code == 401
 
-    async def test_deletes_both_feeds(self) -> None:
-        """Deletes both Songkick feeds for the given username and returns count."""
+    async def test_deletes_connection(self) -> None:
+        """Deletes the Songkick connection for the given username."""
         user_id = uuid.uuid4()
-        feed1 = _make_fake_feed(
-            user_id,
-            feed_type=types_module.FeedType.SONGKICK_ATTENDANCE,
-            url="https://www.songkick.com/users/mike123/calendars.ics?filter=attendance",
-        )
-        feed2 = _make_fake_feed(
-            user_id,
-            feed_type=types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-            url="https://www.songkick.com/users/mike123/calendars.ics?filter=tracked_artist",
-        )
+        conn = _make_fake_connection(user_id)
 
         db_session = FakeAsyncSession()
-        scalars_result = FakeScalarsResult([feed1, feed2])
-        execute_result = MagicMock()
-        execute_result.scalars.return_value = scalars_result
-        db_session.set_execute_results([execute_result])
+        db_session.set_execute_results([FakeScalarResult(conn)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -529,19 +505,15 @@ class TestDeleteSongkickFeeds:
             response = await c.delete("/api/v1/calendar-feeds/songkick/mike123")
 
         assert response.status_code == 200
-        data = response.json()
-        assert data == {"status": "deleted", "count": "2"}
-        assert len(db_session._deleted) == 2
+        assert response.json() == {"status": "deleted"}
+        assert len(db_session._deleted) == 1
 
     async def test_unknown_username_returns_404(self) -> None:
-        """Returns 404 when no feeds exist for the given username."""
+        """Returns 404 when no connection exists for the given username."""
         user_id = uuid.uuid4()
 
         db_session = FakeAsyncSession()
-        scalars_result = FakeScalarsResult([])
-        execute_result = MagicMock()
-        execute_result.scalars.return_value = scalars_result
-        db_session.set_execute_results([execute_result])
+        db_session.set_execute_results([FakeScalarResult(None)])
 
         application, _redis = _create_authenticated_app(user_id, db_session=db_session)
         settings = _make_settings()
@@ -553,119 +525,4 @@ class TestDeleteSongkickFeeds:
             response = await c.delete("/api/v1/calendar-feeds/songkick/unknownuser")
 
         assert response.status_code == 404
-        assert "no songkick feeds" in response.json()["detail"].lower()
-
-    async def test_only_deletes_matching_username(self) -> None:
-        """Only deletes feeds for the specified username, not other usernames."""
-        user_id = uuid.uuid4()
-        # Only the matching username's feed is returned by the query
-        feed1 = _make_fake_feed(
-            user_id,
-            feed_type=types_module.FeedType.SONGKICK_ATTENDANCE,
-            url="https://www.songkick.com/users/mike123/calendars.ics?filter=attendance",
-        )
-
-        db_session = FakeAsyncSession()
-        scalars_result = FakeScalarsResult([feed1])
-        execute_result = MagicMock()
-        execute_result.scalars.return_value = scalars_result
-        db_session.set_execute_results([execute_result])
-
-        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
-        settings = _make_settings()
-        cookie = _make_session_cookie(settings.session_secret_key)
-        transport = httpx.ASGITransport(app=application)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", cookies={"session_id": cookie}
-        ) as c:
-            response = await c.delete("/api/v1/calendar-feeds/songkick/mike123")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data == {"status": "deleted", "count": "1"}
-        # Only 1 feed was deleted (the DB query already filters by username)
-        assert len(db_session._deleted) == 1
-
-
-class TestSyncCalendarFeed:
-    """Tests for POST /api/v1/calendar-feeds/{feed_id}/sync."""
-
-    async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
-        feed_id = uuid.uuid4()
-        response = await client.post(f"/api/v1/calendar-feeds/{feed_id}/sync")
-        assert response.status_code == 401
-
-    async def test_triggers_sync(self) -> None:
-        """Creates a task and enqueues an arq job."""
-        user_id = uuid.uuid4()
-        feed = _make_fake_feed(user_id)
-
-        db_session = FakeAsyncSession()
-        # First query: find feed; Second: check for running sync -> None
-        db_session.set_execute_results([FakeScalarResult(feed), FakeScalarResult(None)])
-
-        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
-        settings = _make_settings()
-        cookie = _make_session_cookie(settings.session_secret_key)
-        transport = httpx.ASGITransport(app=application)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", cookies={"session_id": cookie}
-        ) as c:
-            response = await c.post(f"/api/v1/calendar-feeds/{feed.id}/sync")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "started"
-        assert "task_id" in data
-        assert len(db_session._added) == 1
-
-        # Verify arq job was enqueued
-        application.state.arq_redis.enqueue_job.assert_called_once()
-        call_args = application.state.arq_redis.enqueue_job.call_args
-        assert call_args[0][0] == "sync_calendar_feed"
-
-    async def test_feed_not_found_returns_404(self) -> None:
-        """Returns 404 when feed doesn't exist or isn't owned by user."""
-        user_id = uuid.uuid4()
-
-        db_session = FakeAsyncSession()
-        db_session.set_execute_results([FakeScalarResult(None)])
-
-        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
-        settings = _make_settings()
-        cookie = _make_session_cookie(settings.session_secret_key)
-        transport = httpx.ASGITransport(app=application)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", cookies={"session_id": cookie}
-        ) as c:
-            feed_id = uuid.uuid4()
-            response = await c.post(f"/api/v1/calendar-feeds/{feed_id}/sync")
-
-        assert response.status_code == 404
-
-    async def test_already_running_returns_409(self) -> None:
-        """Returns 409 when a sync is already in progress for this feed."""
-        user_id = uuid.uuid4()
-        feed = _make_fake_feed(user_id)
-
-        fake_running_task = MagicMock(spec=task_models.Task)
-        fake_running_task.id = uuid.uuid4()
-        fake_running_task.status = types_module.SyncStatus.RUNNING
-
-        db_session = FakeAsyncSession()
-        # First: find feed; Second: find running sync task
-        db_session.set_execute_results(
-            [FakeScalarResult(feed), FakeScalarResult(fake_running_task)]
-        )
-
-        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
-        settings = _make_settings()
-        cookie = _make_session_cookie(settings.session_secret_key)
-        transport = httpx.ASGITransport(app=application)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", cookies={"session_id": cookie}
-        ) as c:
-            response = await c.post(f"/api/v1/calendar-feeds/{feed.id}/sync")
-
-        assert response.status_code == 409
-        assert "already running" in response.json()["detail"].lower()
+        assert "no songkick connection" in response.json()["detail"].lower()
