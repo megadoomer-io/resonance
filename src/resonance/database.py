@@ -11,6 +11,7 @@ def create_async_engine(settings: config_module.Settings) -> sa_async.AsyncEngin
     return sa_async.create_async_engine(
         settings.database_url,
         echo=settings.debug,
+        pool_pre_ping=True,
     )
 
 
