@@ -18,9 +18,11 @@ import structlog
 
 import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
+import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
+import resonance.connectors.songkick as songkick_module
 import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
@@ -107,8 +109,10 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await session.commit()
                 return
 
-            # Look up connector
-            connector = wctx["connector_registry"].get(connection.service_type)
+            # Look up connector (must be a full BaseConnector for sync)
+            connector = wctx["connector_registry"].get_base_connector(
+                connection.service_type
+            )
             if connector is None:
                 task.status = types_module.SyncStatus.FAILED
                 task.error_message = f"No connector for {connection.service_type.value}"
@@ -238,7 +242,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             log.info("sync_range_started")
 
             strategy = wctx["strategies"].get(connection.service_type)
-            connector = connector_registry.get(connection.service_type)
+            connector = connector_registry.get_base_connector(connection.service_type)
             if strategy is None or connector is None:
                 raise RuntimeError(
                     f"No strategy/connector for {connection.service_type.value}"
@@ -797,6 +801,8 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     connector_registry.register(lastfm_module.LastFmConnector(settings=settings))
     connector_registry.register(test_connector_module.TestConnector())
+    connector_registry.register(songkick_module.SongkickConnector())
+    connector_registry.register(ical_module.ICalConnector())
 
     wctx["settings"] = settings
     wctx["engine"] = engine

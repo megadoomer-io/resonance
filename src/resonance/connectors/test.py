@@ -15,6 +15,15 @@ class TestConnector(base_module.BaseConnector):
         }
     )
 
+    @staticmethod
+    def connection_config() -> base_module.ConnectionConfig:
+        """Return the connection configuration for the test connector."""
+        return base_module.ConnectionConfig(
+            auth_type="oauth",
+            sync_function="plan_sync",
+            sync_style="incremental",
+        )
+
     def __init__(self) -> None:
         self._http_client = None
         self._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)

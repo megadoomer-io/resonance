@@ -37,6 +37,15 @@ class ListenBrainzConnector(base_module.BaseConnector):
         }
     )
 
+    @staticmethod
+    def connection_config() -> base_module.ConnectionConfig:
+        """Return the connection configuration for ListenBrainz."""
+        return base_module.ConnectionConfig(
+            auth_type="oauth",
+            sync_function="plan_sync",
+            sync_style="incremental",
+        )
+
     def __init__(self, settings: config_module.Settings) -> None:
         self._client_id = settings.musicbrainz_client_id
         self._client_secret = settings.musicbrainz_client_secret

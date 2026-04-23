@@ -43,7 +43,7 @@ def _get_connector(
 ) -> base_module.BaseConnector:
     """Get a connector from the registry, raising 404 if not found."""
     registry: registry_module.ConnectorRegistry = request.app.state.connector_registry
-    connector = registry.get(service_type)
+    connector = registry.get_base_connector(service_type)
     if connector is None:
         raise fastapi.HTTPException(
             status_code=404,
