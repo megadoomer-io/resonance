@@ -21,14 +21,14 @@
 </div>
 
 <h2>Connected Services</h2>
-{% if connections or songkick_accounts %}
+{% if connections %}
 <figure>
     <table>
         <thead>
             <tr>
                 <th>Service</th>
                 <th>Connected</th>
-                <th>Last Used</th>
+                <th>Last Synced</th>
                 <th>Actions</th>
             </tr>
         </thead>
@@ -36,8 +36,8 @@
             {% for conn in connections %}
             <tr>
                 <td>{{ conn.service_type.value | capitalize }}</td>
-                <td>{{ (conn.connected_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>{{ (conn.last_used_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if conn.last_used_at else 'Never' }}</td>
+                <td>{{ conn.external_user_id or conn.label or conn.url or '' }}</td>
+                <td>{{ (conn.last_synced_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if conn.last_synced_at else 'Never' }}</td>
                 <td>
                     {% set active_task = active_syncs.get(conn.id | string) %}
                     {% if active_task %}
@@ -56,25 +56,11 @@
                         >Cancel</button>
                     {% else %}
                     <button
+                        {% if conn.service_type.value in ('songkick', 'ical') %}
+                        hx-post="/api/v1/sync/{{ conn.id }}"
+                        {% else %}
                         hx-post="/api/v1/sync/{{ conn.service_type.value }}"
-                        hx-swap="none"
-                        hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
-                    >Sync Now</button>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-            {% for username, sk in songkick_accounts.items() %}
-            <tr>
-                <td>Songkick</td>
-                <td>{{ username }}</td>
-                <td>{{ (sk.last_synced_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if sk.last_synced_at else 'Never' }}</td>
-                <td>
-                    {% if active_feed_syncs.get(username) %}
-                    <span aria-busy="true">Syncing...</span>
-                    {% else %}
-                    <button
-                        hx-post="/partials/songkick-sync/{{ username }}"
+                        {% endif %}
                         hx-swap="none"
                         hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
                     >Sync Now</button>
