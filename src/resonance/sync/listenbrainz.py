@@ -65,6 +65,9 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             A list of TIME_RANGE task descriptors.
         """
         lb_connector = _cast_connector(connector)
+        assert connection.external_user_id is not None, (
+            "ListenBrainz connection requires an external_user_id"
+        )
         username = connection.external_user_id
 
         # Get listen count for progress tracking

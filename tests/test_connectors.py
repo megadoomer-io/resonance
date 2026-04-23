@@ -21,6 +21,14 @@ class FakeConnector(base_module.BaseConnector):
         self._http_client = None
         self._budget = ratelimit_module.RateLimitBudget()
 
+    @staticmethod
+    def connection_config() -> base_module.ConnectionConfig:
+        return base_module.ConnectionConfig(
+            auth_type="oauth",
+            sync_function="plan_sync",
+            sync_style="incremental",
+        )
+
     def get_auth_url(self, state: str) -> str:
         return f"https://fake.example.com/auth?state={state}"
 

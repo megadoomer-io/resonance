@@ -2,8 +2,12 @@
 
 import abc
 import asyncio
+import dataclasses
 import enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import httpx
 import pydantic
@@ -13,6 +17,16 @@ import resonance.connectors.ratelimit as ratelimit_module  # noqa: TC001 — use
 import resonance.types as types_module  # noqa: TC001 — Pydantic models need this at runtime
 
 logger = structlog.get_logger()
+
+
+@dataclasses.dataclass(frozen=True)
+class ConnectionConfig:
+    """Declares how a connector authenticates and syncs."""
+
+    auth_type: str  # "oauth", "username", "url"
+    sync_function: str  # arq job name
+    sync_style: str  # "incremental" or "full"
+    derive_urls: Callable[[str], list[str]] | None = None
 
 
 class RateLimitExceededError(Exception):
@@ -89,6 +103,12 @@ class BaseConnector(abc.ABC):
     def has_capability(self, capability: ConnectorCapability) -> bool:
         """Check whether this connector supports a given capability."""
         return capability in self.capabilities
+
+    @staticmethod
+    @abc.abstractmethod
+    def connection_config() -> ConnectionConfig:
+        """Return the connection configuration for this connector type."""
+        ...
 
     @abc.abstractmethod
     def get_auth_url(self, state: str) -> str:

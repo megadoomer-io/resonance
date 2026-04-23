@@ -8,7 +8,10 @@ import datetime
 import traceback
 import typing
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import collections.abc
 
 import arq
 import arq.connections as arq_connections
@@ -18,9 +21,11 @@ import structlog
 
 import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
+import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.connectors.registry as registry_module
+import resonance.connectors.songkick as songkick_module
 import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
@@ -30,12 +35,32 @@ import resonance.models.task as task_module
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.sync.lastfm as lastfm_sync
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
 import resonance.types as types_module
 
 logger = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# Orphan recovery dispatch map
+# ---------------------------------------------------------------------------
+# Maps each TaskType to (arq_job_name, args_builder). The args_builder
+# receives a Task and returns the positional args tuple for enqueue_job.
+
+_TASK_DISPATCH: dict[
+    types_module.TaskType,
+    tuple[str, collections.abc.Callable[[task_module.Task], tuple[str, ...]]],
+] = {
+    types_module.TaskType.SYNC_JOB: ("plan_sync", lambda t: (str(t.id),)),
+    types_module.TaskType.TIME_RANGE: ("sync_range", lambda t: (str(t.id),)),
+    types_module.TaskType.CALENDAR_SYNC: (
+        "sync_calendar_feed",
+        lambda t: (str(t.service_connection_id), str(t.id)),
+    ),
+    types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
+}
 
 
 class WorkerContext(typing.TypedDict):
@@ -99,20 +124,24 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Look up strategy
             strategy = wctx["strategies"].get(connection.service_type)
             if strategy is None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = (
-                    f"No sync strategy for {connection.service_type.value}"
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"No sync strategy for {connection.service_type.value}",
                 )
-                task.completed_at = datetime.datetime.now(datetime.UTC)
                 await session.commit()
                 return
 
-            # Look up connector
-            connector = wctx["connector_registry"].get(connection.service_type)
+            # Look up connector (must be a full BaseConnector for sync)
+            connector = wctx["connector_registry"].get_base_connector(
+                connection.service_type
+            )
             if connector is None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = f"No connector for {connection.service_type.value}"
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"No connector for {connection.service_type.value}",
+                )
                 await session.commit()
                 return
 
@@ -120,9 +149,11 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             descriptors = await strategy.plan(session, connection, connector)
 
             if not descriptors:
-                task.status = types_module.SyncStatus.COMPLETED
-                task.result = {"items_created": 0, "items_updated": 0}
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {"items_created": 0, "items_updated": 0},
+                )
                 await session.commit()
                 log.info("plan_sync_no_work")
                 return
@@ -177,9 +208,9 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Re-fetch task in case the session was invalidated
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
-                task_reload.status = types_module.SyncStatus.FAILED
-                task_reload.error_message = traceback.format_exc()
-                task_reload.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
                 await session.commit()
 
 
@@ -238,7 +269,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             log.info("sync_range_started")
 
             strategy = wctx["strategies"].get(connection.service_type)
-            connector = connector_registry.get(connection.service_type)
+            connector = connector_registry.get_base_connector(connection.service_type)
             if strategy is None or connector is None:
                 raise RuntimeError(
                     f"No strategy/connector for {connection.service_type.value}"
@@ -246,9 +277,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             try:
                 result = await strategy.execute(session, task, connector, connection)
-                task.status = types_module.SyncStatus.COMPLETED
-                task.result = result
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.complete_task(session, task, result)
 
                 # Write watermark back to connection
                 watermark = result.get("watermark")
@@ -298,9 +327,9 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             log.exception("sync_range_failed")
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
-                task_reload.status = types_module.SyncStatus.FAILED
-                task_reload.error_message = traceback.format_exc()
-                task_reload.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
                 await session.commit()
                 task = task_reload
 
@@ -361,9 +390,10 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             log = log.bind(operation=operation)
             log.info("bulk_job_started")
 
+            result: dict[str, object]
             if operation == "dedup_artists":
                 stats = await dedup_module.find_and_merge_duplicate_artists(session)
-                task.result = {
+                result = {
                     "artists_merged": stats.artists_merged,
                     "tracks_repointed": stats.tracks_repointed,
                     "relations_repointed": stats.artist_relations_repointed,
@@ -371,7 +401,7 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 }
             elif operation == "dedup_tracks":
                 stats = await dedup_module.find_and_merge_duplicate_tracks(session)
-                task.result = {
+                result = {
                     "tracks_merged": stats.tracks_merged,
                     "events_repointed": stats.events_repointed,
                     "relations_repointed": stats.track_relations_repointed,
@@ -381,24 +411,21 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 deleted = await dedup_module.delete_cross_service_duplicate_events(
                     session
                 )
-                task.result = {"events_deleted": deleted}
+                result = {"events_deleted": deleted}
             elif operation == "dedup_all":
-                task.result = {**await dedup_module.dedup_all(session)}
+                result = {**await dedup_module.dedup_all(session)}
             else:
                 msg = f"Unknown bulk operation: {operation}"
                 raise ValueError(msg)
 
-            task.status = types_module.SyncStatus.COMPLETED
-            task.completed_at = datetime.datetime.now(datetime.UTC)
+            await lifecycle_module.complete_task(session, task, result)
             await session.commit()
             log.info("bulk_job_completed", result=task.result)
 
         except Exception:
             log.exception("bulk_job_failed")
             if task is not None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = traceback.format_exc()
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
 
 
@@ -621,12 +648,6 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
-                task_module.Task.task_type.in_(
-                    [
-                        types_module.TaskType.SYNC_JOB,
-                        types_module.TaskType.TIME_RANGE,
-                    ]
-                ),
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
@@ -687,12 +708,6 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.RUNNING,
-                task_module.Task.task_type.in_(
-                    [
-                        types_module.TaskType.SYNC_JOB,
-                        types_module.TaskType.TIME_RANGE,
-                    ]
-                ),
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
@@ -752,17 +767,21 @@ async def _reenqueue_orphaned_tasks(
                         task_id=str(task.id),
                     )
                     continue
-                await arq_redis.enqueue_job(
-                    "plan_sync",
-                    str(task.id),
-                    _job_id=f"plan_sync:{task.id}",
+
+            dispatch = _TASK_DISPATCH.get(task.task_type)
+            if dispatch is None:
+                logger.warning(
+                    "no_dispatch_for_task_type",
+                    task_id=str(task.id),
+                    task_type=task.task_type.value,
                 )
-            else:
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(task.id),
-                    _job_id=f"sync_range:{task.id}",
-                )
+                continue
+
+            job_name, args_builder = dispatch
+            args = args_builder(task)
+            await arq_redis.enqueue_job(
+                job_name, *args, _job_id=f"{job_name}:{task.id}"
+            )
             enqueued += 1
 
         if enqueued:
@@ -797,6 +816,8 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     connector_registry.register(lastfm_module.LastFmConnector(settings=settings))
     connector_registry.register(test_connector_module.TestConnector())
+    connector_registry.register(songkick_module.SongkickConnector())
+    connector_registry.register(ical_module.ICalConnector())
 
     wctx["settings"] = settings
     wctx["engine"] = engine

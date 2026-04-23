@@ -115,8 +115,11 @@ Links a user to an external service account with encrypted OAuth credentials.
 | encrypted_refresh_token | Text | Nullable, Fernet-encrypted |
 | token_expires_at | DateTime(tz) | Nullable |
 | scopes | Text | Nullable, granted OAuth scopes |
+| url | String(2048) | Nullable, for URL-based connections (iCal) |
+| label | String(256) | Nullable, user-facing label |
+| enabled | Boolean | Whether the connection is active |
 | connected_at | DateTime(tz) | |
-| last_used_at | DateTime(tz) | Nullable |
+| last_synced_at | DateTime(tz) | Nullable |
 | sync_watermark | JSON | `{data_type: {key: value}}` for incremental sync |
 
 Unique constraint: `(user_id, service_type, external_user_id)`.

@@ -39,6 +39,15 @@ class LastFmConnector(base_module.BaseConnector):
         }
     )
 
+    @staticmethod
+    def connection_config() -> base_module.ConnectionConfig:
+        """Return the connection configuration for Last.fm."""
+        return base_module.ConnectionConfig(
+            auth_type="oauth",
+            sync_function="plan_sync",
+            sync_style="incremental",
+        )
+
     def __init__(self, settings: config_module.Settings) -> None:
         self._api_key = settings.lastfm_api_key
         self._shared_secret = settings.lastfm_shared_secret

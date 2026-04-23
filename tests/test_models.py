@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
 
 import sqlalchemy as sa
@@ -97,20 +98,6 @@ class TestTaskType:
 
     def test_task_type_count(self) -> None:
         assert len(types_module.TaskType) == 5
-
-
-class TestFeedType:
-    """Verify FeedType enum values."""
-
-    def test_values(self) -> None:
-        assert types_module.FeedType.SONGKICK_ATTENDANCE == "songkick_attendance"
-        assert (
-            types_module.FeedType.SONGKICK_TRACKED_ARTIST == "songkick_tracked_artist"
-        )
-        assert types_module.FeedType.ICAL_GENERIC == "ical_generic"
-
-    def test_feed_type_count(self) -> None:
-        assert len(types_module.FeedType) == 3
 
 
 class TestAttendanceStatus:
@@ -226,8 +213,11 @@ class TestServiceConnectionModel:
             "encrypted_refresh_token",
             "token_expires_at",
             "scopes",
+            "url",
+            "label",
+            "enabled",
             "connected_at",
-            "last_used_at",
+            "last_synced_at",
             "sync_watermark",
             "created_at",
             "updated_at",
@@ -273,6 +263,56 @@ class TestServiceConnectionModel:
         ]
         expected = frozenset({"user_id", "service_type", "external_user_id"})
         assert expected in uc_col_sets
+
+
+class TestServiceConnectionUnified:
+    """Tests for the unified ServiceConnection model (feed connection fields)."""
+
+    def test_feed_connection_no_token(self) -> None:
+        """A Songkick connection needs no access token."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+        )
+        assert conn.encrypted_access_token is None
+        assert conn.external_user_id == "mike123"
+
+    def test_ical_connection_with_url(self) -> None:
+        """An iCal connection uses url and label; external_user_id can be None."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.ICAL,
+            url="https://example.com/calendar.ics",
+            label="My concert calendar",
+        )
+        assert conn.external_user_id is None
+        assert conn.url == "https://example.com/calendar.ics"
+        assert conn.label == "My concert calendar"
+
+    def test_enabled_defaults_true(self) -> None:
+        """The enabled field defaults to True when not specified."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+        )
+        assert conn.enabled is True
+
+    def test_last_synced_at(self) -> None:
+        """last_synced_at persists when set."""
+        now = datetime.datetime.now(datetime.UTC)
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+            last_synced_at=now,
+        )
+        assert conn.last_synced_at == now
 
 
 # ---------------------------------------------------------------------------
@@ -798,54 +838,6 @@ class TestUserEventAttendanceModel:
         assert expected in uc_col_sets
 
 
-class TestUserCalendarFeedModel:
-    """Tests for the UserCalendarFeed model."""
-
-    def test_table_name(self) -> None:
-        assert concert_module.UserCalendarFeed.__tablename__ == "user_calendar_feeds"
-
-    def test_expected_columns(self) -> None:
-        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
-        col_names = {c.name for c in table.columns}
-        assert col_names >= {
-            "id",
-            "user_id",
-            "feed_type",
-            "url",
-            "label",
-            "last_synced_at",
-            "enabled",
-            "created_at",
-            "updated_at",
-        }
-
-    def test_user_id_fk(self) -> None:
-        col = _get_column(
-            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
-            "user_id",
-        )
-        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
-        assert "users.id" in fk_targets
-
-    def test_feed_type_is_enum(self) -> None:
-        col = _get_column(
-            concert_module.UserCalendarFeed.__table__,  # type: ignore[arg-type]
-            "feed_type",
-        )
-        assert isinstance(col.type, sa.Enum)
-
-    def test_unique_constraint(self) -> None:
-        table: sa.Table = concert_module.UserCalendarFeed.__table__  # type: ignore[assignment]
-        unique_constraints = [
-            c for c in table.constraints if isinstance(c, sa.UniqueConstraint)
-        ]
-        uc_col_sets = [
-            frozenset(col.name for col in uc.columns) for uc in unique_constraints
-        ]
-        expected = frozenset({"user_id", "url"})
-        assert expected in uc_col_sets
-
-
 # ---------------------------------------------------------------------------
 # Package re-exports
 # ---------------------------------------------------------------------------
@@ -895,6 +887,3 @@ class TestModelsPackageExports:
 
     def test_user_event_attendance_exported(self) -> None:
         assert models_module.UserEventAttendance is concert_module.UserEventAttendance
-
-    def test_user_calendar_feed_exported(self) -> None:
-        assert models_module.UserCalendarFeed is concert_module.UserCalendarFeed

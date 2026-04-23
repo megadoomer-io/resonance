@@ -136,14 +136,13 @@ async def dashboard(
         )
         latest_sync: task_models.Task | None = latest_sync_result.scalar_one_or_none()
 
-        # Build active sync lookup — single query for all connections
+        # Build active sync lookup — single query for all connection types
         conn_ids = [conn.id for conn in connections]
         active_syncs: dict[str, task_models.Task] = {}
         if conn_ids:
             active_stmt = sa.select(task_models.Task).where(
                 task_models.Task.user_id == user_uuid,
                 task_models.Task.service_connection_id.in_(conn_ids),
-                task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
                 task_models.Task.status.in_(
                     [
                         types_module.SyncStatus.PENDING,
@@ -155,68 +154,6 @@ async def dashboard(
             active_result = await db.execute(active_stmt)
             for active_task in active_result.scalars().all():
                 active_syncs[str(active_task.service_connection_id)] = active_task
-
-        # Query Songkick calendar feeds
-        sk_feeds_result = await db.execute(
-            sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.feed_type.in_(
-                    [
-                        types_module.FeedType.SONGKICK_ATTENDANCE,
-                        types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-                    ]
-                ),
-            )
-        )
-        sk_feeds = sk_feeds_result.scalars().all()
-
-        # Group by username
-        songkick_accounts: dict[str, dict[str, object]] = {}
-        for feed in sk_feeds:
-            parts = feed.url.split("/users/")
-            if len(parts) > 1:
-                username = parts[1].split("/")[0]
-                if username not in songkick_accounts:
-                    songkick_accounts[username] = {
-                        "username": username,
-                        "feed_ids": [],
-                        "last_synced_at": None,
-                    }
-                account = songkick_accounts[username]
-                feed_ids = account["feed_ids"]
-                assert isinstance(feed_ids, list)
-                feed_ids.append(str(feed.id))
-                if feed.last_synced_at is not None:
-                    current = account["last_synced_at"]
-                    if current is None or (
-                        isinstance(current, datetime.datetime)
-                        and feed.last_synced_at > current
-                    ):
-                        account["last_synced_at"] = feed.last_synced_at
-
-        # Check for active calendar sync tasks
-        active_feed_syncs: dict[str, bool] = {}
-        if sk_feeds:
-            cal_sync_result = await db.execute(
-                sa.select(task_models.Task).where(
-                    task_models.Task.user_id == user_uuid,
-                    task_models.Task.task_type == types_module.TaskType.CALENDAR_SYNC,
-                    task_models.Task.status.in_(
-                        [
-                            types_module.SyncStatus.PENDING,
-                            types_module.SyncStatus.RUNNING,
-                        ]
-                    ),
-                )
-            )
-            for task in cal_sync_result.scalars().all():
-                task_feed_id = (task.params or {}).get("feed_id", "")
-                # Find which username this feed belongs to
-                for uname, data in songkick_accounts.items():
-                    data_feed_ids = data["feed_ids"]
-                    assert isinstance(data_feed_ids, list)
-                    if task_feed_id in data_feed_ids:
-                        active_feed_syncs[uname] = True
 
     return templates.TemplateResponse(
         request,
@@ -231,8 +168,6 @@ async def dashboard(
             "connections": connections,
             "latest_sync": latest_sync,
             "active_syncs": active_syncs,
-            "songkick_accounts": songkick_accounts,
-            "active_feed_syncs": active_feed_syncs,
         },
     )
 
@@ -441,36 +376,6 @@ async def account_page(
             connections_result.scalars().all()
         )
 
-        # Query Songkick calendar feeds
-        sk_feeds_result = await db.execute(
-            sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.feed_type.in_(
-                    [
-                        types_module.FeedType.SONGKICK_ATTENDANCE,
-                        types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-                    ]
-                ),
-            )
-        )
-        sk_feeds = sk_feeds_result.scalars().all()
-
-        # Group by username (extracted from URL)
-        songkick_accounts: list[dict[str, object]] = []
-        seen_usernames: set[str] = set()
-        for feed in sk_feeds:
-            parts = feed.url.split("/users/")
-            if len(parts) > 1:
-                username = parts[1].split("/")[0]
-                if username not in seen_usernames:
-                    seen_usernames.add(username)
-                    songkick_accounts.append(
-                        {
-                            "username": username,
-                            "created_at": feed.created_at,
-                        }
-                    )
-
     return templates.TemplateResponse(
         request,
         "account.html",
@@ -480,7 +385,6 @@ async def account_page(
             "user_role": _user_role(request),
             "user": user,
             "connections": connections,
-            "songkick_accounts": songkick_accounts,
             "state": "button",
         },
     )
@@ -577,7 +481,7 @@ async def songkick_lookup_submit(
 async def songkick_confirm(
     request: fastapi.Request,
 ) -> fastapi.responses.HTMLResponse:
-    """Create Songkick feeds and reload the page."""
+    """Create a Songkick ServiceConnection and reload the page."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.HTMLResponse("")
@@ -588,36 +492,27 @@ async def songkick_confirm(
         return fastapi.responses.HTMLResponse("")
 
     user_uuid = uuid.UUID(user_id)
-    base = f"https://www.songkick.com/users/{username}/calendars.ics"
-    feed_specs: list[tuple[types_module.FeedType, str]] = [
-        (types_module.FeedType.SONGKICK_ATTENDANCE, f"{base}?filter=attendance"),
-        (
-            types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-            f"{base}?filter=tracked_artist",
-        ),
-    ]
 
     async with _get_db(request) as db:
-        # Check for duplicates
-        for _feed_type, url in feed_specs:
-            stmt = sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.url == url,
-            )
-            result = await db.execute(stmt)
-            if result.scalar_one_or_none() is not None:
-                msg = "Songkick feeds already exist for this username."
-                return fastapi.responses.HTMLResponse(f"<p><mark>{msg}</mark></p>")
+        # Check for duplicate Songkick connection with same username
+        dup_stmt = sa.select(user_models.ServiceConnection).where(
+            user_models.ServiceConnection.user_id == user_uuid,
+            user_models.ServiceConnection.service_type
+            == types_module.ServiceType.SONGKICK,
+            user_models.ServiceConnection.external_user_id == username,
+        )
+        dup_result = await db.execute(dup_stmt)
+        if dup_result.scalar_one_or_none() is not None:
+            msg = "Songkick connection already exists for this username."
+            return fastapi.responses.HTMLResponse(f"<p><mark>{msg}</mark></p>")
 
-        # Create feeds
-        for feed_type, url in feed_specs:
-            feed = concert_models.UserCalendarFeed(
-                user_id=user_uuid,
-                feed_type=feed_type,
-                url=url,
-            )
-            db.add(feed)
-
+        conn = user_models.ServiceConnection(
+            user_id=user_uuid,
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id=username,
+            enabled=True,
+        )
+        db.add(conn)
         await db.commit()
 
     return fastapi.responses.HTMLResponse("<script>location.reload()</script>")
@@ -627,41 +522,42 @@ async def songkick_confirm(
 async def songkick_sync_trigger(
     username: str, request: fastapi.Request
 ) -> fastapi.responses.HTMLResponse:
-    """Trigger sync for all feeds belonging to a Songkick username."""
+    """Trigger sync for a Songkick connection by username."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         raise fastapi.HTTPException(status_code=401)
 
     user_uuid = uuid.UUID(user_id)
-    base = f"https://www.songkick.com/users/{username}/calendars.ics"
 
     async with _get_db(request) as db:
         result = await db.execute(
-            sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.url.like(f"{base}%"),
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == user_uuid,
+                user_models.ServiceConnection.service_type
+                == types_module.ServiceType.SONGKICK,
+                user_models.ServiceConnection.external_user_id == username,
             )
         )
-        feeds = list(result.scalars().all())
-        if not feeds:
+        connection = result.scalar_one_or_none()
+        if connection is None:
             raise fastapi.HTTPException(status_code=404)
 
+        task = task_models.Task(
+            user_id=user_uuid,
+            service_connection_id=connection.id,
+            task_type=types_module.TaskType.CALENDAR_SYNC,
+            status=types_module.SyncStatus.PENDING,
+        )
+        db.add(task)
+        await db.flush()
+
         arq_redis = request.app.state.arq_redis
-        for feed in feeds:
-            task = task_models.Task(
-                user_id=user_uuid,
-                task_type=types_module.TaskType.CALENDAR_SYNC,
-                status=types_module.SyncStatus.PENDING,
-                params={"feed_id": str(feed.id)},
-            )
-            db.add(task)
-            await db.flush()
-            await arq_redis.enqueue_job(
-                "sync_calendar_feed",
-                str(feed.id),
-                str(task.id),
-                _job_id=f"sync_calendar_feed:{feed.id}",
-            )
+        await arq_redis.enqueue_job(
+            "sync_calendar_feed",
+            str(connection.id),
+            str(task.id),
+            _job_id=f"sync_calendar_feed:{task.id}",
+        )
         await db.commit()
 
     return fastapi.responses.HTMLResponse("")

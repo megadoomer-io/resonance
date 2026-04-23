@@ -58,7 +58,7 @@ def _set_user_defaults(
 
 
 class ServiceConnection(base_module.TimestampMixin, base_module.Base):
-    """An OAuth connection between a user and an external service."""
+    """A connection to an external service (OAuth, username-based, or URL-based)."""
 
     __tablename__ = "service_connections"
     __table_args__ = (
@@ -79,10 +79,12 @@ class ServiceConnection(base_module.TimestampMixin, base_module.Base):
     service_type: orm.Mapped[types_module.ServiceType] = orm.mapped_column(
         sa.Enum(types_module.ServiceType, native_enum=False), nullable=False
     )
-    external_user_id: orm.Mapped[str] = orm.mapped_column(
-        sa.String(255), nullable=False
+    external_user_id: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(255), nullable=True, default=None
     )
-    encrypted_access_token: orm.Mapped[str] = orm.mapped_column(sa.Text, nullable=False)
+    encrypted_access_token: orm.Mapped[str | None] = orm.mapped_column(
+        sa.Text, nullable=True, default=None
+    )
     encrypted_refresh_token: orm.Mapped[str | None] = orm.mapped_column(
         sa.Text, nullable=True, default=None
     )
@@ -92,10 +94,19 @@ class ServiceConnection(base_module.TimestampMixin, base_module.Base):
     scopes: orm.Mapped[str | None] = orm.mapped_column(
         sa.Text, nullable=True, default=None
     )
+    url: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(2048), nullable=True, default=None
+    )
+    label: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
+    enabled: orm.Mapped[bool] = orm.mapped_column(
+        sa.Boolean, nullable=False, default=True
+    )
     connected_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
     )
-    last_used_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+    last_synced_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None
     )
     sync_watermark: orm.Mapped[dict[str, dict[str, object]]] = orm.mapped_column(
@@ -107,6 +118,7 @@ class ServiceConnection(base_module.TimestampMixin, base_module.Base):
 
 # Python-side defaults for mutable fields applied via init event.
 _SERVICE_CONNECTION_DEFAULTS: dict[str, object] = {
+    "enabled": True,
     "sync_watermark": dict,
 }
 
