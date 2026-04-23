@@ -17,6 +17,7 @@ import arq
 import arq.connections as arq_connections
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import sqlalchemy.orm as sa_orm
 import structlog
 
 import resonance.concerts.worker as concert_worker
@@ -494,8 +495,13 @@ async def _check_parent_completion(
             log.info("parent_still_pending", pending_children=pending_count)
         return
 
-    # All children are done — load parent and aggregate results
-    parent = await _load_task(session, str(task.parent_id))
+    # All children are done — load parent (with connection) and aggregate results
+    parent_result = await session.execute(
+        sa.select(task_module.Task)
+        .where(task_module.Task.id == task.parent_id)
+        .options(sa_orm.joinedload(task_module.Task.service_connection))
+    )
+    parent = parent_result.scalar_one_or_none()
     if parent is None:
         log.error("parent_task_not_found", parent_id=str(task.parent_id))
         return
@@ -536,6 +542,12 @@ async def _check_parent_completion(
         parent.status = types_module.SyncStatus.COMPLETED
 
     parent.completed_at = datetime.datetime.now(datetime.UTC)
+
+    # Update the connection's last_synced_at timestamp.
+    # The service_connection relationship is eagerly loaded by sync_range callers.
+    if parent.service_connection is not None:
+        parent.service_connection.last_synced_at = datetime.datetime.now(datetime.UTC)
+
     await session.commit()
     log.info(
         "parent_completed",
