@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
 
 import sqlalchemy as sa
@@ -226,8 +227,12 @@ class TestServiceConnectionModel:
             "encrypted_refresh_token",
             "token_expires_at",
             "scopes",
+            "url",
+            "label",
+            "enabled",
             "connected_at",
             "last_used_at",
+            "last_synced_at",
             "sync_watermark",
             "created_at",
             "updated_at",
@@ -273,6 +278,56 @@ class TestServiceConnectionModel:
         ]
         expected = frozenset({"user_id", "service_type", "external_user_id"})
         assert expected in uc_col_sets
+
+
+class TestServiceConnectionUnified:
+    """Tests for the unified ServiceConnection model (feed connection fields)."""
+
+    def test_feed_connection_no_token(self) -> None:
+        """A Songkick connection needs no access token."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+        )
+        assert conn.encrypted_access_token is None
+        assert conn.external_user_id == "mike123"
+
+    def test_ical_connection_with_url(self) -> None:
+        """An iCal connection uses url and label; external_user_id can be None."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.ICAL,
+            url="https://example.com/calendar.ics",
+            label="My concert calendar",
+        )
+        assert conn.external_user_id is None
+        assert conn.url == "https://example.com/calendar.ics"
+        assert conn.label == "My concert calendar"
+
+    def test_enabled_defaults_true(self) -> None:
+        """The enabled field defaults to True when not specified."""
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+        )
+        assert conn.enabled is True
+
+    def test_last_synced_at(self) -> None:
+        """last_synced_at persists when set."""
+        now = datetime.datetime.now(datetime.UTC)
+        conn = user_module.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id="mike123",
+            last_synced_at=now,
+        )
+        assert conn.last_synced_at == now
 
 
 # ---------------------------------------------------------------------------

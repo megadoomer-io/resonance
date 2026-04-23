@@ -67,7 +67,7 @@ async def list_connections(
             "service_type": conn.service_type.value
             if hasattr(conn.service_type, "value")
             else str(conn.service_type),
-            "external_user_id": conn.external_user_id,
+            "external_user_id": conn.external_user_id or "",
             "connected_at": str(conn.connected_at),
         }
         for conn in connections

@@ -48,6 +48,9 @@ class SpotifySyncStrategy(sync_base.SyncStrategy):
             )
         )
         connection = conn_result.scalar_one()
+        assert connection.encrypted_access_token is not None, (
+            "Spotify connection requires an access token"
+        )
         access_token = crypto_module.decrypt_token(
             connection.encrypted_access_token, self._token_encryption_key
         )

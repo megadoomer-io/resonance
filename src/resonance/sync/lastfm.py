@@ -115,6 +115,9 @@ class LastFmSyncStrategy(sync_base.SyncStrategy):
 
         # Decrypt session key at execute-time to validate it's available
         # (the sync helpers don't need it — Last.fm API calls use username)
+        assert connection.encrypted_access_token is not None, (
+            "Last.fm connection requires an access token"
+        )
         crypto_module.decrypt_token(
             connection.encrypted_access_token, self._token_encryption_key
         )
