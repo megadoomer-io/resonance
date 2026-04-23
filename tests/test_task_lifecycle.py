@@ -54,85 +54,22 @@ class TestCompleteTask:
         # Should NOT query the database (no parent to check)
         session.execute.assert_not_called()
 
-    async def test_child_task_propagates_to_parent(self) -> None:
-        """When the last child completes, the parent also completes."""
+    async def test_child_task_does_not_propagate_to_parent(self) -> None:
+        """complete_task only sets child fields; parent check is the caller's job."""
         parent_id = uuid.uuid4()
-        parent = _make_task(
-            task_id=parent_id,
-            task_type=types_module.TaskType.SYNC_JOB,
-            status=types_module.SyncStatus.RUNNING,
-        )
         child = _make_task(parent_id=parent_id)
 
         session = AsyncMock()
-
-        # 1. Load parent
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = parent
-
-        # 2. Load all children — returns just this child (already completed
-        #    by complete_task before _check_parent_completion runs)
-        completed_child = _make_task(
-            parent_id=parent_id,
-            status=types_module.SyncStatus.COMPLETED,
-        )
-        children_scalars = MagicMock()
-        children_scalars.all.return_value = [completed_child]
-        children_result = MagicMock()
-        children_result.scalars.return_value = children_scalars
-
-        session.execute.side_effect = [parent_result, children_result]
 
         await lifecycle_module.complete_task(
             session, child, {"items_created": 10, "items_updated": 0}
         )
 
         assert child.status == types_module.SyncStatus.COMPLETED
-        assert parent.status == types_module.SyncStatus.COMPLETED
-        assert parent.completed_at is not None
-        assert parent.result["children_completed"] == 1
-        assert parent.result["children_failed"] == 0
-
-    async def test_parent_stays_running_with_pending_children(self) -> None:
-        """Parent does NOT complete while other children are still pending."""
-        parent_id = uuid.uuid4()
-        parent = _make_task(
-            task_id=parent_id,
-            task_type=types_module.TaskType.SYNC_JOB,
-            status=types_module.SyncStatus.RUNNING,
-        )
-        child = _make_task(parent_id=parent_id)
-
-        session = AsyncMock()
-
-        # 1. Load parent
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = parent
-
-        # 2. Load children — one completed, one still pending
-        completed_child = _make_task(
-            parent_id=parent_id,
-            status=types_module.SyncStatus.COMPLETED,
-        )
-        pending_child = _make_task(
-            parent_id=parent_id,
-            status=types_module.SyncStatus.PENDING,
-        )
-        children_scalars = MagicMock()
-        children_scalars.all.return_value = [completed_child, pending_child]
-        children_result = MagicMock()
-        children_result.scalars.return_value = children_scalars
-
-        session.execute.side_effect = [parent_result, children_result]
-
-        await lifecycle_module.complete_task(
-            session, child, {"items_created": 5, "items_updated": 0}
-        )
-
-        assert child.status == types_module.SyncStatus.COMPLETED
-        # Parent should still be RUNNING
-        assert parent.status == types_module.SyncStatus.RUNNING
-        assert parent.completed_at is None
+        assert child.completed_at is not None
+        # Should NOT query the database — parent completion is the caller's
+        # responsibility (e.g. worker._check_parent_completion).
+        session.execute.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

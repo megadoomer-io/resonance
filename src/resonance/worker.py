@@ -35,6 +35,7 @@ import resonance.models.task as task_module
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.sync.lastfm as lastfm_sync
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
@@ -123,11 +124,11 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Look up strategy
             strategy = wctx["strategies"].get(connection.service_type)
             if strategy is None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = (
-                    f"No sync strategy for {connection.service_type.value}"
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"No sync strategy for {connection.service_type.value}",
                 )
-                task.completed_at = datetime.datetime.now(datetime.UTC)
                 await session.commit()
                 return
 
@@ -136,9 +137,11 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 connection.service_type
             )
             if connector is None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = f"No connector for {connection.service_type.value}"
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"No connector for {connection.service_type.value}",
+                )
                 await session.commit()
                 return
 
@@ -146,9 +149,11 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             descriptors = await strategy.plan(session, connection, connector)
 
             if not descriptors:
-                task.status = types_module.SyncStatus.COMPLETED
-                task.result = {"items_created": 0, "items_updated": 0}
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {"items_created": 0, "items_updated": 0},
+                )
                 await session.commit()
                 log.info("plan_sync_no_work")
                 return
@@ -203,9 +208,9 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             # Re-fetch task in case the session was invalidated
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
-                task_reload.status = types_module.SyncStatus.FAILED
-                task_reload.error_message = traceback.format_exc()
-                task_reload.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
                 await session.commit()
 
 
@@ -272,9 +277,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             try:
                 result = await strategy.execute(session, task, connector, connection)
-                task.status = types_module.SyncStatus.COMPLETED
-                task.result = result
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.complete_task(session, task, result)
 
                 # Write watermark back to connection
                 watermark = result.get("watermark")
@@ -324,9 +327,9 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             log.exception("sync_range_failed")
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
-                task_reload.status = types_module.SyncStatus.FAILED
-                task_reload.error_message = traceback.format_exc()
-                task_reload.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
                 await session.commit()
                 task = task_reload
 
@@ -387,9 +390,10 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             log = log.bind(operation=operation)
             log.info("bulk_job_started")
 
+            result: dict[str, object]
             if operation == "dedup_artists":
                 stats = await dedup_module.find_and_merge_duplicate_artists(session)
-                task.result = {
+                result = {
                     "artists_merged": stats.artists_merged,
                     "tracks_repointed": stats.tracks_repointed,
                     "relations_repointed": stats.artist_relations_repointed,
@@ -397,7 +401,7 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 }
             elif operation == "dedup_tracks":
                 stats = await dedup_module.find_and_merge_duplicate_tracks(session)
-                task.result = {
+                result = {
                     "tracks_merged": stats.tracks_merged,
                     "events_repointed": stats.events_repointed,
                     "relations_repointed": stats.track_relations_repointed,
@@ -407,24 +411,21 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 deleted = await dedup_module.delete_cross_service_duplicate_events(
                     session
                 )
-                task.result = {"events_deleted": deleted}
+                result = {"events_deleted": deleted}
             elif operation == "dedup_all":
-                task.result = {**await dedup_module.dedup_all(session)}
+                result = {**await dedup_module.dedup_all(session)}
             else:
                 msg = f"Unknown bulk operation: {operation}"
                 raise ValueError(msg)
 
-            task.status = types_module.SyncStatus.COMPLETED
-            task.completed_at = datetime.datetime.now(datetime.UTC)
+            await lifecycle_module.complete_task(session, task, result)
             await session.commit()
             log.info("bulk_job_completed", result=task.result)
 
         except Exception:
             log.exception("bulk_job_failed")
             if task is not None:
-                task.status = types_module.SyncStatus.FAILED
-                task.error_message = traceback.format_exc()
-                task.completed_at = datetime.datetime.now(datetime.UTC)
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
 
 

@@ -19,13 +19,17 @@ async def complete_task(
     task: task_models.Task,
     result: dict[str, object],
 ) -> None:
-    """Mark a task completed and propagate to parent if applicable."""
+    """Mark a task completed.
+
+    Sets status to COMPLETED, records the result dict, and timestamps
+    the completion.  Parent-completion cascading is handled by the
+    caller (e.g. ``worker._check_parent_completion``) so that
+    worker-specific concerns (sequential sibling enqueue, post-sync
+    dedup, step-mode) stay in one place.
+    """
     task.status = types_module.SyncStatus.COMPLETED
     task.result = result
     task.completed_at = datetime.datetime.now(datetime.UTC)
-
-    if task.parent_id is not None:
-        await _check_parent_completion(session, task.parent_id)
 
 
 async def fail_task(
