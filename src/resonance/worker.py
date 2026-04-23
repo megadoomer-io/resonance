@@ -56,7 +56,7 @@ _TASK_DISPATCH: dict[
     types_module.TaskType.TIME_RANGE: ("sync_range", lambda t: (str(t.id),)),
     types_module.TaskType.CALENDAR_SYNC: (
         "sync_calendar_feed",
-        lambda t: (str(t.params.get("feed_id", "")), str(t.id)),
+        lambda t: (str(t.service_connection_id), str(t.id)),
     ),
     types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
 }

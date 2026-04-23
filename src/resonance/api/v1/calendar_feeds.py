@@ -429,7 +429,8 @@ async def trigger_feed_sync(
             detail="A sync is already running for this feed",
         )
 
-    # Create Task
+    # Create Task — uses feed_id in params for legacy compat (this endpoint
+    # will be replaced by the unified sync trigger in Task 12).
     task = task_models.Task(
         user_id=user_id,
         task_type=types_module.TaskType.CALENDAR_SYNC,
@@ -439,13 +440,14 @@ async def trigger_feed_sync(
     db.add(task)
     await db.commit()
 
-    # Enqueue arq job with task_id for status tracking
+    # Enqueue arq job — use task.id for dedup (not feed_id) to avoid
+    # collisions when the same feed is synced multiple times.
     arq_redis = request.app.state.arq_redis
     await arq_redis.enqueue_job(
         "sync_calendar_feed",
         str(feed_id),
         str(task.id),
-        _job_id=f"sync_calendar_feed:{feed_id}",
+        _job_id=f"sync_calendar_feed:{task.id}",
     )
 
     return {"status": "started", "task_id": str(task.id)}

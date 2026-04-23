@@ -627,41 +627,42 @@ async def songkick_confirm(
 async def songkick_sync_trigger(
     username: str, request: fastapi.Request
 ) -> fastapi.responses.HTMLResponse:
-    """Trigger sync for all feeds belonging to a Songkick username."""
+    """Trigger sync for a Songkick connection by username."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         raise fastapi.HTTPException(status_code=401)
 
     user_uuid = uuid.UUID(user_id)
-    base = f"https://www.songkick.com/users/{username}/calendars.ics"
 
     async with _get_db(request) as db:
         result = await db.execute(
-            sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.url.like(f"{base}%"),
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == user_uuid,
+                user_models.ServiceConnection.service_type
+                == types_module.ServiceType.SONGKICK,
+                user_models.ServiceConnection.external_user_id == username,
             )
         )
-        feeds = list(result.scalars().all())
-        if not feeds:
+        connection = result.scalar_one_or_none()
+        if connection is None:
             raise fastapi.HTTPException(status_code=404)
 
+        task = task_models.Task(
+            user_id=user_uuid,
+            service_connection_id=connection.id,
+            task_type=types_module.TaskType.CALENDAR_SYNC,
+            status=types_module.SyncStatus.PENDING,
+        )
+        db.add(task)
+        await db.flush()
+
         arq_redis = request.app.state.arq_redis
-        for feed in feeds:
-            task = task_models.Task(
-                user_id=user_uuid,
-                task_type=types_module.TaskType.CALENDAR_SYNC,
-                status=types_module.SyncStatus.PENDING,
-                params={"feed_id": str(feed.id)},
-            )
-            db.add(task)
-            await db.flush()
-            await arq_redis.enqueue_job(
-                "sync_calendar_feed",
-                str(feed.id),
-                str(task.id),
-                _job_id=f"sync_calendar_feed:{feed.id}",
-            )
+        await arq_redis.enqueue_job(
+            "sync_calendar_feed",
+            str(connection.id),
+            str(task.id),
+            _job_id=f"sync_calendar_feed:{task.id}",
+        )
         await db.commit()
 
     return fastapi.responses.HTMLResponse("")

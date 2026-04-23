@@ -1671,12 +1671,13 @@ class TestReenqueueOrphanedTasks:
     @pytest.mark.asyncio
     async def test_pending_calendar_sync_reenqueued(self) -> None:
         """PENDING CALENDAR_SYNC task is re-enqueued as sync_calendar_feed."""
-        feed_id = uuid.uuid4()
+        connection_id = uuid.uuid4()
         task = _make_task(
             status=types_module.SyncStatus.PENDING,
         )
         task.task_type = types_module.TaskType.CALENDAR_SYNC
-        task.params = {"feed_id": str(feed_id)}
+        task.service_connection_id = connection_id
+        task.params = {}
 
         session = AsyncMock()
 
@@ -1719,7 +1720,7 @@ class TestReenqueueOrphanedTasks:
 
         arq_redis.enqueue_job.assert_called_once_with(
             "sync_calendar_feed",
-            str(feed_id),
+            str(connection_id),
             str(task.id),
             _job_id=f"sync_calendar_feed:{task.id}",
         )
@@ -1727,12 +1728,13 @@ class TestReenqueueOrphanedTasks:
     @pytest.mark.asyncio
     async def test_running_calendar_sync_reset_and_reenqueued(self) -> None:
         """RUNNING CALENDAR_SYNC task is reset to PENDING and re-enqueued."""
-        feed_id = uuid.uuid4()
+        connection_id = uuid.uuid4()
         task = _make_task(
             status=types_module.SyncStatus.RUNNING,
         )
         task.task_type = types_module.TaskType.CALENDAR_SYNC
-        task.params = {"feed_id": str(feed_id)}
+        task.service_connection_id = connection_id
+        task.params = {}
         task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
 
         session = AsyncMock()
@@ -1783,7 +1785,7 @@ class TestReenqueueOrphanedTasks:
         # Should be re-enqueued with correct args
         arq_redis.enqueue_job.assert_called_once_with(
             "sync_calendar_feed",
-            str(feed_id),
+            str(connection_id),
             str(task.id),
             _job_id=f"sync_calendar_feed:{task.id}",
         )
