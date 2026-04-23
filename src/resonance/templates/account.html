@@ -28,33 +28,18 @@
         </thead>
         <tbody>
             {% for conn in connections %}
-            <tr id="connection-{{ conn.id }}">
+            <tr>
                 <td>{{ conn.service_type.value | capitalize }}</td>
-                <td>{{ conn.external_user_id }}</td>
-                <td>{{ (conn.connected_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
+                <td>{{ conn.external_user_id or conn.label or conn.url or '' }}</td>
+                <td>{{ (conn.connected_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>
-                    {% if connections | length > 1 %}
                     <button
                         hx-delete="/api/v1/account/connections/{{ conn.id }}"
-                        hx-confirm="Disconnect this service? You will need to re-authenticate to use it again."
+                        hx-swap="none"
+                        hx-confirm="Disconnect {{ conn.service_type.value | capitalize }}?"
                         hx-on::after-request="location.reload()"
-                    >Disconnect</button>
-                    {% else %}
-                    <small>Last connection</small>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-            {% for sk in songkick_accounts %}
-            <tr>
-                <td>Songkick</td>
-                <td>{{ sk.username }}</td>
-                <td>{{ (sk.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
-                <td>
-                    <button
-                        hx-delete="/api/v1/calendar-feeds/songkick/{{ sk.username }}"
-                        hx-confirm="Disconnect Songkick account {{ sk.username }}?"
-                        hx-on::after-request="location.reload()"
+                        class="outline secondary"
+                        style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
                     >Disconnect</button>
                 </td>
             </tr>
@@ -63,38 +48,7 @@
     </table>
 </figure>
 {% else %}
-{% if not songkick_accounts %}
 <p>No services connected.</p>
-{% else %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Service</th>
-                <th>Account ID</th>
-                <th>Connected</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for sk in songkick_accounts %}
-            <tr>
-                <td>Songkick</td>
-                <td>{{ sk.username }}</td>
-                <td>{{ (sk.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
-                <td>
-                    <button
-                        hx-delete="/api/v1/calendar-feeds/songkick/{{ sk.username }}"
-                        hx-confirm="Disconnect Songkick account {{ sk.username }}?"
-                        hx-on::after-request="location.reload()"
-                    >Disconnect</button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-{% endif %}
 {% endif %}
 
 <h2>Preferences</h2>

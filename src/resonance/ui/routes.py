@@ -376,36 +376,6 @@ async def account_page(
             connections_result.scalars().all()
         )
 
-        # Query Songkick calendar feeds
-        sk_feeds_result = await db.execute(
-            sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.feed_type.in_(
-                    [
-                        types_module.FeedType.SONGKICK_ATTENDANCE,
-                        types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-                    ]
-                ),
-            )
-        )
-        sk_feeds = sk_feeds_result.scalars().all()
-
-        # Group by username (extracted from URL)
-        songkick_accounts: list[dict[str, object]] = []
-        seen_usernames: set[str] = set()
-        for feed in sk_feeds:
-            parts = feed.url.split("/users/")
-            if len(parts) > 1:
-                username = parts[1].split("/")[0]
-                if username not in seen_usernames:
-                    seen_usernames.add(username)
-                    songkick_accounts.append(
-                        {
-                            "username": username,
-                            "created_at": feed.created_at,
-                        }
-                    )
-
     return templates.TemplateResponse(
         request,
         "account.html",
@@ -415,7 +385,6 @@ async def account_page(
             "user_role": _user_role(request),
             "user": user,
             "connections": connections,
-            "songkick_accounts": songkick_accounts,
             "state": "button",
         },
     )
@@ -512,7 +481,7 @@ async def songkick_lookup_submit(
 async def songkick_confirm(
     request: fastapi.Request,
 ) -> fastapi.responses.HTMLResponse:
-    """Create Songkick feeds and reload the page."""
+    """Create a Songkick ServiceConnection and reload the page."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.HTMLResponse("")
@@ -523,36 +492,27 @@ async def songkick_confirm(
         return fastapi.responses.HTMLResponse("")
 
     user_uuid = uuid.UUID(user_id)
-    base = f"https://www.songkick.com/users/{username}/calendars.ics"
-    feed_specs: list[tuple[types_module.FeedType, str]] = [
-        (types_module.FeedType.SONGKICK_ATTENDANCE, f"{base}?filter=attendance"),
-        (
-            types_module.FeedType.SONGKICK_TRACKED_ARTIST,
-            f"{base}?filter=tracked_artist",
-        ),
-    ]
 
     async with _get_db(request) as db:
-        # Check for duplicates
-        for _feed_type, url in feed_specs:
-            stmt = sa.select(concert_models.UserCalendarFeed).where(
-                concert_models.UserCalendarFeed.user_id == user_uuid,
-                concert_models.UserCalendarFeed.url == url,
-            )
-            result = await db.execute(stmt)
-            if result.scalar_one_or_none() is not None:
-                msg = "Songkick feeds already exist for this username."
-                return fastapi.responses.HTMLResponse(f"<p><mark>{msg}</mark></p>")
+        # Check for duplicate Songkick connection with same username
+        dup_stmt = sa.select(user_models.ServiceConnection).where(
+            user_models.ServiceConnection.user_id == user_uuid,
+            user_models.ServiceConnection.service_type
+            == types_module.ServiceType.SONGKICK,
+            user_models.ServiceConnection.external_user_id == username,
+        )
+        dup_result = await db.execute(dup_stmt)
+        if dup_result.scalar_one_or_none() is not None:
+            msg = "Songkick connection already exists for this username."
+            return fastapi.responses.HTMLResponse(f"<p><mark>{msg}</mark></p>")
 
-        # Create feeds
-        for feed_type, url in feed_specs:
-            feed = concert_models.UserCalendarFeed(
-                user_id=user_uuid,
-                feed_type=feed_type,
-                url=url,
-            )
-            db.add(feed)
-
+        conn = user_models.ServiceConnection(
+            user_id=user_uuid,
+            service_type=types_module.ServiceType.SONGKICK,
+            external_user_id=username,
+            enabled=True,
+        )
+        db.add(conn)
         await db.commit()
 
     return fastapi.responses.HTMLResponse("<script>location.reload()</script>")
