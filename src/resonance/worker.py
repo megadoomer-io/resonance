@@ -8,7 +8,10 @@ import datetime
 import traceback
 import typing
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import collections.abc
 
 import arq
 import arq.connections as arq_connections
@@ -38,6 +41,25 @@ import resonance.sync.test as test_sync
 import resonance.types as types_module
 
 logger = structlog.get_logger()
+
+# ---------------------------------------------------------------------------
+# Orphan recovery dispatch map
+# ---------------------------------------------------------------------------
+# Maps each TaskType to (arq_job_name, args_builder). The args_builder
+# receives a Task and returns the positional args tuple for enqueue_job.
+
+_TASK_DISPATCH: dict[
+    types_module.TaskType,
+    tuple[str, collections.abc.Callable[[task_module.Task], tuple[str, ...]]],
+] = {
+    types_module.TaskType.SYNC_JOB: ("plan_sync", lambda t: (str(t.id),)),
+    types_module.TaskType.TIME_RANGE: ("sync_range", lambda t: (str(t.id),)),
+    types_module.TaskType.CALENDAR_SYNC: (
+        "sync_calendar_feed",
+        lambda t: (str(t.params.get("feed_id", "")), str(t.id)),
+    ),
+    types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
+}
 
 
 class WorkerContext(typing.TypedDict):
@@ -625,12 +647,6 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
-                task_module.Task.task_type.in_(
-                    [
-                        types_module.TaskType.SYNC_JOB,
-                        types_module.TaskType.TIME_RANGE,
-                    ]
-                ),
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
@@ -691,12 +707,6 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.RUNNING,
-                task_module.Task.task_type.in_(
-                    [
-                        types_module.TaskType.SYNC_JOB,
-                        types_module.TaskType.TIME_RANGE,
-                    ]
-                ),
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
                     parent_alias.status.notin_(
@@ -756,17 +766,21 @@ async def _reenqueue_orphaned_tasks(
                         task_id=str(task.id),
                     )
                     continue
-                await arq_redis.enqueue_job(
-                    "plan_sync",
-                    str(task.id),
-                    _job_id=f"plan_sync:{task.id}",
+
+            dispatch = _TASK_DISPATCH.get(task.task_type)
+            if dispatch is None:
+                logger.warning(
+                    "no_dispatch_for_task_type",
+                    task_id=str(task.id),
+                    task_type=task.task_type.value,
                 )
-            else:
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(task.id),
-                    _job_id=f"sync_range:{task.id}",
-                )
+                continue
+
+            job_name, args_builder = dispatch
+            args = args_builder(task)
+            await arq_redis.enqueue_job(
+                job_name, *args, _job_id=f"{job_name}:{task.id}"
+            )
             enqueued += 1
 
         if enqueued:
