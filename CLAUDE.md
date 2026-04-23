@@ -60,6 +60,7 @@ uv run alembic revision --autogenerate -m "description"  # create new
 - **Never use raw SQL** for data fixes or ad-hoc queries against production — always use SQLAlchemy ORM or Alembic migrations. Raw SQL bypasses ORM constraints (e.g., enum value casing) and is error-prone.
 - For production data fixes, create an Alembic migration with `op.execute()` using proper enum values
 - Enum columns use `native_enum=False` (stored as varchar) — always ensure CHECK constraints exist to enforce valid values at the DB level
+- **SQLAlchemy stores StrEnum `.name` (UPPERCASE), not `.value` (lowercase).** When writing raw SQL in migrations, use `'RUNNING'` not `'running'`, `'CALENDAR_SYNC'` not `'calendar_sync'`, etc. This applies to CHECK constraints, WHERE clauses, and UPDATE SET values
 
 ## Code Quality
 
@@ -114,9 +115,14 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 
 - API versioned under `/api/v1/`
 - Connector classes live in `connectors/` and declare capabilities via `ConnectorCapability` enum
+- Connectors also declare a `ConnectionConfig` (auth type, sync function, sync style) — used for generic sync dispatch, orphan recovery, and UI rendering
+- Lightweight connectors (Songkick, iCal) implement the `Connectable` Protocol without extending `BaseConnector`
 - Generator classes live in `generators/` and declare required/optional capabilities
 - SQLAlchemy models use UUID primary keys
 - OAuth tokens encrypted at rest via Fernet
+- All connections (OAuth, username-based, URL-based) use the unified `ServiceConnection` model — there is no separate calendar feed model
+- Task lifecycle helpers (`sync/lifecycle.py`) provide `complete_task`/`fail_task` — use these instead of setting task status inline
+- Orphan recovery in the worker is type-agnostic — new task types are handled by adding an entry to `_TASK_DISPATCH`
 - No deployment manifests in this repo — all K8s config lives in `megadoomer-config`
 
 ## Environment Variables

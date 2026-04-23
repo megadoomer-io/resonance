@@ -51,16 +51,18 @@ Jinja2 + HTMX, structlog.
      |                 |  |                |   |                  |
      |  users          |  |  sessions      |   |  plan_sync       |
      |  service_conns  |  |  task queue    |   |  sync_range      |
-     |  artists        |  |  rate limit    |   |  run_bulk_job    |
-     |  tracks         |  |  coordination  |   |                  |
-     |  events         |  +----------------+   +---+-----------+--+
-     |  relations      |                           |           |
-     |  sync_tasks     |                  +--------v---+  +----v----------+
-     +-----------------+                  | PostgreSQL |  | External APIs |
+     |  artists        |  |  rate limit    |   |  sync_cal_feed   |
+     |  tracks         |  |  coordination  |   |  run_bulk_job    |
+     |  events         |  +----------------+   |                  |
+     |  relations      |                      +---+-----------+--+
+     |  sync_tasks     |                           |           |
+     +-----------------+                  +--------v---+  +----v----------+
+                                          | PostgreSQL |  | External APIs |
                                           | (read/write)|  |               |
                                           +------------+  | Spotify       |
                                                           | Last.fm       |
                                                           | ListenBrainz  |
+                                                          | Songkick      |
                                                           +---------------+
 ```
 
@@ -103,7 +105,9 @@ timestamps (via `TimestampMixin`). Enum columns use `native_enum=False`
 
 ### ServiceConnection
 
-Links a user to an external service account with encrypted OAuth credentials.
+Unified connection model for all external services. OAuth connections store
+encrypted tokens; username-based connections (Songkick) store an external user
+ID; URL-based connections (generic iCal) store the feed URL directly.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -194,7 +198,7 @@ operations, and other async work. Tasks form a hierarchy via `parent_id`.
 | user_id | UUID FK | Nullable (bulk jobs may have no user) |
 | service_connection_id | UUID FK | Nullable |
 | parent_id | UUID FK | Self-referential, nullable |
-| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job` |
+| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync` |
 | status | SyncStatus enum | `pending`, `running`, `completed`, `failed`, `deferred` |
 | params | JSON | Task-specific parameters |
 | result | JSON | Task output on completion |
@@ -268,12 +272,14 @@ Nine capabilities that connectors can declare:
 
 ### Current Connectors
 
-| Connector | Service | Capabilities |
-|-----------|---------|-------------|
-| `SpotifyConnector` | Spotify | `AUTHENTICATION`, `LISTENING_HISTORY`, `FOLLOWS`, `TRACK_RATINGS` |
-| `LastFmConnector` | Last.fm | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_RATINGS` |
-| `ListenBrainzConnector` | ListenBrainz | `AUTHENTICATION`, `LISTENING_HISTORY` |
-| `TestConnector` | Test (mock) | `LISTENING_HISTORY` |
+| Connector | Service | Auth Type | Capabilities |
+|-----------|---------|-----------|-------------|
+| `SpotifyConnector` | Spotify | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `FOLLOWS`, `TRACK_RATINGS` |
+| `LastFmConnector` | Last.fm | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_RATINGS` |
+| `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY` |
+| `SongkickConnector` | Songkick | Username | Lightweight — calendar feed sync only |
+| `ICalConnector` | iCal | URL | Lightweight — calendar feed sync only |
+| `TestConnector` | Test (mock) | OAuth | `LISTENING_HISTORY` |
 
 ### ConnectorRegistry
 
@@ -281,6 +287,23 @@ Nine capabilities that connectors can declare:
 supports lookup by service type (`get()`) or by capability
 (`get_by_capability()`). Both the web server and the arq worker maintain
 their own registry instance, populated at startup.
+
+### ConnectionConfig
+
+Each connector declares a `ConnectionConfig` (frozen dataclass) that tells the
+system how to authenticate and sync:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `auth_type` | str | `"oauth"`, `"username"`, or `"url"` |
+| `sync_function` | str | arq job name to enqueue (e.g., `"plan_sync"`, `"sync_calendar_feed"`) |
+| `sync_style` | str | `"incremental"` (watermark-based) or `"full"` (re-fetch everything) |
+| `derive_urls` | Callable or None | For username-based connectors: generates feed URLs from a username |
+
+This enables generic sync dispatch — the unified sync endpoint, orphan recovery,
+and UI rendering all use `ConnectionConfig` instead of hardcoding per-service
+logic. Full `BaseConnector` subclasses and lightweight connectors both provide
+this via the `Connectable` Protocol.
 
 ### RateLimitBudget
 
@@ -298,16 +321,25 @@ response headers and computes paced request intervals. Features:
 
 ### Adding a New Connector
 
-1. Create `src/resonance/connectors/<service>.py` with a class extending
-   `BaseConnector`.
-2. Set `service_type` and `capabilities` as class attributes.
+**OAuth service (full connector):**
+
+1. Create `src/resonance/connectors/<service>.py` extending `BaseConnector`.
+2. Set `service_type`, `capabilities`, and implement `connection_config()`.
 3. Implement `get_auth_url()`, `exchange_code()`, `get_current_user()`.
 4. Add data-fetching methods for declared capabilities.
-5. Register the connector in both `app.py` (`create_app()`) and `worker.py`
-   (`startup()`).
+5. Register in both `app.py` and `worker.py`.
 6. Create a `SyncStrategy` in `src/resonance/sync/<service>.py` if the
    connector supports `LISTENING_HISTORY`.
 7. Add the service to the `ServiceType` enum in `src/resonance/types.py`.
+
+**Username/URL service (lightweight connector):**
+
+1. Create `src/resonance/connectors/<service>.py` with a class implementing
+   the `Connectable` Protocol (`service_type` attribute + `connection_config()` method).
+2. Implement `connection_config()` returning a `ConnectionConfig`.
+3. Register in both `app.py` and `worker.py`.
+4. Add the service to the `ServiceType` enum.
+5. No `BaseConnector` subclassing needed — no OAuth, no HTTP client.
 
 ---
 
@@ -319,10 +351,12 @@ It uses a hierarchical task model with three levels.
 ### Trigger
 
 A sync is triggered by:
-- `POST /api/v1/sync/{service}` (API endpoint)
+- `POST /api/v1/sync/connection/{connection_id}` (unified endpoint — works for all connection types)
+- `POST /api/v1/sync/{service}` (legacy endpoint — OAuth services only)
 - `resonance-api sync <service> [--full]` (CLI command)
 
-Both create a `SYNC_JOB` task and enqueue `plan_sync` to the arq queue.
+The unified endpoint uses the connector's `ConnectionConfig` to determine which
+arq job to enqueue (`plan_sync` for incremental, `sync_calendar_feed` for full).
 
 ### Flow
 
@@ -368,13 +402,16 @@ full sync ignores the watermark and fetches everything from the beginning.
 
 ### Task Hierarchy
 
-- **SYNC_JOB** -- top-level job, one per sync trigger. Has zero or more
+- **SYNC_JOB** -- top-level job for OAuth services. Has zero or more
   TIME_RANGE children.
 - **TIME_RANGE** -- a time-bounded chunk of data to fetch. The strategy
   decides how to partition (e.g., Last.fm uses monthly ranges for large
   histories).
+- **CALENDAR_SYNC** -- standalone task for calendar feed sync (Songkick, iCal).
+  No children — fetches and parses iCal feeds in a single operation.
 - **PAGE_FETCH** -- (defined in TaskType but not currently used as a separate
   task; page fetching happens within sync_range execution).
+- **BULK_JOB** -- standalone task for bulk operations (dedup, etc.).
 
 ### Concurrency
 
@@ -388,9 +425,17 @@ Each `SyncStrategy` declares a `concurrency` mode:
 
 On worker startup, `_reenqueue_orphaned_tasks()` finds tasks stuck in
 PENDING (lost arq job), RUNNING (interrupted by crash), or expired DEFERRED
-status and re-enqueues them. For ListenBrainz TIME_RANGE tasks, watermark-based
-resume is applied so the task picks up where it left off rather than
-re-processing from the beginning.
+status and re-enqueues them. Recovery is type-agnostic — the `_TASK_DISPATCH`
+map determines the arq job name and arguments for each task type. For
+ListenBrainz TIME_RANGE tasks, watermark-based resume is applied so the task
+picks up where it left off rather than re-processing from the beginning.
+
+### Task Lifecycle Helpers
+
+`sync/lifecycle.py` provides `complete_task()` and `fail_task()` for consistent
+status management. All task types use these helpers instead of setting status
+fields inline. The helpers set `status`, `result`/`error_message`, and
+`completed_at` atomically.
 
 ---
 
