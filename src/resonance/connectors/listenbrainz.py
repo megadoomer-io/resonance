@@ -34,8 +34,11 @@ class ListenBrainzConnector(base_module.BaseConnector):
         {
             base_module.ConnectorCapability.AUTHENTICATION,
             base_module.ConnectorCapability.LISTENING_HISTORY,
+            base_module.ConnectorCapability.TRACK_DISCOVERY,
         }
     )
+
+    _MUSICBRAINZ_API = "https://musicbrainz.org/ws/2"
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig:
@@ -177,3 +180,60 @@ class ListenBrainzConnector(base_module.BaseConnector):
 
         logger.info("Fetched %d listens for user %s", len(items), username)
         return items
+
+    async def discover_tracks(
+        self,
+        artist_name: str,
+        service_links: dict[str, str] | None,
+        limit: int = 20,
+    ) -> list[base_module.DiscoveredTrack]:
+        """Discover tracks for an artist via MusicBrainz recordings.
+
+        Args:
+            artist_name: Name of the artist to discover tracks for.
+            service_links: Optional mapping of service names to external IDs.
+                If a "listenbrainz" key is present, its value is used as the
+                MusicBrainz artist ID directly.
+            limit: Maximum number of recordings to return.
+
+        Returns:
+            List of discovered tracks with popularity scores.
+        """
+        mbid = (service_links or {}).get("listenbrainz")
+
+        if not mbid:
+            # Search MusicBrainz by name
+            search_resp = await self._request(
+                "GET",
+                f"{self._MUSICBRAINZ_API}/artist/",
+                params={"query": artist_name, "fmt": "json", "limit": 1},
+            )
+            artists: list[dict[str, str]] = search_resp.json().get("artists", [])
+            if not artists:
+                return []
+            mbid = artists[0]["id"]
+
+        # Fetch recordings for artist
+        rec_resp = await self._request(
+            "GET",
+            f"{self._MUSICBRAINZ_API}/recording/",
+            params={
+                "artist": mbid,
+                "fmt": "json",
+                "limit": limit,
+            },
+        )
+        recordings: list[dict[str, Any]] = rec_resp.json().get("recordings", [])
+
+        return [
+            base_module.DiscoveredTrack(
+                external_id=rec["id"],
+                title=rec["title"],
+                artist_name=artist_name,
+                artist_external_id=mbid,
+                service=types_module.ServiceType.LISTENBRAINZ,
+                duration_ms=rec.get("length"),
+                popularity_score=max(0, 100 - i * 5),
+            )
+            for i, rec in enumerate(recordings)
+        ]

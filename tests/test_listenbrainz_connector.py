@@ -34,6 +34,7 @@ class TestListenBrainzConnectorProperties:
             {
                 base_module.ConnectorCapability.AUTHENTICATION,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
+                base_module.ConnectorCapability.TRACK_DISCOVERY,
             }
         )
         assert connector.capabilities == expected
@@ -262,3 +263,140 @@ class TestGetListens:
         )
 
         assert result == []
+
+
+class TestDiscoverTracks:
+    """Tests for discover_tracks via MusicBrainz recordings API."""
+
+    @pytest.mark.anyio()
+    async def test_discover_by_mbid(self) -> None:
+        """When service_links has a listenbrainz MBID, uses it directly."""
+        recordings_response = {
+            "recordings": [
+                {"id": "rec-1", "title": "Track One", "length": 240000},
+                {"id": "rec-2", "title": "Track Two", "length": 180000},
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "/recording/" in str(request.url)
+            assert "artist=artist-mbid-123" in str(request.url)
+            return httpx.Response(200, json=recordings_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = listenbrainz_module.ListenBrainzConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.discover_tracks(
+            artist_name="Test Artist",
+            service_links={"listenbrainz": "artist-mbid-123"},
+        )
+
+        assert len(result) == 2
+        assert isinstance(result[0], base_module.DiscoveredTrack)
+        assert result[0].external_id == "rec-1"
+        assert result[0].title == "Track One"
+        assert result[0].artist_name == "Test Artist"
+        assert result[0].artist_external_id == "artist-mbid-123"
+        assert result[0].service == types_module.ServiceType.LISTENBRAINZ
+        assert result[0].duration_ms == 240000
+        assert result[1].external_id == "rec-2"
+        assert result[1].title == "Track Two"
+        assert result[1].duration_ms == 180000
+
+    @pytest.mark.anyio()
+    async def test_discover_by_name_search(self) -> None:
+        """Falls back to MusicBrainz name search when no MBID."""
+        artist_search_response = {
+            "artists": [{"id": "found-mbid-456", "name": "Searched Artist"}]
+        }
+        recordings_response = {
+            "recordings": [
+                {"id": "rec-a", "title": "Found Track"},
+            ]
+        }
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            url_str = str(request.url)
+            if "/artist/" in url_str:
+                assert (
+                    "query=Searched+Artist" in url_str
+                    or "query=Searched%20Artist" in url_str
+                )
+                return httpx.Response(200, json=artist_search_response)
+            assert "/recording/" in url_str
+            assert "artist=found-mbid-456" in url_str
+            return httpx.Response(200, json=recordings_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = listenbrainz_module.ListenBrainzConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.discover_tracks(
+            artist_name="Searched Artist",
+            service_links=None,
+        )
+
+        assert call_count == 2
+        assert len(result) == 1
+        assert result[0].external_id == "rec-a"
+        assert result[0].title == "Found Track"
+        assert result[0].artist_external_id == "found-mbid-456"
+
+    @pytest.mark.anyio()
+    async def test_discover_returns_empty_on_no_match(self) -> None:
+        """Returns empty list when artist not found in MusicBrainz."""
+        artist_search_response: dict[str, list[object]] = {"artists": []}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=artist_search_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = listenbrainz_module.ListenBrainzConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.discover_tracks(
+            artist_name="Nonexistent Artist",
+            service_links=None,
+        )
+
+        assert result == []
+
+    @pytest.mark.anyio()
+    async def test_popularity_score_decreases_by_position(self) -> None:
+        """First recording gets score 100, decreasing by 5 per position."""
+        recordings_response = {
+            "recordings": [
+                {"id": "rec-1", "title": "First"},
+                {"id": "rec-2", "title": "Second"},
+                {"id": "rec-3", "title": "Third"},
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=recordings_response)
+
+        transport = httpx.MockTransport(handler)
+        settings = _make_settings()
+        connector = listenbrainz_module.ListenBrainzConnector(settings=settings)
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+
+        result = await connector.discover_tracks(
+            artist_name="Artist",
+            service_links={"listenbrainz": "mbid-xyz"},
+        )
+
+        assert len(result) == 3
+        assert result[0].popularity_score == 100
+        assert result[1].popularity_score == 95
+        assert result[2].popularity_score == 90
