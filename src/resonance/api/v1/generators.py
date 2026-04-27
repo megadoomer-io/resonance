@@ -19,7 +19,9 @@ import resonance.types as types_module
 
 logger = structlog.get_logger()
 
-router = fastapi.APIRouter(prefix="/generator-profiles", tags=["generators"])
+router = fastapi.APIRouter(
+    prefix="/generator-profiles", tags=["generators"], redirect_slashes=False
+)
 
 
 class CreateProfileRequest(pydantic.BaseModel):

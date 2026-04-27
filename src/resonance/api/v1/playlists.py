@@ -18,7 +18,9 @@ import resonance.models.playlist as playlist_models
 
 logger = structlog.get_logger()
 
-router = fastapi.APIRouter(prefix="/playlists", tags=["playlists"])
+router = fastapi.APIRouter(
+    prefix="/playlists", tags=["playlists"], redirect_slashes=False
+)
 
 
 def format_playlist_summary(playlist: playlist_models.Playlist) -> dict[str, Any]:
