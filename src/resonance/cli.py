@@ -78,6 +78,10 @@ Commands:
   dedup <type> [--no-wait]     Run deduplication
   task <task_id>               Check task status
   track <query>                Search tracks by title
+  profile <subcommand>         Manage generator profiles
+  generate <profile-id>        Generate a playlist from a profile
+  playlists                    List playlists
+  playlist <id> [diff <other>] Show or diff a playlist
   set-role <user_id> <role>    Set user role (direct DB)
 """
 
@@ -424,6 +428,290 @@ def _cmd_feed_sync() -> None:
         print(json.dumps(result, indent=2))
 
 
+_PROFILE_USAGE = """\
+Usage: resonance-api profile <subcommand> [args]
+
+Subcommands:
+  list                              List all profiles
+  show <profile-id>                 Show profile with generation history
+  create --type <type> --name <n>   Create a profile
+           [--input key=val ...]
+           [--param key=val ...]
+  update <profile-id>               Update a profile
+           [--name <n>]
+           [--param key=val ...]
+           [--input key=val ...]
+  delete <profile-id>               Delete a profile
+"""
+
+
+def _parse_key_value_args(args: list[str], flag: str) -> dict[str, str]:
+    """Parse repeated --flag key=value pairs from argv.
+
+    Args:
+        args: The argument list to scan.
+        flag: The flag name (e.g. "--param").
+
+    Returns:
+        A dict of parsed key=value pairs.
+    """
+    result: dict[str, str] = {}
+    i = 0
+    while i < len(args):
+        if args[i] == flag and i + 1 < len(args):
+            kv = args[i + 1]
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                result[k] = v
+            i += 2
+        else:
+            i += 1
+    return result
+
+
+def _cmd_profile() -> None:
+    if len(sys.argv) < 3:
+        print(_PROFILE_USAGE)
+        sys.exit(1)
+
+    subcmd = sys.argv[2]
+
+    if subcmd == "list":
+        resp = _api_request("GET", "/api/v1/generator-profiles")
+        profiles = resp.json()
+        if not profiles:
+            print("No generator profiles.")
+            return
+        for p in profiles:
+            params_str = ", ".join(
+                f"{k}={v}" for k, v in sorted(p.get("parameter_values", {}).items())
+            )
+            print(f"{p['name']} ({p['generator_type']})")
+            print(f"  id: {p['id']}")
+            if params_str:
+                print(f"  params: {params_str}")
+            created = p["created_at"][:19].replace("T", " ")
+            print(f"  created: {created}")
+            print()
+
+    elif subcmd == "show":
+        if len(sys.argv) < 4:
+            print("Usage: resonance-api profile show <profile-id>")
+            sys.exit(1)
+        profile_id = sys.argv[3]
+        resp = _api_request("GET", f"/api/v1/generator-profiles/{profile_id}")
+        p = resp.json()
+        params_str = ", ".join(
+            f"{k}={v}" for k, v in sorted(p.get("parameter_values", {}).items())
+        )
+        print(f"{p['name']} ({p['generator_type']})")
+        print(f"  id: {p['id']}")
+        if params_str:
+            print(f"  params: {params_str}")
+        inputs = p.get("input_references", {})
+        if inputs:
+            inputs_str = ", ".join(f"{k}={v}" for k, v in sorted(inputs.items()))
+            print(f"  inputs: {inputs_str}")
+        created = p["created_at"][:19].replace("T", " ")
+        updated = p["updated_at"][:19].replace("T", " ")
+        print(f"  created: {created}")
+        print(f"  updated: {updated}")
+        generations = p.get("generations", [])
+        if generations:
+            print(f"  generations ({len(generations)}):")
+            for g in generations:
+                gen_date = g["created_at"][:19].replace("T", " ")
+                duration = g.get("generation_duration_ms")
+                dur_str = f" ({duration}ms)" if duration else ""
+                freshness = g.get("freshness_actual")
+                fresh_str = f" freshness={freshness}" if freshness is not None else ""
+                print(f"    {gen_date} playlist={g['playlist_id']}{fresh_str}{dur_str}")
+
+    elif subcmd == "create":
+        remaining = sys.argv[3:]
+        name: str | None = None
+        gen_type: str | None = None
+        # Parse --name and --type
+        i = 0
+        while i < len(remaining):
+            if remaining[i] == "--name" and i + 1 < len(remaining):
+                name = remaining[i + 1]
+                i += 2
+            elif remaining[i] == "--type" and i + 1 < len(remaining):
+                gen_type = remaining[i + 1]
+                i += 2
+            else:
+                i += 1
+        if not name or not gen_type:
+            print("Usage: resonance-api profile create --type <type> --name <name>")
+            sys.exit(1)
+        inputs = _parse_key_value_args(remaining, "--input")
+        params = _parse_key_value_args(remaining, "--param")
+        body: dict[str, object] = {
+            "name": name,
+            "generator_type": gen_type,
+            "input_references": inputs,
+        }
+        if params:
+            body["parameter_values"] = {k: int(v) for k, v in params.items()}
+        resp = _api_request("POST", "/api/v1/generator-profiles", json=body)
+        data = resp.json()
+        print(f"Created profile: {data['name']} ({data['generator_type']})")
+        print(f"  id: {data['profile_id']}")
+
+    elif subcmd == "update":
+        if len(sys.argv) < 4:
+            print("Usage: resonance-api profile update <profile-id> [--name ...] ...")
+            sys.exit(1)
+        profile_id = sys.argv[3]
+        remaining = sys.argv[4:]
+        body_update: dict[str, object] = {}
+        # Parse --name
+        i = 0
+        while i < len(remaining):
+            if remaining[i] == "--name" and i + 1 < len(remaining):
+                body_update["name"] = remaining[i + 1]
+                i += 2
+            else:
+                i += 1
+        params = _parse_key_value_args(remaining, "--param")
+        if params:
+            body_update["parameter_values"] = {k: int(v) for k, v in params.items()}
+        inputs = _parse_key_value_args(remaining, "--input")
+        if inputs:
+            body_update["input_references"] = inputs
+        if not body_update:
+            print("Nothing to update. Use --name, --param, or --input.")
+            sys.exit(1)
+        resp = _api_request(
+            "PATCH",
+            f"/api/v1/generator-profiles/{profile_id}",
+            json=body_update,
+        )
+        data = resp.json()
+        print(f"Updated profile: {data['name']} ({data['generator_type']})")
+        print(f"  id: {data['id']}")
+
+    elif subcmd == "delete":
+        if len(sys.argv) < 4:
+            print("Usage: resonance-api profile delete <profile-id>")
+            sys.exit(1)
+        profile_id = sys.argv[3]
+        _api_request("DELETE", f"/api/v1/generator-profiles/{profile_id}")
+        print(f"Deleted profile {profile_id}")
+
+    else:
+        print(f"Unknown profile subcommand: {subcmd}")
+        print(_PROFILE_USAGE)
+        sys.exit(1)
+
+
+def _cmd_generate() -> None:
+    if len(sys.argv) < 3:
+        print(
+            "Usage: resonance-api generate <profile-id>"
+            " [--freshness N] [--max-tracks N]"
+        )
+        sys.exit(1)
+    profile_id = sys.argv[2]
+    remaining = sys.argv[3:]
+
+    body: dict[str, int] = {}
+    i = 0
+    while i < len(remaining):
+        if remaining[i] == "--freshness" and i + 1 < len(remaining):
+            body["freshness_target"] = int(remaining[i + 1])
+            i += 2
+        elif remaining[i] == "--max-tracks" and i + 1 < len(remaining):
+            body["max_tracks"] = int(remaining[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    print(f"Triggering generation for profile {profile_id}...")
+    resp = _api_request(
+        "POST",
+        f"/api/v1/generator-profiles/{profile_id}/generate",
+        json=body if body else None,
+    )
+    data = resp.json()
+    task_id = data.get("task_id", "")
+    result = _poll_task(task_id, "Generating playlist")
+    playlist_id = result.get("playlist_id", "unknown")
+    print(f"Playlist created: {playlist_id}")
+
+
+def _cmd_playlists() -> None:
+    resp = _api_request("GET", "/api/v1/playlists")
+    playlists = resp.json()
+    if not playlists:
+        print("No playlists.")
+        return
+    for p in playlists:
+        count = p.get("track_count", 0)
+        pinned = " [pinned]" if p.get("is_pinned") else ""
+        print(f"{p['name']} ({count} tracks){pinned}")
+        print(f"  id: {p['id']}")
+        created = p["created_at"][:19].replace("T", " ")
+        print(f"  created: {created}")
+        print()
+
+
+def _cmd_playlist() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api playlist <id> [diff <other-id>]")
+        sys.exit(1)
+
+    # Check for diff subcommand
+    if sys.argv[2] == "diff":
+        if len(sys.argv) < 5:
+            print("Usage: resonance-api playlist diff <playlist-id> <other-id>")
+            sys.exit(1)
+        playlist_id = sys.argv[3]
+        other_id = sys.argv[4]
+        resp = _api_request("GET", f"/api/v1/playlists/{playlist_id}/diff/{other_id}")
+        data = resp.json()
+        print(f"Playlist diff: {data['playlist_a_id']} vs {data['playlist_b_id']}")
+        print(f"  added:   {data['added_count']}")
+        print(f"  removed: {data['removed_count']}")
+        print(f"  common:  {data['common_count']}")
+        return
+
+    playlist_id = sys.argv[2]
+
+    # Check for 'diff' as third arg: playlist <id> diff <other-id>
+    if len(sys.argv) >= 5 and sys.argv[3] == "diff":
+        other_id = sys.argv[4]
+        resp = _api_request("GET", f"/api/v1/playlists/{playlist_id}/diff/{other_id}")
+        data = resp.json()
+        print(f"Playlist diff: {data['playlist_a_id']} vs {data['playlist_b_id']}")
+        print(f"  added:   {data['added_count']}")
+        print(f"  removed: {data['removed_count']}")
+        print(f"  common:  {data['common_count']}")
+        return
+
+    resp = _api_request("GET", f"/api/v1/playlists/{playlist_id}")
+    p = resp.json()
+    count = p.get("track_count", 0)
+    pinned = " [pinned]" if p.get("is_pinned") else ""
+    print(f"{p['name']} ({count} tracks){pinned}")
+
+    gen = p.get("generation")
+    if gen:
+        profile_name = gen.get("profile_name") or gen["profile_id"]
+        freshness = gen.get("freshness_actual")
+        fresh_str = f", freshness={freshness}" if freshness is not None else ""
+        print(f"  generated from: {profile_name}{fresh_str}")
+
+    tracks = p.get("tracks", [])
+    for t in tracks:
+        pos = t["position"]
+        source_tag = f"[{t['source']}]" if t.get("source") else ""
+        score = t.get("score")
+        score_str = f" ({score:.2f})" if score is not None else ""
+        print(f"  {pos}. {t['title']} -- {t['artist_name']} {source_tag}{score_str}")
+
+
 def _cmd_set_role() -> None:
     if len(sys.argv) != 4:
         print("Usage: resonance-api set-role <user_id> <role>")
@@ -444,6 +732,10 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "dedup": ("Run deduplication", _cmd_dedup),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
+    "profile": ("Manage generator profiles", _cmd_profile),
+    "generate": ("Generate a playlist", _cmd_generate),
+    "playlists": ("List playlists", _cmd_playlists),
+    "playlist": ("Show or diff a playlist", _cmd_playlist),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }
 
