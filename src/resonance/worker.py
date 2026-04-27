@@ -22,6 +22,7 @@ import structlog
 
 import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
+import resonance.connectors.base as base_module
 import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -30,9 +31,16 @@ import resonance.connectors.songkick as songkick_module
 import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
+import resonance.generators.concert_prep as concert_prep_module
+import resonance.generators.parameters as params_module
 import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
+import resonance.models.concert as concert_models
+import resonance.models.generator as generator_models
+import resonance.models.music as music_models
+import resonance.models.playlist as playlist_models
 import resonance.models.task as task_module
+import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.sync.lastfm as lastfm_sync
@@ -61,6 +69,18 @@ _TASK_DISPATCH: dict[
         lambda t: (str(t.service_connection_id), str(t.id)),
     ),
     types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
+    types_module.TaskType.PLAYLIST_GENERATION: (
+        "generate_playlist",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.TRACK_DISCOVERY: (
+        "discover_tracks_for_artist",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.TRACK_SCORING: (
+        "score_and_build_playlist",
+        lambda t: (str(t.id),),
+    ),
 }
 
 
@@ -431,6 +451,587 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Playlist generation pipeline
+# ---------------------------------------------------------------------------
+
+# Minimum number of library tracks per artist before skipping discovery.
+_MIN_LIBRARY_TRACKS = 5
+
+
+async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
+    """Orchestrate playlist generation: create discovery + scoring child tasks.
+
+    Loads the PLAYLIST_GENERATION task, resolves the event's artists,
+    checks library coverage, creates TRACK_DISCOVERY children for artists
+    with few/no tracks, and always creates one TRACK_SCORING child.
+    Sequential dispatch ensures discovery tasks run one at a time (for
+    MusicBrainz rate limits), then scoring runs last.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the PLAYLIST_GENERATION Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("generate_playlist_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            profile_id = str(task.params.get("profile_id", ""))
+            log = log.bind(profile_id=profile_id)
+
+            # Load profile
+            profile_result = await session.execute(
+                sa.select(generator_models.GeneratorProfile).where(
+                    generator_models.GeneratorProfile.id == uuid.UUID(profile_id)
+                )
+            )
+            profile = profile_result.scalar_one_or_none()
+            if profile is None:
+                await lifecycle_module.fail_task(
+                    session, task, f"Profile not found: {profile_id}"
+                )
+                await session.commit()
+                return
+
+            event_id = str(profile.input_references.get("event_id", ""))
+            log = log.bind(event_id=event_id)
+
+            # Resolve event artists
+            # 1. Confirmed EventArtist rows
+            ea_result = await session.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == uuid.UUID(event_id)
+                )
+            )
+            event_artists = ea_result.scalars().all()
+            artist_ids: list[uuid.UUID] = [ea.artist_id for ea in event_artists]
+
+            # 2. Accepted EventArtistCandidate rows
+            eac_result = await session.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.event_id == uuid.UUID(event_id),
+                    concert_models.EventArtistCandidate.status
+                    == types_module.CandidateStatus.ACCEPTED,
+                    concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
+                )
+            )
+            accepted_candidates = eac_result.scalars().all()
+            for cand in accepted_candidates:
+                if (
+                    cand.matched_artist_id is not None
+                    and cand.matched_artist_id not in artist_ids
+                ):
+                    artist_ids.append(cand.matched_artist_id)
+
+            if not artist_ids:
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {"message": "No artists found for event", "tracks_created": 0},
+                )
+                await session.commit()
+                log.info("generate_playlist_no_artists")
+                return
+
+            # Load artist objects for names and service_links
+            artists_result = await session.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id.in_(artist_ids)
+                )
+            )
+            artists_by_id = {a.id: a for a in artists_result.scalars().all()}
+
+            # Check library coverage per artist
+            artists_needing_discovery: list[uuid.UUID] = []
+            for aid in artist_ids:
+                count_result = await session.execute(
+                    sa.select(sa.func.count()).where(
+                        music_models.ListeningEvent.user_id == task.user_id,
+                        music_models.ListeningEvent.track_id.in_(
+                            sa.select(music_models.Track.id).where(
+                                music_models.Track.artist_id == aid
+                            )
+                        ),
+                    )
+                )
+                listen_count: int = count_result.scalar_one()
+                if listen_count < _MIN_LIBRARY_TRACKS:
+                    artists_needing_discovery.append(aid)
+
+            # Create child tasks
+            arq_redis = wctx["redis"]
+            children: list[task_module.Task] = []
+
+            # Discovery tasks (one per artist needing tracks)
+            for aid in artists_needing_discovery:
+                artist_obj = artists_by_id.get(aid)
+                artist_name = artist_obj.name if artist_obj else "Unknown"
+                service_links = artist_obj.service_links if artist_obj else None
+                child = task_module.Task(
+                    id=uuid.uuid4(),
+                    user_id=task.user_id,
+                    parent_id=task.id,
+                    task_type=types_module.TaskType.TRACK_DISCOVERY,
+                    status=types_module.SyncStatus.PENDING,
+                    params={
+                        "artist_id": str(aid),
+                        "artist_name": artist_name,
+                        "service_links": service_links,
+                    },
+                    description=f"Discover tracks: {artist_name}",
+                )
+                session.add(child)
+                children.append(child)
+
+            # Scoring task (always created, runs after discovery)
+            scoring_child = task_module.Task(
+                id=uuid.uuid4(),
+                user_id=task.user_id,
+                parent_id=task.id,
+                task_type=types_module.TaskType.TRACK_SCORING,
+                status=types_module.SyncStatus.PENDING,
+                params={
+                    "profile_id": profile_id,
+                    "event_id": event_id,
+                },
+                description="Score and build playlist",
+            )
+            session.add(scoring_child)
+            children.append(scoring_child)
+            await session.commit()
+
+            # Enqueue the first child (sequential dispatch)
+            first_child = children[0]
+            dispatch = _TASK_DISPATCH.get(first_child.task_type)
+            if dispatch is not None:
+                job_name, args_builder = dispatch
+                args = args_builder(first_child)
+                await arq_redis.enqueue_job(
+                    job_name,
+                    *args,
+                    _job_id=f"{job_name}:{first_child.id}",
+                )
+            log.info(
+                "generate_playlist_planned",
+                discovery_tasks=len(artists_needing_discovery),
+                total_children=len(children),
+            )
+
+        except Exception:
+            log.exception("generate_playlist_failed")
+            task_reload = await _load_task(session, task_id)
+            if task_reload is not None:
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
+                await session.commit()
+
+
+async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
+    """Discover tracks for a single artist via external connectors.
+
+    Loads the TRACK_DISCOVERY task, calls the discovery connector, upserts
+    found tracks into the Track table, and cascades to the next sibling
+    or triggers scoring.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the TRACK_DISCOVERY Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    connector_registry = wctx["connector_registry"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("discover_tracks_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            artist_id_str = str(task.params.get("artist_id", ""))
+            artist_name = str(task.params.get("artist_name", ""))
+            service_links = task.params.get("service_links")
+            log = log.bind(artist_name=artist_name, artist_id=artist_id_str)
+            log.info("discover_tracks_started")
+
+            # Get a connector with TRACK_DISCOVERY capability
+            connectors = connector_registry.get_by_capability(
+                base_module.ConnectorCapability.TRACK_DISCOVERY
+            )
+            if not connectors:
+                await lifecycle_module.fail_task(
+                    session, task, "No connector with TRACK_DISCOVERY capability"
+                )
+                await session.commit()
+                # Still check parent completion so pipeline doesn't stall
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
+                return
+
+            connector = connectors[0]
+            service_links_dict: dict[str, str] | None = None
+            if isinstance(service_links, dict):
+                service_links_dict = {str(k): str(v) for k, v in service_links.items()}
+
+            try:
+                # discover_tracks is defined on connectors that declare
+                # TRACK_DISCOVERY capability (e.g., ListenBrainzConnector).
+                # BaseConnector doesn't declare it, so cast to Any.
+                discovered: list[base_module.DiscoveredTrack] = await typing.cast(
+                    "Any", connector
+                ).discover_tracks(
+                    artist_name,
+                    service_links_dict,
+                    limit=20,
+                )
+            except base_module.RateLimitExceededError as exc:
+                task.status = types_module.SyncStatus.DEFERRED
+                task.deferred_until = datetime.datetime.now(
+                    datetime.UTC
+                ) + datetime.timedelta(seconds=exc.retry_after)
+                await session.commit()
+                arq_redis_defer = wctx["redis"]
+                await arq_redis_defer.enqueue_job(
+                    "discover_tracks_for_artist",
+                    str(task.id),
+                    _job_id=f"discover_tracks_for_artist:{task.id}",
+                    _defer_by=datetime.timedelta(seconds=exc.retry_after),
+                )
+                log.info(
+                    "discover_tracks_deferred",
+                    retry_after=exc.retry_after,
+                    deferred_until=str(task.deferred_until),
+                )
+                return
+
+            # Upsert discovered tracks
+            tracks_found = 0
+            artist_uuid = uuid.UUID(artist_id_str)
+            for dt in discovered:
+                # Try to find existing track by title + artist
+                existing_result = await session.execute(
+                    sa.select(music_models.Track).where(
+                        music_models.Track.title == dt.title,
+                        music_models.Track.artist_id == artist_uuid,
+                    )
+                )
+                existing = existing_result.scalar_one_or_none()
+                if existing is None:
+                    # Look up artist to confirm it exists
+                    artist_result = await session.execute(
+                        sa.select(music_models.Artist).where(
+                            music_models.Artist.id == artist_uuid,
+                        )
+                    )
+                    artist_obj = artist_result.scalar_one_or_none()
+                    if artist_obj is not None:
+                        new_track = music_models.Track(
+                            id=uuid.uuid4(),
+                            title=dt.title,
+                            artist_id=artist_uuid,
+                            duration_ms=dt.duration_ms,
+                            service_links={dt.service.value: dt.external_id},
+                        )
+                        session.add(new_track)
+                        tracks_found += 1
+                else:
+                    # Update service_links if needed
+                    if existing.service_links is None:
+                        existing.service_links = {}
+                    updated_links = dict(existing.service_links)
+                    updated_links[dt.service.value] = dt.external_id
+                    existing.service_links = updated_links
+                    tracks_found += 1
+
+            await lifecycle_module.complete_task(
+                session, task, {"tracks_found": tracks_found}
+            )
+            await session.commit()
+            log.info("discover_tracks_completed", tracks_found=tracks_found)
+
+        except Exception:
+            log.exception("discover_tracks_failed")
+            task_reload = await _load_task(session, task_id)
+            if task_reload is not None:
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
+                await session.commit()
+                task = task_reload
+
+        # Check parent completion (may enqueue next sibling or scoring)
+        if task is not None:
+            arq_redis = wctx["redis"]
+            await _check_parent_completion(session, task, arq_redis, log)
+
+
+async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
+    """Score tracks and build the final playlist.
+
+    Runs after all discovery tasks complete. Queries library data, builds
+    CandidateTrack objects, calls the scoring engine, and creates the
+    Playlist + PlaylistTrack + GenerationRecord rows.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the TRACK_SCORING Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("score_and_build_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            profile_id = str(task.params.get("profile_id", ""))
+            log = log.bind(profile_id=profile_id)
+            log.info("score_and_build_started")
+
+            # Load profile
+            profile_result = await session.execute(
+                sa.select(generator_models.GeneratorProfile).where(
+                    generator_models.GeneratorProfile.id == uuid.UUID(profile_id)
+                )
+            )
+            profile = profile_result.scalar_one_or_none()
+            if profile is None:
+                await lifecycle_module.fail_task(
+                    session, task, f"Profile not found: {profile_id}"
+                )
+                await session.commit()
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
+                return
+
+            event_id = str(profile.input_references.get("event_id", ""))
+            log = log.bind(event_id=event_id)
+
+            # Resolve artist IDs from event
+            ea_result = await session.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == uuid.UUID(event_id)
+                )
+            )
+            event_artists = ea_result.scalars().all()
+            artist_ids: set[uuid.UUID] = {ea.artist_id for ea in event_artists}
+
+            eac_result = await session.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.event_id == uuid.UUID(event_id),
+                    concert_models.EventArtistCandidate.status
+                    == types_module.CandidateStatus.ACCEPTED,
+                    concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
+                )
+            )
+            for cand in eac_result.scalars().all():
+                if cand.matched_artist_id is not None:
+                    artist_ids.add(cand.matched_artist_id)
+
+            # Query all tracks by these artists
+            tracks_result = await session.execute(
+                sa.select(music_models.Track)
+                .where(music_models.Track.artist_id.in_(artist_ids))
+                .options(sa_orm.joinedload(music_models.Track.artist))
+            )
+            all_tracks = tracks_result.scalars().all()
+
+            # Query listening event counts grouped by track
+            listen_counts_result = await session.execute(
+                sa.select(
+                    music_models.ListeningEvent.track_id,
+                    sa.func.count().label("cnt"),
+                )
+                .where(
+                    music_models.ListeningEvent.user_id == task.user_id,
+                    music_models.ListeningEvent.track_id.in_(
+                        [t.id for t in all_tracks]
+                    ),
+                )
+                .group_by(music_models.ListeningEvent.track_id)
+            )
+            listen_counts: dict[uuid.UUID, int] = {
+                row[0]: row[1] for row in listen_counts_result.all()
+            }
+
+            # Query user track relations (likes/loves)
+            utr_result = await session.execute(
+                sa.select(taste_models.UserTrackRelation).where(
+                    taste_models.UserTrackRelation.user_id == task.user_id,
+                    taste_models.UserTrackRelation.track_id.in_(
+                        [t.id for t in all_tracks]
+                    ),
+                )
+            )
+            liked_track_ids: set[uuid.UUID] = {
+                r.track_id for r in utr_result.scalars().all()
+            }
+
+            # Get previous playlist track IDs for freshness
+            prev_gen_result = await session.execute(
+                sa.select(generator_models.GenerationRecord)
+                .where(
+                    generator_models.GenerationRecord.profile_id
+                    == uuid.UUID(profile_id)
+                )
+                .order_by(generator_models.GenerationRecord.created_at.desc())
+                .limit(1)
+            )
+            prev_gen = prev_gen_result.scalar_one_or_none()
+            previous_track_ids: set[uuid.UUID] = set()
+            if prev_gen is not None:
+                # Load previous playlist tracks
+                prev_pt_result = await session.execute(
+                    sa.select(playlist_models.PlaylistTrack.track_id).where(
+                        playlist_models.PlaylistTrack.playlist_id
+                        == prev_gen.playlist_id
+                    )
+                )
+                previous_track_ids = {row[0] for row in prev_pt_result.all()}
+
+            # Build CandidateTrack objects
+            candidates: list[concert_prep_module.CandidateTrack] = []
+            for track in all_tracks:
+                lc = listen_counts.get(track.id, 0)
+                in_library = lc > 0 or track.id in liked_track_ids
+                candidates.append(
+                    concert_prep_module.CandidateTrack(
+                        track_id=track.id,
+                        title=track.title,
+                        artist_name=track.artist.name,
+                        artist_id=track.artist_id,
+                        is_target_artist=track.artist_id in artist_ids,
+                        listen_count=lc,
+                        in_library=in_library,
+                        popularity_score=0,
+                        source="library" if in_library else "discovery",
+                    )
+                )
+
+            # Apply parameter defaults
+            params = params_module.apply_defaults(dict(profile.parameter_values))
+
+            # max_tracks and freshness_target are generation-time options
+            # stored on the parent PLAYLIST_GENERATION task, not the profile
+            parent_params: dict[str, object] = {}
+            if task.parent_id is not None:
+                parent_result = await session.execute(
+                    sa.select(task_module.Task).where(
+                        task_module.Task.id == task.parent_id
+                    )
+                )
+                parent = parent_result.scalar_one_or_none()
+                if parent is not None:
+                    parent_params = parent.params or {}
+            max_tracks = int(str(parent_params.get("max_tracks", 30)))
+            freshness_target_raw = parent_params.get("freshness_target")
+            freshness_target: int | None = (
+                int(str(freshness_target_raw))
+                if freshness_target_raw is not None
+                else None
+            )
+
+            # Score and select
+            selection = concert_prep_module.score_and_select(
+                candidates=candidates,
+                params=params,
+                max_tracks=max_tracks,
+                previous_track_ids=previous_track_ids,
+                freshness_target=freshness_target,
+            )
+
+            # Create Playlist
+            playlist = playlist_models.Playlist(
+                id=uuid.uuid4(),
+                user_id=task.user_id,
+                name=str(profile.name),
+                description=f"Generated from profile: {profile.name}",
+                track_count=len(selection.tracks),
+            )
+            session.add(playlist)
+
+            # Create PlaylistTrack rows
+            for scored in selection.tracks:
+                pt = playlist_models.PlaylistTrack(
+                    id=uuid.uuid4(),
+                    playlist_id=playlist.id,
+                    track_id=scored.track_id,
+                    position=scored.position,
+                    score=scored.score,
+                    source=scored.source,
+                )
+                session.add(pt)
+
+            # Create GenerationRecord
+            gen_record = generator_models.GenerationRecord(
+                id=uuid.uuid4(),
+                profile_id=uuid.UUID(profile_id),
+                playlist_id=playlist.id,
+                parameter_snapshot=params,
+                freshness_target=freshness_target,
+                freshness_actual=selection.freshness_actual,
+                track_sources_summary=selection.sources_summary,
+            )
+            session.add(gen_record)
+
+            await lifecycle_module.complete_task(
+                session,
+                task,
+                {
+                    "playlist_id": str(playlist.id),
+                    "tracks_selected": len(selection.tracks),
+                    "sources_summary": selection.sources_summary,
+                },
+            )
+            await session.commit()
+            log.info(
+                "score_and_build_completed",
+                playlist_id=str(playlist.id),
+                tracks_selected=len(selection.tracks),
+            )
+
+        except Exception:
+            log.exception("score_and_build_failed")
+            task_reload = await _load_task(session, task_id)
+            if task_reload is not None:
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
+                await session.commit()
+                task = task_reload
+
+        # Check parent completion
+        if task is not None:
+            arq_redis = wctx["redis"]
+            await _check_parent_completion(session, task, arq_redis, log)
+
+
+# ---------------------------------------------------------------------------
 # Parent completion check
 # ---------------------------------------------------------------------------
 
@@ -481,11 +1082,22 @@ async def _check_parent_completion(
         )
         next_pending = next_pending_result.scalar_one_or_none()
         if next_pending is not None:
-            await arq_redis.enqueue_job(
-                "sync_range",
-                str(next_pending.id),
-                _job_id=f"sync_range:{next_pending.id}",
-            )
+            dispatch = _TASK_DISPATCH.get(next_pending.task_type)
+            if dispatch is not None:
+                job_name, args_builder = dispatch
+                args = args_builder(next_pending)
+                await arq_redis.enqueue_job(
+                    job_name,
+                    *args,
+                    _job_id=f"{job_name}:{next_pending.id}",
+                )
+            else:
+                # Fallback for unknown task types
+                await arq_redis.enqueue_job(
+                    "sync_range",
+                    str(next_pending.id),
+                    _job_id=f"sync_range:{next_pending.id}",
+                )
             log.info(
                 "next_sibling_enqueued",
                 next_task_id=str(next_pending.id),
@@ -906,6 +1518,13 @@ class WorkerSettings:
         arq.func(
             heartbeat_module.with_heartbeat(concert_worker.sync_calendar_feed),
             timeout=3600,
+        ),
+        arq.func(heartbeat_module.with_heartbeat(generate_playlist), timeout=3600),
+        arq.func(
+            heartbeat_module.with_heartbeat(discover_tracks_for_artist), timeout=600
+        ),
+        arq.func(
+            heartbeat_module.with_heartbeat(score_and_build_playlist), timeout=600
         ),
     ]
     on_startup = startup

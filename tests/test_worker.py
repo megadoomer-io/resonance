@@ -44,13 +44,16 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 4
+        assert len(funcs) == 7
         names = {f.name for f in funcs}
         assert names == {
             "plan_sync",
             "sync_range",
             "run_bulk_job",
             "sync_calendar_feed",
+            "generate_playlist",
+            "discover_tracks_for_artist",
+            "score_and_build_playlist",
         }
 
     def test_lifecycle_hooks(self) -> None:
@@ -1923,3 +1926,773 @@ class TestWorkerShutdown:
             mock_engine.dispose.assert_awaited_once()
         finally:
             sync_base.shutdown_requested.clear()
+
+
+# ---------------------------------------------------------------------------
+# generate_playlist tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratePlaylist:
+    """Tests for the generate_playlist worker function."""
+
+    @pytest.mark.asyncio
+    async def test_creates_discovery_tasks_for_artists(self) -> None:
+        """Artists with no library tracks get TRACK_DISCOVERY child tasks."""
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist1_id = uuid.uuid4()
+        artist2_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load profile
+        import resonance.models.generator as generator_models
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.parameter_values = {}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        # 3. Query EventArtist — returns two confirmed artists
+        import resonance.models.concert as concert_models
+
+        ea1 = MagicMock(spec=concert_models.EventArtist)
+        ea1.artist_id = artist1_id
+        ea2 = MagicMock(spec=concert_models.EventArtist)
+        ea2.artist_id = artist2_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea1, ea2]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        # 4. Query EventArtistCandidate with ACCEPTED — none
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        # 5. Query Artist objects for service_links
+        import resonance.models.music as music_models
+
+        mock_artist1 = MagicMock(spec=music_models.Artist)
+        mock_artist1.id = artist1_id
+        mock_artist1.name = "Artist One"
+        mock_artist1.service_links = {"listenbrainz": "mb-id-1"}
+        mock_artist2 = MagicMock(spec=music_models.Artist)
+        mock_artist2.id = artist2_id
+        mock_artist2.name = "Artist Two"
+        mock_artist2.service_links = {"listenbrainz": "mb-id-2"}
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [mock_artist1, mock_artist2]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        # 6-7. ListeningEvent count per artist — both return 0 (no library tracks)
+        listen_count_1 = MagicMock()
+        listen_count_1.scalar_one.return_value = 0
+        listen_count_2 = MagicMock()
+        listen_count_2.scalar_one.return_value = 0
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_count_1,
+            listen_count_2,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # Should have called session.add for: 2 discovery tasks + 1 scoring task = 3
+        assert session.add.call_count == 3
+
+        # Verify the added tasks
+        added_tasks = [call.args[0] for call in session.add.call_args_list]
+        discovery_tasks = [
+            t
+            for t in added_tasks
+            if t.task_type == types_module.TaskType.TRACK_DISCOVERY
+        ]
+        scoring_tasks = [
+            t for t in added_tasks if t.task_type == types_module.TaskType.TRACK_SCORING
+        ]
+        assert len(discovery_tasks) == 2
+        assert len(scoring_tasks) == 1
+
+    @pytest.mark.asyncio
+    async def test_enqueues_first_discovery_task(self) -> None:
+        """Only the first discovery task is enqueued (sequential dispatch)."""
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load profile
+        import resonance.models.generator as generator_models
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.parameter_values = {}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        # 3. One confirmed EventArtist
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        # 4. No accepted candidates
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        # 5. Artist objects
+        import resonance.models.music as music_models
+
+        mock_artist = MagicMock(spec=music_models.Artist)
+        mock_artist.id = artist_id
+        mock_artist.name = "Test Artist"
+        mock_artist.service_links = None
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [mock_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        # 6. No library tracks
+        listen_count = MagicMock()
+        listen_count.scalar_one.return_value = 0
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_count,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # Should enqueue only the first child (the discovery task)
+        assert arq_redis.enqueue_job.call_count == 1
+        call_args = arq_redis.enqueue_job.call_args
+        assert call_args.args[0] == "discover_tracks_for_artist"
+
+    @pytest.mark.asyncio
+    async def test_no_discovery_when_all_artists_have_library_tracks(self) -> None:
+        """When all artists have library tracks, skip discovery, enqueue scoring."""
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2. Load profile
+        import resonance.models.generator as generator_models
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.parameter_values = {}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        # 3. One confirmed EventArtist
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        # 4. No accepted candidates
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        # 5. Artist objects
+        import resonance.models.music as music_models
+
+        mock_artist = MagicMock(spec=music_models.Artist)
+        mock_artist.id = artist_id
+        mock_artist.name = "Known Artist"
+        mock_artist.service_links = None
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [mock_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        # 6. Artist has plenty of library tracks
+        listen_count = MagicMock()
+        listen_count.scalar_one.return_value = 25
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_count,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # Should create only 1 child task (scoring, no discovery)
+        assert session.add.call_count == 1
+        added_task = session.add.call_args.args[0]
+        assert added_task.task_type == types_module.TaskType.TRACK_SCORING
+
+        # Should directly enqueue the scoring task
+        assert arq_redis.enqueue_job.call_count == 1
+        call_args = arq_redis.enqueue_job.call_args
+        assert call_args.args[0] == "score_and_build_playlist"
+
+
+# ---------------------------------------------------------------------------
+# discover_tracks_for_artist tests
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverTracksForArtist:
+    """Tests for the discover_tracks_for_artist worker function."""
+
+    @pytest.mark.asyncio
+    async def test_calls_connector_discover_tracks(self) -> None:
+        """Verify connector.discover_tracks is called with correct args."""
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "artist_id": str(artist_id),
+                "artist_name": "Test Artist",
+                "service_links": {"listenbrainz": "mb-id-1"},
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # 2-N. For each discovered track, we'd need upsert queries, but
+        # let the connector return empty for simplicity
+        mock_connector = AsyncMock()
+        mock_connector.discover_tracks = AsyncMock(return_value=[])
+
+        mock_registry = MagicMock()
+        mock_registry.get_by_capability.return_value = [mock_connector]
+
+        # _check_parent_completion mocks
+        pending_count = MagicMock()
+        pending_count.scalar_one.return_value = 1  # scoring task still pending
+        next_pending_task = MagicMock(spec=task_module.Task)
+        next_pending_task.id = uuid.uuid4()
+        next_pending_task.task_type = types_module.TaskType.TRACK_SCORING
+        next_pending_result = MagicMock()
+        next_pending_result.scalar_one_or_none.return_value = next_pending_task
+
+        session.execute.side_effect = [
+            task_result,
+            pending_count,
+            next_pending_result,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.discover_tracks_for_artist(ctx, str(task_id))
+
+        mock_connector.discover_tracks.assert_awaited_once_with(
+            "Test Artist",
+            {"listenbrainz": "mb-id-1"},
+            limit=20,
+        )
+
+    @pytest.mark.asyncio
+    async def test_marks_completed_with_result(self) -> None:
+        """Task is marked COMPLETED with tracks_found count."""
+        import resonance.connectors.base as base_module
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "artist_id": str(artist_id),
+                "artist_name": "Test Artist",
+                "service_links": None,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        # Connector returns 3 discovered tracks
+        discovered = [
+            base_module.DiscoveredTrack(
+                external_id=f"ext-{i}",
+                title=f"Track {i}",
+                artist_name="Test Artist",
+                artist_external_id="mb-id-1",
+                service=types_module.ServiceType.LISTENBRAINZ,
+                popularity_score=50,
+            )
+            for i in range(3)
+        ]
+
+        mock_connector = AsyncMock()
+        mock_connector.discover_tracks = AsyncMock(return_value=discovered)
+
+        mock_registry = MagicMock()
+        mock_registry.get_by_capability.return_value = [mock_connector]
+
+        # For each discovered track, we need:
+        # - track lookup by service_links (returns None = new track)
+        # - artist lookup
+        track_not_found = MagicMock()
+        track_not_found.scalar_one_or_none.return_value = None
+
+        mock_artist = MagicMock()
+        mock_artist.id = artist_id
+        artist_found = MagicMock()
+        artist_found.scalar_one_or_none.return_value = mock_artist
+
+        # _check_parent_completion mocks
+        pending_count = MagicMock()
+        pending_count.scalar_one.return_value = 1
+        next_pending_result = MagicMock()
+        next_pending_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [
+            task_result,
+            # 3 tracks x 2 queries each
+            track_not_found,
+            artist_found,
+            track_not_found,
+            artist_found,
+            track_not_found,
+            artist_found,
+            # _check_parent_completion
+            pending_count,
+            next_pending_result,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.discover_tracks_for_artist(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result is not None
+        assert task.result["tracks_found"] == 3
+
+
+# ---------------------------------------------------------------------------
+# score_and_build_playlist tests
+# ---------------------------------------------------------------------------
+
+
+class TestScoreAndBuildPlaylist:
+    """Tests for the score_and_build_playlist worker function."""
+
+    @pytest.mark.asyncio
+    async def test_creates_playlist_and_tracks(self) -> None:
+        """Verify Playlist, PlaylistTrack, and GenerationRecord are created."""
+        import resonance.models.generator as generator_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        track_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "profile_id": str(profile_id),
+                "event_id": str(event_id),
+            },
+        )
+
+        # Build mock parent task
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": None,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        # 2. Load profile
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "My Concert Playlist"
+        profile.parameter_values = {"familiarity": 70, "hit_depth": 40}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        # 3. Query EventArtist
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        # 4. Query accepted candidates
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        # 5. Query tracks for these artists
+        import resonance.models.music as music_models
+
+        mock_track = MagicMock(spec=music_models.Track)
+        mock_track.id = track_id
+        mock_track.title = "Test Song"
+        mock_track.artist_id = artist_id
+        mock_artist = MagicMock(spec=music_models.Artist)
+        mock_artist.id = artist_id
+        mock_artist.name = "Concert Artist"
+        mock_track.artist = mock_artist
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [mock_track]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        # 6. Query ListeningEvent counts (grouped)
+        listen_rows: list[tuple[object, ...]] = [(track_id, 10)]
+        listen_result = MagicMock()
+        listen_result.all.return_value = listen_rows
+
+        # 7. Query UserTrackRelation
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        # 8. Previous GenerationRecord — none
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = None
+
+        # 9. Load parent task for max_tracks/freshness_target
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        # 10-13. _check_parent_completion mocks
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            profile_result,
+            ea_result,
+            eac_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            parent_for_params_result,
+            # _check_parent_completion
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        # Task should be completed
+        assert task.status == types_module.SyncStatus.COMPLETED
+
+        # Should have added Playlist, PlaylistTrack(s), and GenerationRecord
+        added_objects = [call.args[0] for call in session.add.call_args_list]
+
+        import resonance.models.playlist as playlist_models
+
+        playlists = [
+            o for o in added_objects if isinstance(o, playlist_models.Playlist)
+        ]
+        playlist_tracks = [
+            o for o in added_objects if isinstance(o, playlist_models.PlaylistTrack)
+        ]
+        gen_records = [
+            o for o in added_objects if isinstance(o, generator_models.GenerationRecord)
+        ]
+
+        assert len(playlists) == 1
+        assert len(playlist_tracks) >= 1
+        assert len(gen_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_marks_parent_completed(self) -> None:
+        """After scoring, parent PLAYLIST_GENERATION task is marked complete."""
+        import resonance.models.generator as generator_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "profile_id": str(profile_id),
+                "event_id": str(event_id),
+            },
+        )
+
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": None,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        # 1. _load_task
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        # 2. Load profile
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Concert Playlist"
+        profile.parameter_values = {}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        # 3. No artists (empty event)
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = []
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        # 4. No candidates
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        # 5. No tracks
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = []
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        # 6. No listening events
+        listen_result = MagicMock()
+        listen_result.all.return_value = []
+
+        # 7. No user track relations
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        # 8. No previous generation
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = None
+
+        # 9. Load parent task for max_tracks/freshness_target
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        # 10-13. _check_parent_completion: all children done
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            profile_result,
+            ea_result,
+            eac_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            parent_for_params_result,
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        # Parent should be marked completed
+        assert parent_task.status == types_module.SyncStatus.COMPLETED
+        assert parent_task.completed_at is not None

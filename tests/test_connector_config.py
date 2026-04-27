@@ -153,3 +153,47 @@ class TestRegistryGetConfig:
         registry = registry_module.ConnectorRegistry()
         config = registry.get_config(types_module.ServiceType.BANDCAMP)
         assert config is None
+
+
+class TestTrackDiscoveryCapability:
+    """Tests for the TRACK_DISCOVERY capability and DiscoveredTrack model."""
+
+    def test_track_discovery_exists(self) -> None:
+        assert base_module.ConnectorCapability.TRACK_DISCOVERY == "track_discovery"
+
+    def test_discovered_track_fields(self) -> None:
+        track = base_module.DiscoveredTrack(
+            external_id="abc123",
+            title="Test Song",
+            artist_name="Test Artist",
+            artist_external_id="artist123",
+            service=types_module.ServiceType.LISTENBRAINZ,
+            popularity_score=75,
+        )
+        assert track.title == "Test Song"
+        assert track.popularity_score == 75
+        assert track.duration_ms is None
+
+    def test_discovered_track_defaults(self) -> None:
+        """Verify default values for optional fields."""
+        track = base_module.DiscoveredTrack(
+            external_id="xyz789",
+            title="Another Song",
+            artist_name="Another Artist",
+            artist_external_id="artist789",
+            service=types_module.ServiceType.SPOTIFY,
+        )
+        assert track.popularity_score == 0
+        assert track.duration_ms is None
+
+    def test_discovered_track_with_duration(self) -> None:
+        """DiscoveredTrack accepts an explicit duration_ms."""
+        track = base_module.DiscoveredTrack(
+            external_id="abc123",
+            title="Test Song",
+            artist_name="Test Artist",
+            artist_external_id="artist123",
+            service=types_module.ServiceType.LISTENBRAINZ,
+            duration_ms=240000,
+        )
+        assert track.duration_ms == 240000

@@ -54,6 +54,9 @@ class TaskType(enum.StrEnum):
     PAGE_FETCH = "page_fetch"
     BULK_JOB = "bulk_job"
     CALENDAR_SYNC = "calendar_sync"
+    PLAYLIST_GENERATION = "playlist_generation"
+    TRACK_DISCOVERY = "track_discovery"
+    TRACK_SCORING = "track_scoring"
 
 
 class SyncStatus(enum.StrEnum):
@@ -88,3 +91,29 @@ class CandidateStatus(enum.StrEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+
+
+class GeneratorType(enum.StrEnum):
+    """Types of playlist generators."""
+
+    CONCERT_PREP = "concert_prep"
+    ARTIST_DEEP_DIVE = "artist_deep_dive"
+    REDISCOVERY = "rediscovery"
+    DISCOGRAPHY = "discography"
+    PLAYLIST_REFRESH = "playlist_refresh"
+    CURATED_MIX = "curated_mix"
+
+
+class ParameterScaleType(enum.StrEnum):
+    """Scale types for generator parameters."""
+
+    BIPOLAR = "bipolar"
+    UNIPOLAR = "unipolar"
+
+
+class TrackSource(enum.StrEnum):
+    """How a track was sourced for a playlist."""
+
+    LIBRARY = "library"
+    DISCOVERY = "discovery"
+    MANUAL = "manual"

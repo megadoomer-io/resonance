@@ -53,6 +53,7 @@ class ConnectorCapability(enum.StrEnum):
     FOLLOWS = "follows"
     TRACK_RATINGS = "track_ratings"
     NEW_RELEASES = "new_releases"
+    TRACK_DISCOVERY = "track_discovery"
 
 
 class TokenResponse(pydantic.BaseModel):
@@ -80,6 +81,18 @@ class TrackData(pydantic.BaseModel):
     artist_external_id: str
     artist_name: str
     service: types_module.ServiceType
+    duration_ms: int | None = None
+
+
+class DiscoveredTrack(pydantic.BaseModel):
+    """Track discovered from an external service for playlist generation."""
+
+    external_id: str
+    title: str
+    artist_name: str
+    artist_external_id: str
+    service: types_module.ServiceType
+    popularity_score: int = 0
     duration_ms: int | None = None
 
 
