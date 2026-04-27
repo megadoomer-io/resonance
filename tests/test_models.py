@@ -11,7 +11,9 @@ import sqlalchemy.orm as orm
 import resonance.models as models_module
 import resonance.models.base as base_module
 import resonance.models.concert as concert_module
+import resonance.models.generator as generator_module
 import resonance.models.music as music_module
+import resonance.models.playlist as playlist_module
 import resonance.models.task as task_module
 import resonance.models.taste as taste_module
 import resonance.models.user as user_module
@@ -97,7 +99,7 @@ class TestTaskType:
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
     def test_task_type_count(self) -> None:
-        assert len(types_module.TaskType) == 5
+        assert len(types_module.TaskType) == 8
 
 
 class TestAttendanceStatus:
@@ -839,6 +841,116 @@ class TestUserEventAttendanceModel:
 
 
 # ---------------------------------------------------------------------------
+# Playlist models
+# ---------------------------------------------------------------------------
+
+
+class TestPlaylistModel:
+    """Tests for the Playlist model."""
+
+    def test_table_name(self) -> None:
+        assert playlist_module.Playlist.__tablename__ == "playlists"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = playlist_module.Playlist.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "user_id",
+            "name",
+            "description",
+            "track_count",
+            "is_pinned",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_user_id_fk(self) -> None:
+        col = _get_column(
+            playlist_module.Playlist.__table__,  # type: ignore[arg-type]
+            "user_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "users.id" in fk_targets
+
+    def test_tracks_relationship(self) -> None:
+        mapper: orm.Mapper[playlist_module.Playlist] = orm.class_mapper(
+            playlist_module.Playlist
+        )
+        assert "tracks" in mapper.relationships
+
+    def test_playlist_fields(self) -> None:
+        playlist = models_module.Playlist(
+            user_id=uuid.uuid4(),
+            name="Concert Prep",
+        )
+        assert playlist.name == "Concert Prep"
+        assert playlist.track_count == 0
+        assert playlist.is_pinned is False
+        assert playlist.description is None
+
+
+class TestPlaylistTrackModel:
+    """Tests for the PlaylistTrack model."""
+
+    def test_table_name(self) -> None:
+        assert playlist_module.PlaylistTrack.__tablename__ == "playlist_tracks"
+
+    def test_expected_columns(self) -> None:
+        table: sa.Table = playlist_module.PlaylistTrack.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "playlist_id",
+            "track_id",
+            "position",
+            "score",
+            "source",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_playlist_id_fk(self) -> None:
+        col = _get_column(
+            playlist_module.PlaylistTrack.__table__,  # type: ignore[arg-type]
+            "playlist_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "playlists.id" in fk_targets
+
+    def test_track_id_fk(self) -> None:
+        col = _get_column(
+            playlist_module.PlaylistTrack.__table__,  # type: ignore[arg-type]
+            "track_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "tracks.id" in fk_targets
+
+    def test_playlist_relationship(self) -> None:
+        mapper: orm.Mapper[playlist_module.PlaylistTrack] = orm.class_mapper(
+            playlist_module.PlaylistTrack
+        )
+        assert "playlist" in mapper.relationships
+
+    def test_track_relationship(self) -> None:
+        mapper: orm.Mapper[playlist_module.PlaylistTrack] = orm.class_mapper(
+            playlist_module.PlaylistTrack
+        )
+        assert "track" in mapper.relationships
+
+    def test_playlist_track_fields(self) -> None:
+        track = models_module.PlaylistTrack(
+            playlist_id=uuid.uuid4(),
+            track_id=uuid.uuid4(),
+            position=1,
+            source="library",
+        )
+        assert track.position == 1
+        assert track.source == "library"
+        assert track.score is None
+
+
+# ---------------------------------------------------------------------------
 # Package re-exports
 # ---------------------------------------------------------------------------
 
@@ -887,3 +999,142 @@ class TestModelsPackageExports:
 
     def test_user_event_attendance_exported(self) -> None:
         assert models_module.UserEventAttendance is concert_module.UserEventAttendance
+
+    def test_playlist_exported(self) -> None:
+        assert models_module.Playlist is playlist_module.Playlist
+
+    def test_playlist_track_exported(self) -> None:
+        assert models_module.PlaylistTrack is playlist_module.PlaylistTrack
+
+    def test_generator_profile_exported(self) -> None:
+        assert models_module.GeneratorProfile is generator_module.GeneratorProfile
+
+    def test_generation_record_exported(self) -> None:
+        assert models_module.GenerationRecord is generator_module.GenerationRecord
+
+
+# ---------------------------------------------------------------------------
+# Generator models
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratorModels:
+    def test_generator_profile_fields(self) -> None:
+        profile = models_module.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="Show Prep",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references={"event_id": str(uuid.uuid4())},
+            parameter_values={"hit_depth": 75, "familiarity": 40},
+        )
+        assert profile.name == "Show Prep"
+        assert profile.generator_type == types_module.GeneratorType.CONCERT_PREP
+        assert profile.parameter_values["hit_depth"] == 75
+        assert profile.auto_sync_targets is None
+
+    def test_generation_record_fields(self) -> None:
+        record = models_module.GenerationRecord(
+            profile_id=uuid.uuid4(),
+            playlist_id=uuid.uuid4(),
+            parameter_snapshot={"hit_depth": 75},
+            freshness_target=50,
+        )
+        assert record.freshness_target == 50
+        assert record.freshness_actual is None
+        assert record.generation_duration_ms is None
+
+    def test_generator_profile_table_name(self) -> None:
+        assert generator_module.GeneratorProfile.__tablename__ == "generator_profiles"
+
+    def test_generation_record_table_name(self) -> None:
+        assert generator_module.GenerationRecord.__tablename__ == "generation_records"
+
+    def test_generator_profile_expected_columns(self) -> None:
+        table: sa.Table = generator_module.GeneratorProfile.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "user_id",
+            "name",
+            "generator_type",
+            "input_references",
+            "parameter_values",
+            "auto_sync_targets",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_generation_record_expected_columns(self) -> None:
+        table: sa.Table = generator_module.GenerationRecord.__table__  # type: ignore[assignment]
+        col_names = {c.name for c in table.columns}
+        assert col_names >= {
+            "id",
+            "profile_id",
+            "playlist_id",
+            "parameter_snapshot",
+            "freshness_target",
+            "freshness_actual",
+            "generation_duration_ms",
+            "track_sources_summary",
+            "created_at",
+            "updated_at",
+        }
+
+    def test_profile_user_id_fk(self) -> None:
+        col = _get_column(
+            generator_module.GeneratorProfile.__table__,  # type: ignore[arg-type]
+            "user_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "users.id" in fk_targets
+
+    def test_record_profile_id_fk(self) -> None:
+        col = _get_column(
+            generator_module.GenerationRecord.__table__,  # type: ignore[arg-type]
+            "profile_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "generator_profiles.id" in fk_targets
+
+    def test_record_playlist_id_fk(self) -> None:
+        col = _get_column(
+            generator_module.GenerationRecord.__table__,  # type: ignore[arg-type]
+            "playlist_id",
+        )
+        fk_targets = {fk.target_fullname for fk in col.foreign_keys}
+        assert "playlists.id" in fk_targets
+
+    def test_generator_type_is_enum(self) -> None:
+        col = _get_column(
+            generator_module.GeneratorProfile.__table__,  # type: ignore[arg-type]
+            "generator_type",
+        )
+        assert isinstance(col.type, sa.Enum)
+
+    def test_generations_relationship(self) -> None:
+        mapper: orm.Mapper[generator_module.GeneratorProfile] = orm.class_mapper(
+            generator_module.GeneratorProfile
+        )
+        assert "generations" in mapper.relationships
+
+    def test_profile_relationship(self) -> None:
+        mapper: orm.Mapper[generator_module.GenerationRecord] = orm.class_mapper(
+            generator_module.GenerationRecord
+        )
+        assert "profile" in mapper.relationships
+
+    def test_playlist_relationship(self) -> None:
+        mapper: orm.Mapper[generator_module.GenerationRecord] = orm.class_mapper(
+            generator_module.GenerationRecord
+        )
+        assert "playlist" in mapper.relationships
+
+    def test_generator_profile_json_defaults(self) -> None:
+        """JSON columns with mutable defaults get fresh dicts at construction."""
+        profile = models_module.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="Test",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+        )
+        assert profile.input_references == {}
+        assert profile.parameter_values == {}
