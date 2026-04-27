@@ -13,8 +13,7 @@ For Spotify-specific API constraints, see [spotify-api-constraints.md](spotify-a
 Resonance is a personal media discovery platform that aggregates music data from
 external services (Spotify, Last.fm, ListenBrainz) into a unified data model.
 It normalizes listening history, artist follows, and track ratings across
-services, enabling cross-service analytics and (eventually) curated playlist
-generation.
+services, enabling cross-service analytics and curated playlist generation.
 
 The data model is multi-user-ready -- each entity is scoped to a user via
 foreign keys -- but the current deployment is single-user. The application lives
@@ -46,17 +45,19 @@ Jinja2 + HTMX, structlog.
                            |      |      |
               +------------+      |      +-------------+
               |                   |                     |
-     +--------v-------+  +-------v--------+   +--------v--------+
-     |   PostgreSQL    |  |     Redis      |   |  arq Worker     |
-     |                 |  |                |   |                  |
-     |  users          |  |  sessions      |   |  plan_sync       |
-     |  service_conns  |  |  task queue    |   |  sync_range      |
-     |  artists        |  |  rate limit    |   |  sync_cal_feed   |
-     |  tracks         |  |  coordination  |   |  run_bulk_job    |
-     |  events         |  +----------------+   |                  |
-     |  relations      |                      +---+-----------+--+
-     |  sync_tasks     |                           |           |
-     +-----------------+                  +--------v---+  +----v----------+
+     +--------v-------+  +-------v--------+   +--------v-----------+
+     |   PostgreSQL    |  |     Redis      |   |  arq Worker        |
+     |                 |  |                |   |                     |
+     |  users          |  |  sessions      |   |  plan_sync          |
+     |  service_conns  |  |  task queue    |   |  sync_range         |
+     |  artists        |  |  rate limit    |   |  sync_cal_feed      |
+     |  tracks         |  |  coordination  |   |  run_bulk_job       |
+     |  events         |  +----------------+   |  generate_playlist  |
+     |  relations      |                       |  discover_tracks    |
+     |  sync_tasks     |                       |  score_and_build    |
+     |  playlists      |                       +---+------------+---+
+     |  gen_profiles   |                           |            |
+     +-----------------+                  +--------v---+  +-----v---------+
                                           | PostgreSQL |  | External APIs |
                                           | (read/write)|  |               |
                                           +------------+  | Spotify       |
@@ -214,6 +215,59 @@ operations, and other async work. Tasks form a hierarchy via `parent_id`.
 Indexes: `(user_id, status)`, `(parent_id, status)`,
 `(service_connection_id, task_type, status)`.
 
+### Playlist
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| user_id | UUID FK | References users |
+| name | String(512) | |
+| description | Text | Nullable |
+| track_count | Integer | Default 0 |
+| is_pinned | Boolean | Default false |
+
+### PlaylistTrack
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| playlist_id | UUID FK | References playlists (CASCADE) |
+| track_id | UUID FK | References tracks (CASCADE) |
+| position | Integer | 1-indexed order within playlist |
+| score | Float | Nullable, composite score from scoring engine |
+| source | String(64) | `library` or `discovery` |
+
+### GeneratorProfile
+
+A saved playlist generation recipe. Stores the generator type, input
+references (e.g., event ID), and parameter values that control scoring.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| user_id | UUID FK | References users |
+| name | String(512) | |
+| generator_type | GeneratorType enum | `concert_prep`, `artist_deep_dive`, etc. |
+| input_references | JSON | `{input_name: id}` (e.g., `{"event_id": "..."}`) |
+| parameter_values | JSON | `{param_name: value}` (e.g., `{"familiarity": 70}`) |
+| auto_sync_targets | JSON | Nullable, future use |
+
+### GenerationRecord
+
+Links a Playlist to the GeneratorProfile run that produced it. Snapshots
+the parameters used so the playlist is reproducible.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| profile_id | UUID FK | References generator_profiles (CASCADE) |
+| playlist_id | UUID FK | References playlists (CASCADE) |
+| parameter_snapshot | JSON | Frozen copy of parameter values at generation time |
+| freshness_target | Integer | Nullable, requested freshness percentage (0-100) |
+| freshness_actual | Float | Nullable, actual freshness achieved |
+| generation_duration_ms | Integer | Nullable |
+| track_sources_summary | JSON | Nullable, `{source: count}` |
+
 ### Cross-Service Entity Resolution
 
 Artists and tracks use `service_links` (a JSON column) to map between external
@@ -256,7 +310,7 @@ The base class provides `_request()`, which handles:
 
 ### ConnectorCapability Enum
 
-Nine capabilities that connectors can declare:
+Ten capabilities that connectors can declare:
 
 | Capability | Description |
 |------------|-------------|
@@ -269,6 +323,7 @@ Nine capabilities that connectors can declare:
 | `FOLLOWS` | Artist follows / subscriptions |
 | `TRACK_RATINGS` | Likes, loves, saved tracks |
 | `NEW_RELEASES` | New album / single releases |
+| `TRACK_DISCOVERY` | Discover tracks for an artist via external APIs |
 
 ### Current Connectors
 
@@ -276,7 +331,7 @@ Nine capabilities that connectors can declare:
 |-----------|---------|-----------|-------------|
 | `SpotifyConnector` | Spotify | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `FOLLOWS`, `TRACK_RATINGS` |
 | `LastFmConnector` | Last.fm | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_RATINGS` |
-| `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY` |
+| `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_DISCOVERY` |
 | `SongkickConnector` | Songkick | Username | Lightweight — calendar feed sync only |
 | `ICalConnector` | iCal | URL | Lightweight — calendar feed sync only |
 | `TestConnector` | Test (mock) | OAuth | `LISTENING_HISTORY` |
@@ -412,6 +467,12 @@ full sync ignores the watermark and fetches everything from the beginning.
 - **PAGE_FETCH** -- (defined in TaskType but not currently used as a separate
   task; page fetching happens within sync_range execution).
 - **BULK_JOB** -- standalone task for bulk operations (dedup, etc.).
+- **PLAYLIST_GENERATION** -- top-level task for playlist generation. Has
+  zero or more TRACK_DISCOVERY children and one TRACK_SCORING child.
+- **TRACK_DISCOVERY** -- discovers tracks for a single artist via a
+  connector with `TRACK_DISCOVERY` capability (e.g., ListenBrainz/MusicBrainz).
+- **TRACK_SCORING** -- scores all candidate tracks and builds the final
+  playlist. Always the last child of a PLAYLIST_GENERATION task.
 
 ### Concurrency
 
@@ -521,6 +582,114 @@ duplicate listening events.
 
 ---
 
+## Generator System
+
+The generator system produces curated playlists from stored recipes. A
+**GeneratorProfile** defines what to generate (generator type, input references
+like an event ID, and parameter values). Running a profile produces a versioned
+**Playlist** through a hierarchical task pipeline.
+
+For the full design rationale, see
+[docs/plans/2026-04-27-playlist-generation-design.md](plans/2026-04-27-playlist-generation-design.md).
+
+### Parameter Registry
+
+Parameters are defined in code (`generators/parameters.py`), not in the
+database. Each parameter has a name, scale type, default value, and endpoint
+labels.
+
+Two scale types:
+
+| Scale Type | Range | Meaning |
+|------------|-------|---------|
+| **Bipolar** | 0-100 | 50 is neutral; 0 and 100 are opposite extremes |
+| **Unipolar** | 0-100 | 0 is "none", 100 is "maximum" |
+
+Current parameters:
+
+| Parameter | Scale | Default | Labels |
+|-----------|-------|---------|--------|
+| `familiarity` | Bipolar | 50 | All Discovery / All Known Tracks |
+| `hit_depth` | Bipolar | 50 | Deep Cuts / Big Hits |
+| `similar_artist_ratio` | Unipolar | 0 | Target Artists Only / Heavy Adjacent Artists |
+
+Each generator type declares its **featured parameters** (the subset of
+parameters relevant to that generator) and **required inputs** via
+`GENERATOR_TYPE_CONFIG` in `generators/parameters.py`.
+
+### Task Hierarchy
+
+Playlist generation uses the same task infrastructure as sync jobs, with three
+task types dispatched sequentially:
+
+```
+API/CLI
+  |
+  v
+Create PLAYLIST_GENERATION task (PENDING)
+  |
+  v
+Enqueue generate_playlist to arq
+  |
+  v
+generate_playlist (worker):
+  - Resolve event artists (EventArtist + accepted EventArtistCandidate)
+  - Check library coverage per artist
+  - Create TRACK_DISCOVERY child for each artist with < 5 library tracks
+  - Create TRACK_SCORING child (always, runs last)
+  - Enqueue first child (sequential dispatch)
+  |
+  v
+discover_tracks_for_artist (worker, per TRACK_DISCOVERY):
+  - Call connector with TRACK_DISCOVERY capability (ListenBrainz/MusicBrainz)
+  - Upsert discovered tracks and service links
+  - On completion: enqueue next sibling or TRACK_SCORING
+  |
+  v
+score_and_build_playlist (worker, TRACK_SCORING):
+  - Load all candidate tracks (library + discovered)
+  - Score each track via composite_score()
+  - Apply freshness filtering (if previous generation exists)
+  - Create Playlist + PlaylistTrack rows
+  - Create GenerationRecord linking profile to playlist
+  - Mark parent PLAYLIST_GENERATION complete
+```
+
+Children are dispatched **sequentially** (one at a time) to respect MusicBrainz
+rate limits. The TRACK_SCORING task is always created last so it runs after all
+discovery is complete.
+
+### Scoring
+
+The scoring engine (`generators/scoring.py`) computes a composite score for
+each candidate track based on three signals:
+
+1. **Familiarity** -- logarithmic curve over listen count + library membership.
+   Higher value = more familiar track.
+2. **Popularity** -- linear mapping from the external 0-100 popularity score.
+   Higher value = more popular track.
+3. **Artist relevance** -- 1.0 for target artists, 0.0 for adjacent artists.
+
+Bipolar parameters shift the score: a `familiarity` value of 80 favors known
+tracks, while 20 favors discovery. The composite score is clamped to [0.0, 1.0].
+
+### Concert Prep Data Flow
+
+The concert prep generator (`generators/concert_prep.py`) follows this flow:
+
+1. **Resolve artists** -- load confirmed EventArtist rows + accepted
+   EventArtistCandidate rows for the event.
+2. **Library pass** -- check how many tracks exist per artist in the user's
+   listening history.
+3. **Discovery pass** -- for artists below the library threshold (< 5 tracks),
+   create TRACK_DISCOVERY tasks that query MusicBrainz for top recordings.
+4. **Scoring** -- score all candidate tracks (library + discovered) using the
+   profile's parameter values.
+5. **Playlist creation** -- take the top N scored tracks, create a Playlist
+   with PlaylistTrack rows, and record a GenerationRecord.
+
+---
+
 ## API Layer
 
 ### Route Groups
@@ -533,6 +702,8 @@ All API routes are versioned under `/api/v1/`:
 | `/api/v1/account` | `account.py` | User profile, service connections |
 | `/api/v1/sync` | `sync.py` | Trigger syncs, check status, dedup, stats |
 | `/api/v1/admin` | `admin.py` | Admin operations (test service connect) |
+| `/api/v1/generator-profiles` | `generators.py` | CRUD profiles, trigger generation |
+| `/api/v1/playlists` | `playlists.py` | List, detail, diff playlists |
 
 ### Authentication
 

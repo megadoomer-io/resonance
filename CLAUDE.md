@@ -42,6 +42,13 @@ uv run mypy src/
 # Database migrations
 uv run alembic upgrade head        # apply all
 uv run alembic revision --autogenerate -m "description"  # create new
+
+# Generator profiles and playlists
+uv run resonance-api profile list
+uv run resonance-api profile create --type concert_prep --event <id> --name "name"
+uv run resonance-api generate <profile-id> [--freshness 50]
+uv run resonance-api playlists
+uv run resonance-api playlist <playlist-id>
 ```
 
 ## Database Migrations
@@ -94,6 +101,11 @@ uv run resonance-api sync <service> [--full]    # Trigger a sync
 uv run resonance-api dedup <type> [--no-wait]   # Dedup: events|artists|tracks|all
 uv run resonance-api task <task_id>             # Check bulk task status
 uv run resonance-api track <query>              # Search tracks by title
+uv run resonance-api profile list               # List generator profiles
+uv run resonance-api profile create ...         # Create a generator profile
+uv run resonance-api generate <profile-id>      # Generate playlist from profile
+uv run resonance-api playlists                  # List playlists
+uv run resonance-api playlist <playlist-id>     # Show playlist details
 uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 ```
 
@@ -118,6 +130,10 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 - Connectors also declare a `ConnectionConfig` (auth type, sync function, sync style) — used for generic sync dispatch, orphan recovery, and UI rendering
 - Lightweight connectors (Songkick, iCal) implement the `Connectable` Protocol without extending `BaseConnector`
 - Generator classes live in `generators/` and declare required/optional capabilities
+- Generator parameter registry lives in `generators/parameters.py`
+- Generator types declared in `generators/parameters.py` via `GENERATOR_TYPE_CONFIG`
+- Scoring logic in `generators/scoring.py`
+- Generator-specific logic in `generators/<type>.py` (e.g., `concert_prep.py`)
 - SQLAlchemy models use UUID primary keys
 - OAuth tokens encrypted at rest via Fernet
 - All connections (OAuth, username-based, URL-based) use the unified `ServiceConnection` model — there is no separate calendar feed model
