@@ -477,7 +477,7 @@ def _cmd_profile() -> None:
     subcmd = sys.argv[2]
 
     if subcmd == "list":
-        resp = _api_request("GET", "/api/v1/generator-profiles")
+        resp = _api_request("GET", "/api/v1/generator-profiles/")
         profiles = resp.json()
         if not profiles:
             print("No generator profiles.")
@@ -554,7 +554,7 @@ def _cmd_profile() -> None:
         }
         if params:
             body["parameter_values"] = {k: int(v) for k, v in params.items()}
-        resp = _api_request("POST", "/api/v1/generator-profiles", json=body)
+        resp = _api_request("POST", "/api/v1/generator-profiles/", json=body)
         data = resp.json()
         print(f"Created profile: {data['name']} ({data['generator_type']})")
         print(f"  id: {data['profile_id']}")
@@ -642,7 +642,7 @@ def _cmd_generate() -> None:
 
 
 def _cmd_playlists() -> None:
-    resp = _api_request("GET", "/api/v1/playlists")
+    resp = _api_request("GET", "/api/v1/playlists/")
     playlists = resp.json()
     if not playlists:
         print("No playlists.")
