@@ -82,6 +82,7 @@ Commands:
   generate <profile-id>        Generate a playlist from a profile
   playlists                    List playlists
   playlist <id> [diff <other>] Show or diff a playlist
+  api [METHOD] PATH [opts]     Raw API request (like gh api)
   set-role <user_id> <role>    Set user role (direct DB)
 """
 
@@ -712,6 +713,99 @@ def _cmd_playlist() -> None:
         print(f"  {pos}. {t['title']} -- {t['artist_name']} {source_tag}{score_str}")
 
 
+_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+_API_USAGE = """\
+Usage: resonance-api api [METHOD] PATH [-d DATA] [-H HEADER]...
+
+Make an authenticated API request. Method defaults to GET.
+
+Examples:
+  resonance-api api /healthz
+  resonance-api api GET /api/v1/calendar-feeds
+  resonance-api api POST /api/v1/calendar-feeds/songkick -d '{"username": "mike"}'
+  resonance-api api DELETE /api/v1/calendar-feeds/songkick/mike
+"""
+
+
+def _cmd_api() -> None:
+    args = sys.argv[2:]
+    if not args or args[0] in ("--help", "-h"):
+        print(_API_USAGE)
+        sys.exit(0)
+
+    if args[0].upper() in _HTTP_METHODS:
+        method = args[0].upper()
+        if len(args) < 2:
+            print("Error: PATH required after METHOD")
+            print(_API_USAGE)
+            sys.exit(1)
+        path = args[1]
+        remaining = args[2:]
+    else:
+        method = "GET"
+        path = args[0]
+        remaining = args[1:]
+
+    data: str | None = None
+    extra_headers: dict[str, str] = {}
+    i = 0
+    while i < len(remaining):
+        if remaining[i] in ("-d", "--data") and i + 1 < len(remaining):
+            data = remaining[i + 1]
+            i += 2
+        elif remaining[i] == "-H" and i + 1 < len(remaining):
+            header = remaining[i + 1]
+            if ":" in header:
+                key, val = header.split(":", 1)
+                extra_headers[key.strip()] = val.strip()
+            i += 2
+        else:
+            i += 1
+
+    base_url, token = _get_api_config()
+    url = f"{base_url}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    headers.update(extra_headers)
+
+    kwargs: dict[str, object] = {}
+    if data is not None:
+        try:
+            kwargs["json"] = json.loads(data)
+        except json.JSONDecodeError:
+            kwargs["content"] = data
+
+    try:
+        response = httpx.request(
+            method,
+            url,
+            headers=headers,
+            timeout=300.0,
+            follow_redirects=True,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    except httpx.ConnectError as exc:
+        print(f"Error: Could not connect to {base_url}: {exc}")
+        sys.exit(1)
+    except httpx.TimeoutException:
+        print(f"Error: Request to {url} timed out")
+        sys.exit(1)
+
+    if response.status_code >= 400:
+        print(f"HTTP {response.status_code}", file=sys.stderr)
+
+    try:
+        body = response.json()
+        print(json.dumps(body, indent=2))
+    except Exception:
+        text = response.text
+        if text:
+            print(text)
+
+    if response.status_code >= 400:
+        sys.exit(1)
+
+
 def _cmd_set_role() -> None:
     if len(sys.argv) != 4:
         print("Usage: resonance-api set-role <user_id> <role>")
@@ -736,6 +830,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "generate": ("Generate a playlist", _cmd_generate),
     "playlists": ("List playlists", _cmd_playlists),
     "playlist": ("Show or diff a playlist", _cmd_playlist),
+    "api": ("Raw API request", _cmd_api),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }
 
