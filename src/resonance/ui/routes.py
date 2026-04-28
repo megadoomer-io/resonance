@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 
 _PAGE_SIZE = 50
 
+
+def _escape_ilike(q: str) -> str:
+    return q.replace("%", r"\%").replace("_", r"\_")
+
+
 _TEMPLATE_DIR = pathlib.Path(__file__).resolve().parent.parent / "templates"
 templates = fastapi.templating.Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
@@ -443,7 +448,7 @@ async def artist_compare_page(
         if artist_a is None or artist_b is None:
             raise fastapi.HTTPException(status_code=404, detail="Artist not found")
 
-        canonical, duplicate = dedup_module._pick_canonical(artist_a, artist_b)
+        canonical, duplicate = dedup_module.pick_canonical(artist_a, artist_b)
 
         a_track_count = await _count(
             db, music_models.Track, music_models.Track.artist_id == artist_id
@@ -512,7 +517,7 @@ async def track_compare_page(
         if track_a is None or track_b is None:
             raise fastapi.HTTPException(status_code=404, detail="Track not found")
 
-        canonical, duplicate = dedup_module._pick_canonical_track(track_a, track_b)
+        canonical, duplicate = dedup_module.pick_canonical_track(track_a, track_b)
 
         a_listen_count = await _count(
             db,
@@ -785,7 +790,7 @@ async def artist_search_partial(
     async with _get_db(request) as db:
         result = await db.execute(
             sa.select(music_models.Artist)
-            .where(music_models.Artist.name.ilike(f"%{q.strip()}%"))
+            .where(music_models.Artist.name.ilike(f"%{_escape_ilike(q.strip())}%"))
             .order_by(music_models.Artist.name)
             .limit(10)
         )

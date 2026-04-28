@@ -17,6 +17,10 @@ _PAGE_SIZE = 50
 router = fastapi.APIRouter(prefix="/artists", tags=["artists"])
 
 
+def _escape_ilike(q: str) -> str:
+    return q.replace("%", r"\%").replace("_", r"\_")
+
+
 def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
     return {
         "id": str(artist.id),
@@ -42,7 +46,7 @@ async def list_artists(
     stmt = sa.select(music_models.Artist).order_by(music_models.Artist.name)
 
     if q:
-        stmt = stmt.where(music_models.Artist.name.ilike(f"%{q}%"))
+        stmt = stmt.where(music_models.Artist.name.ilike(f"%{_escape_ilike(q)}%"))
 
     stmt = stmt.offset(offset).limit(_PAGE_SIZE + 1)
 
@@ -73,7 +77,7 @@ async def search_artists(
 ) -> dict[str, Any]:
     stmt = (
         sa.select(music_models.Artist)
-        .where(music_models.Artist.name.ilike(f"%{q}%"))
+        .where(music_models.Artist.name.ilike(f"%{_escape_ilike(q)}%"))
         .order_by(music_models.Artist.name)
         .limit(min(limit, 50))
     )

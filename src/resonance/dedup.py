@@ -41,7 +41,7 @@ class MergeStats:
     track_relations_deleted: int = 0
 
 
-def _pick_canonical(
+def pick_canonical(
     a: models_module.Artist,
     b: models_module.Artist,
 ) -> tuple[models_module.Artist, models_module.Artist]:
@@ -79,7 +79,7 @@ def _pick_canonical(
     return b, a
 
 
-def _pick_canonical_track(
+def pick_canonical_track(
     a: models_module.Track,
     b: models_module.Track,
 ) -> tuple[models_module.Track, models_module.Track]:
@@ -355,7 +355,7 @@ async def find_and_merge_duplicate_artists(
         # Pick canonical and merge all others into it
         canonical = artists[0]
         for other in artists[1:]:
-            canonical, dup = _pick_canonical(canonical, other)
+            canonical, dup = pick_canonical(canonical, other)
             stats = await merge_artists(session, canonical, dup)
             total.artists_merged += stats.artists_merged
             total.tracks_repointed += stats.tracks_repointed
@@ -409,7 +409,7 @@ async def find_and_merge_duplicate_tracks(
 
         canonical = tracks[0]
         for other in tracks[1:]:
-            canonical, dup = _pick_canonical_track(canonical, other)
+            canonical, dup = pick_canonical_track(canonical, other)
             stats = await merge_tracks(session, canonical, dup)
             total.tracks_merged += stats.tracks_merged
             total.events_repointed += stats.events_repointed
