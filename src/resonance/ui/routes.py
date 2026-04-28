@@ -20,7 +20,9 @@ import resonance.dependencies as deps_module
 import resonance.merge as merge_module
 import resonance.middleware.session as session_module
 import resonance.models.concert as concert_models
+import resonance.models.generator as generator_models
 import resonance.models.music as music_models
+import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.types as types_module
@@ -342,6 +344,140 @@ async def history_page(
             request, "partials/history_list.html", context
         )
     return templates.TemplateResponse(request, "history.html", context)
+
+
+@router.get("/playlists", response_model=None)
+async def playlists_page(
+    request: fastapi.Request,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render paginated playlists list, or redirect to login."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(playlist_models.Playlist)
+            .where(playlist_models.Playlist.user_id == user_uuid)
+            .order_by(playlist_models.Playlist.created_at.desc())
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        playlists = list(result.scalars().all())
+
+        has_next = len(playlists) > _PAGE_SIZE
+        playlists = playlists[:_PAGE_SIZE]
+
+        playlist_ids = [p.id for p in playlists]
+        gen_type_map: dict[uuid.UUID, str] = {}
+        if playlist_ids:
+            gen_result = await db.execute(
+                sa.select(
+                    generator_models.GenerationRecord.playlist_id,
+                    generator_models.GeneratorProfile.generator_type,
+                )
+                .join(
+                    generator_models.GeneratorProfile,
+                    generator_models.GenerationRecord.profile_id
+                    == generator_models.GeneratorProfile.id,
+                )
+                .where(generator_models.GenerationRecord.playlist_id.in_(playlist_ids))
+            )
+            gen_type_map = {row[0]: row[1].value for row in gen_result.all()}
+
+        for p in playlists:
+            p._generator_type = gen_type_map.get(p.id)  # type: ignore[attr-defined]
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "playlists": playlists,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/playlist_list.html", context
+        )
+    return templates.TemplateResponse(request, "playlists.html", context)
+
+
+@router.get("/playlists/{playlist_id}", response_model=None)
+async def playlist_detail_page(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render playlist detail with tracks and generation metadata."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        playlist_result = await db.execute(
+            sa.select(playlist_models.Playlist).where(
+                playlist_models.Playlist.id == playlist_id,
+                playlist_models.Playlist.user_id == user_uuid,
+            )
+        )
+        playlist = playlist_result.scalar_one_or_none()
+
+        if playlist is None:
+            raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+
+        tracks_result = await db.execute(
+            sa.select(playlist_models.PlaylistTrack)
+            .where(playlist_models.PlaylistTrack.playlist_id == playlist_id)
+            .order_by(playlist_models.PlaylistTrack.position)
+            .options(
+                sa_orm.joinedload(playlist_models.PlaylistTrack.track).joinedload(
+                    music_models.Track.artist
+                )
+            )
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        tracks = list(tracks_result.scalars().unique().all())
+
+        has_next = len(tracks) > _PAGE_SIZE
+        tracks = tracks[:_PAGE_SIZE]
+
+        gen_result = await db.execute(
+            sa.select(generator_models.GenerationRecord)
+            .where(generator_models.GenerationRecord.playlist_id == playlist_id)
+            .options(sa_orm.joinedload(generator_models.GenerationRecord.profile))
+            .limit(1)
+        )
+        generation = gen_result.scalar_one_or_none()
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "playlist": playlist,
+        "playlist_id": playlist_id,
+        "tracks": tracks,
+        "generation": generation,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": page > 1,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/playlist_detail_tracks.html", context
+        )
+    return templates.TemplateResponse(request, "playlist_detail.html", context)
 
 
 @router.get("/account", response_model=None)

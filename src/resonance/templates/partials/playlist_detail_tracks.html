@@ -1,0 +1,45 @@
+{% if tracks %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Title</th>
+                <th>Artist</th>
+                <th>Score</th>
+                <th>Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pt in tracks %}
+            <tr>
+                <td>{{ pt.position }}</td>
+                <td>{{ pt.track.title }}</td>
+                <td>{{ pt.track.artist.name }}</td>
+                <td>{{ "%.2f" | format(pt.score) if pt.score is not none else "" }}</td>
+                <td>{{ pt.source }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if has_prev %}
+    <a href="/playlists/{{ playlist_id }}?page={{ page - 1 }}"
+       hx-get="/playlists/{{ playlist_id }}?page={{ page - 1 }}"
+       hx-target="#playlist-tracks"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/playlists/{{ playlist_id }}?page={{ page + 1 }}"
+       hx-get="/playlists/{{ playlist_id }}?page={{ page + 1 }}"
+       hx-target="#playlist-tracks"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No tracks in this playlist.</p>
+{% endif %}

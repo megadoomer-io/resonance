@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ playlist.name }} — resonance{% endblock %}
+{% block content %}
+<p><a href="/playlists">&larr; Back to Playlists</a></p>
+<h2>{{ playlist.name }}</h2>
+{% if playlist.description %}
+<p>{{ playlist.description }}</p>
+{% endif %}
+<p><small>{{ playlist.track_count }} tracks &middot; {{ playlist.created_at | localtime(user_tz) }}</small></p>
+
+{% if generation %}
+<article>
+    <table>
+        <tbody>
+            <tr>
+                <th>Profile</th>
+                <td>{{ generation.profile.name }}</td>
+            </tr>
+            <tr>
+                <th>Type</th>
+                <td>{{ generation.profile.generator_type.value }}</td>
+            </tr>
+            {% if generation.freshness_actual is not none or generation.freshness_target is not none %}
+            <tr>
+                <th>Freshness</th>
+                <td>
+                    {% if generation.freshness_actual is not none %}
+                    {{ "%.1f" | format(generation.freshness_actual) }}%
+                    {% endif %}
+                    {% if generation.freshness_target is not none %}
+                    / {{ generation.freshness_target }}% target
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if generation.track_sources_summary %}
+            <tr>
+                <th>Sources</th>
+                <td>
+                    {% for source, count in generation.track_sources_summary.items() %}
+                    {{ ", " if not loop.first }}{{ count }} {{ source }}
+                    {% endfor %}
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</article>
+{% endif %}
+
+<div id="playlist-tracks">
+    {% include "partials/playlist_detail_tracks.html" %}
+</div>
+{% endblock %}

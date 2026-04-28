@@ -1,0 +1,47 @@
+{% if playlists %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Tracks</th>
+                <th>Source</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for playlist in playlists %}
+            <tr>
+                <td><a href="/playlists/{{ playlist.id }}">{{ playlist.name }}</a></td>
+                <td>{{ playlist.track_count }}</td>
+                <td>
+                    {% if playlist._generator_type %}
+                    <small>{{ playlist._generator_type }}</small>
+                    {% endif %}
+                </td>
+                <td>{{ playlist.created_at | localtime(user_tz) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if has_prev %}
+    <a href="/playlists?page={{ page - 1 }}"
+       hx-get="/playlists?page={{ page - 1 }}"
+       hx-target="#playlist-list"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/playlists?page={{ page + 1 }}"
+       hx-get="/playlists?page={{ page + 1 }}"
+       hx-target="#playlist-list"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No playlists generated yet.</p>
+{% endif %}
