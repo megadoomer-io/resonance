@@ -692,6 +692,82 @@ async def event_detail_page(
     return templates.TemplateResponse(request, "event_detail.html", context)
 
 
+@router.post("/events/{event_id}/candidates/{candidate_id}/accept", response_model=None)
+async def accept_candidate_ui(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Accept an artist candidate and create a confirmed EventArtist."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        candidate = (
+            await db.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.id == candidate_id,
+                    concert_models.EventArtistCandidate.event_id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if candidate is None:
+            raise fastapi.HTTPException(status_code=404, detail="Candidate not found")
+
+        if candidate.matched_artist_id is None:
+            raise fastapi.HTTPException(
+                status_code=400, detail="Candidate has no matched artist"
+            )
+
+        event_artist = concert_models.EventArtist(
+            event_id=event_id,
+            artist_id=candidate.matched_artist_id,
+            position=candidate.position,
+            raw_name=candidate.raw_name,
+        )
+        db.add(event_artist)
+        candidate.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+
+    return templates.TemplateResponse(
+        request, "partials/candidate_accepted.html", {"candidate": candidate}
+    )
+
+
+@router.post("/events/{event_id}/candidates/{candidate_id}/reject", response_model=None)
+async def reject_candidate_ui(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Reject an artist candidate."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        candidate = (
+            await db.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.id == candidate_id,
+                    concert_models.EventArtistCandidate.event_id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if candidate is None:
+            raise fastapi.HTTPException(status_code=404, detail="Candidate not found")
+
+        candidate.status = types_module.CandidateStatus.REJECTED
+        await db.commit()
+
+    return templates.TemplateResponse(
+        request, "partials/candidate_rejected.html", {"candidate": candidate}
+    )
+
+
 @router.get("/partials/artist-search", response_model=None)
 async def artist_search_partial(
     request: fastapi.Request,
