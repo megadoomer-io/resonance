@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Compare Tracks — resonance{% endblock %}
+{% block content %}
+<p><a href="/tracks/{{ track_a.id }}">&larr; Back to {{ track_a.title }}</a></p>
+<h2>Compare Tracks</h2>
+
+<div class="grid">
+    <article{% if canonical.id == track_a.id %} style="border-color: var(--pico-primary);"{% endif %}>
+        <header>{% if canonical.id == track_a.id %}Keep{% else %}Merge into other{% endif %}</header>
+        <h3>{{ track_a.title }}</h3>
+        <p>by <a href="/artists/{{ track_a.artist_id }}">{{ track_a.artist.name }}</a></p>
+        <table>
+            <tbody>
+                <tr>
+                    <th>Duration</th>
+                    <td>
+                        {% if track_a.duration_ms %}
+                        {{ track_a.duration_ms // 60000 }}:{{ "%02d" | format((track_a.duration_ms % 60000) // 1000) }}
+                        {% else %}
+                        &mdash;
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Listens</th><td>{{ a_listen_count }}</td></tr>
+                <tr>
+                    <th>Services</th>
+                    <td>
+                        {% if track_a.service_links %}
+                        {{ track_a.service_links.keys() | join(", ") }}
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Created</th><td>{{ track_a.created_at | localtime(user_tz) }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+
+    <article{% if canonical.id == track_b.id %} style="border-color: var(--pico-primary);"{% endif %}>
+        <header>{% if canonical.id == track_b.id %}Keep{% else %}Merge into other{% endif %}</header>
+        <h3>{{ track_b.title }}</h3>
+        <p>by <a href="/artists/{{ track_b.artist_id }}">{{ track_b.artist.name }}</a></p>
+        <table>
+            <tbody>
+                <tr>
+                    <th>Duration</th>
+                    <td>
+                        {% if track_b.duration_ms %}
+                        {{ track_b.duration_ms // 60000 }}:{{ "%02d" | format((track_b.duration_ms % 60000) // 1000) }}
+                        {% else %}
+                        &mdash;
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Listens</th><td>{{ b_listen_count }}</td></tr>
+                <tr>
+                    <th>Services</th>
+                    <td>
+                        {% if track_b.service_links %}
+                        {{ track_b.service_links.keys() | join(", ") }}
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Created</th><td>{{ track_b.created_at | localtime(user_tz) }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+</div>
+
+<p><a href="/tracks/{{ track_b.id }}/compare/{{ track_a.id }}">Swap canonical selection</a></p>
+
+<h3>Merge</h3>
+<button
+    hx-post="/api/v1/matching/tracks/{{ canonical.id }}/merge/{{ duplicate.id }}/confirm"
+    hx-target="body"
+    hx-swap="none"
+    hx-on::after-request="if(event.detail.successful) window.location='/tracks/{{ canonical.id }}'">Confirm Merge</button>
+<a href="/tracks/{{ track_a.id }}" role="button" class="secondary outline">Cancel</a>
+{% endblock %}

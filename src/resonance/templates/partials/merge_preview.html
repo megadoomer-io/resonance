@@ -1,0 +1,18 @@
+<article>
+    <header>Merge Impact</header>
+    <p>Merging <strong>{{ duplicate.name }}</strong> into <strong>{{ canonical.name }}</strong> will:</p>
+    <ul>
+        <li>Repoint <strong>{{ tracks_to_repoint }}</strong> track{{ "s" if tracks_to_repoint != 1 }} to {{ canonical.name }}</li>
+        <li>Repoint <strong>{{ events_to_repoint }}</strong> event link{{ "s" if events_to_repoint != 1 }} to {{ canonical.name }}</li>
+        <li>Combine service links: {{ merged_links.keys() | join(", ") if merged_links else "none" }}</li>
+        <li>Delete <strong>{{ duplicate.name }}</strong> (ID: {{ duplicate.id }})</li>
+    </ul>
+    <div class="grid">
+        <button
+            hx-post="/api/v1/matching/artists/{{ canonical.id }}/merge/{{ duplicate.id }}/confirm"
+            hx-target="body"
+            hx-swap="none"
+            hx-on::after-request="if(event.detail.successful) window.location='/artists/{{ canonical.id }}'">Confirm Merge</button>
+        <a href="/artists/{{ canonical.id }}/compare/{{ duplicate.id }}" role="button" class="secondary outline">Cancel</a>
+    </div>
+</article>

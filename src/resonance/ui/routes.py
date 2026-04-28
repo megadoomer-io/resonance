@@ -16,6 +16,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.dedup as dedup_module
 import resonance.dependencies as deps_module
 import resonance.merge as merge_module
 import resonance.middleware.session as session_module
@@ -415,6 +416,184 @@ async def track_detail_page(
             request, "partials/track_history.html", context
         )
     return templates.TemplateResponse(request, "track_detail.html", context)
+
+
+@router.get("/artists/{artist_id}/compare/{other_id}", response_model=None)
+async def artist_compare_page(
+    request: fastapi.Request,
+    artist_id: uuid.UUID,
+    other_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render side-by-side comparison of two artists with merge controls."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        artist_a_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
+        )
+        artist_a = artist_a_result.scalar_one_or_none()
+
+        artist_b_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == other_id)
+        )
+        artist_b = artist_b_result.scalar_one_or_none()
+
+        if artist_a is None or artist_b is None:
+            raise fastapi.HTTPException(status_code=404, detail="Artist not found")
+
+        canonical, duplicate = dedup_module._pick_canonical(artist_a, artist_b)
+
+        a_track_count = await _count(
+            db, music_models.Track, music_models.Track.artist_id == artist_id
+        )
+        b_track_count = await _count(
+            db, music_models.Track, music_models.Track.artist_id == other_id
+        )
+        a_event_count = await _count(
+            db,
+            concert_models.EventArtist,
+            concert_models.EventArtist.artist_id == artist_id,
+        )
+        b_event_count = await _count(
+            db,
+            concert_models.EventArtist,
+            concert_models.EventArtist.artist_id == other_id,
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "artist_compare.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
+            "artist_a": artist_a,
+            "artist_b": artist_b,
+            "canonical": canonical,
+            "duplicate": duplicate,
+            "a_track_count": a_track_count,
+            "b_track_count": b_track_count,
+            "a_event_count": a_event_count,
+            "b_event_count": b_event_count,
+        },
+    )
+
+
+@router.get("/tracks/{track_id}/compare/{other_id}", response_model=None)
+async def track_compare_page(
+    request: fastapi.Request,
+    track_id: uuid.UUID,
+    other_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render side-by-side comparison of two tracks with merge controls."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+
+    async with _get_db(request) as db:
+        track_a_result = await db.execute(
+            sa.select(music_models.Track)
+            .where(music_models.Track.id == track_id)
+            .options(sa_orm.joinedload(music_models.Track.artist))
+        )
+        track_a = track_a_result.scalar_one_or_none()
+
+        track_b_result = await db.execute(
+            sa.select(music_models.Track)
+            .where(music_models.Track.id == other_id)
+            .options(sa_orm.joinedload(music_models.Track.artist))
+        )
+        track_b = track_b_result.scalar_one_or_none()
+
+        if track_a is None or track_b is None:
+            raise fastapi.HTTPException(status_code=404, detail="Track not found")
+
+        canonical, duplicate = dedup_module._pick_canonical_track(track_a, track_b)
+
+        a_listen_count = await _count(
+            db,
+            music_models.ListeningEvent,
+            music_models.ListeningEvent.track_id == track_id,
+            music_models.ListeningEvent.user_id == user_uuid,
+        )
+        b_listen_count = await _count(
+            db,
+            music_models.ListeningEvent,
+            music_models.ListeningEvent.track_id == other_id,
+            music_models.ListeningEvent.user_id == user_uuid,
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "track_compare.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
+            "track_a": track_a,
+            "track_b": track_b,
+            "canonical": canonical,
+            "duplicate": duplicate,
+            "a_listen_count": a_listen_count,
+            "b_listen_count": b_listen_count,
+        },
+    )
+
+
+@router.post("/artists/{artist_id}/merge-preview/{other_id}", response_model=None)
+async def artist_merge_preview(
+    request: fastapi.Request,
+    artist_id: uuid.UUID,
+    other_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Return merge impact summary partial for HTMX."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        canonical_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
+        )
+        canonical = canonical_result.scalar_one_or_none()
+
+        duplicate_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == other_id)
+        )
+        duplicate = duplicate_result.scalar_one_or_none()
+
+        if canonical is None or duplicate is None:
+            raise fastapi.HTTPException(status_code=404, detail="Artist not found")
+
+        tracks_to_repoint = await _count(
+            db, music_models.Track, music_models.Track.artist_id == other_id
+        )
+        events_to_repoint = await _count(
+            db,
+            concert_models.EventArtist,
+            concert_models.EventArtist.artist_id == other_id,
+        )
+
+        merged_links = dict(canonical.service_links or {})
+        for k, v in (duplicate.service_links or {}).items():
+            if v and k not in merged_links:
+                merged_links[k] = v
+
+    return templates.TemplateResponse(
+        request,
+        "partials/merge_preview.html",
+        {
+            "canonical": canonical,
+            "duplicate": duplicate,
+            "tracks_to_repoint": tracks_to_repoint,
+            "events_to_repoint": events_to_repoint,
+            "merged_links": merged_links,
+        },
+    )
 
 
 @router.get("/events", response_model=None)

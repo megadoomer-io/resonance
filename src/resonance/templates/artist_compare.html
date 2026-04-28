@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Compare Artists — resonance{% endblock %}
+{% block content %}
+<p><a href="/artists/{{ artist_a.id }}">&larr; Back to {{ artist_a.name }}</a></p>
+<h2>Compare Artists</h2>
+
+<div class="grid">
+    <article{% if canonical.id == artist_a.id %} style="border-color: var(--pico-primary);"{% endif %}>
+        <header>{% if canonical.id == artist_a.id %}Keep{% else %}Merge into other{% endif %}</header>
+        <h3>{{ artist_a.name }}</h3>
+        {% if artist_a.origin %}<p><small>Origin: {{ artist_a.origin }}</small></p>{% endif %}
+        <table>
+            <tbody>
+                <tr><th>Tracks</th><td>{{ a_track_count }}</td></tr>
+                <tr><th>Events</th><td>{{ a_event_count }}</td></tr>
+                <tr>
+                    <th>Services</th>
+                    <td>
+                        {% if artist_a.service_links %}
+                        {{ artist_a.service_links.keys() | join(", ") }}
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Created</th><td>{{ artist_a.created_at | localtime(user_tz) }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+
+    <article{% if canonical.id == artist_b.id %} style="border-color: var(--pico-primary);"{% endif %}>
+        <header>{% if canonical.id == artist_b.id %}Keep{% else %}Merge into other{% endif %}</header>
+        <h3>{{ artist_b.name }}</h3>
+        {% if artist_b.origin %}<p><small>Origin: {{ artist_b.origin }}</small></p>{% endif %}
+        <table>
+            <tbody>
+                <tr><th>Tracks</th><td>{{ b_track_count }}</td></tr>
+                <tr><th>Events</th><td>{{ b_event_count }}</td></tr>
+                <tr>
+                    <th>Services</th>
+                    <td>
+                        {% if artist_b.service_links %}
+                        {{ artist_b.service_links.keys() | join(", ") }}
+                        {% else %}
+                        None
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr><th>Created</th><td>{{ artist_b.created_at | localtime(user_tz) }}</td></tr>
+            </tbody>
+        </table>
+    </article>
+</div>
+
+<p><a href="/artists/{{ artist_b.id }}/compare/{{ artist_a.id }}">Swap canonical selection</a></p>
+
+<h3>Merge</h3>
+<div id="merge-preview">
+    <button
+        hx-post="/artists/{{ canonical.id }}/merge-preview/{{ duplicate.id }}"
+        hx-target="#merge-preview"
+        hx-swap="innerHTML">Preview Merge</button>
+</div>
+{% endblock %}
