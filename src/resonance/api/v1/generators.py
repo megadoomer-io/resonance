@@ -377,6 +377,27 @@ async def trigger_generation(
 
     gen_params = body or GenerateRequest()
 
+    running_stmt = sa.select(task_models.Task).where(
+        task_models.Task.user_id == user_id,
+        task_models.Task.task_type == types_module.TaskType.PLAYLIST_GENERATION,
+        task_models.Task.params["profile_id"].astext == str(profile_id),
+        task_models.Task.status.in_(
+            [
+                types_module.SyncStatus.PENDING,
+                types_module.SyncStatus.RUNNING,
+                types_module.SyncStatus.DEFERRED,
+            ]
+        ),
+    )
+    running_result = await db.execute(running_stmt)
+    existing_job = running_result.scalar_one_or_none()
+
+    if existing_job is not None:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="A generation is already running for this profile",
+        )
+
     task = task_models.Task(
         user_id=user_id,
         task_type=types_module.TaskType.PLAYLIST_GENERATION,

@@ -99,6 +99,7 @@ def _make_task(
     *,
     task_id: uuid.UUID | None = None,
     parent_id: uuid.UUID | None = None,
+    task_type: types_module.TaskType = types_module.TaskType.TIME_RANGE,
     status: types_module.SyncStatus = types_module.SyncStatus.COMPLETED,
     result: dict[str, object] | None = None,
 ) -> task_module.Task:
@@ -108,7 +109,7 @@ def _make_task(
         user_id=uuid.uuid4(),
         service_connection_id=uuid.uuid4(),
         parent_id=parent_id,
-        task_type=types_module.TaskType.TIME_RANGE,
+        task_type=task_type,
         status=status,
         result=result or {},
     )
@@ -169,9 +170,10 @@ class TestCheckParentCompletion:
         session = AsyncMock()
         log = MagicMock()
 
-        # Build mock parent
+        # Build mock parent — must be SYNC_JOB to trigger post-sync dedup
         parent_task = _make_task(
             task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
         )
 
@@ -230,6 +232,7 @@ class TestCheckParentCompletion:
 
         parent_task = _make_task(
             task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
         )
 
@@ -284,6 +287,7 @@ class TestCheckParentCompletion:
 
         parent_task = _make_task(
             task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
         )
         assert parent_task.completed_at is None
@@ -357,6 +361,7 @@ class TestCheckParentCompletion:
 
         parent_task = _make_task(
             task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
         )
 
@@ -399,6 +404,120 @@ class TestCheckParentCompletion:
         assert parent_task.result["items_created"] == 10
         assert parent_task.result["children_failed"] == 1
         session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generation_parent_skips_dedup(self) -> None:
+        """PLAYLIST_GENERATION parent should not trigger post-sync dedup."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id)
+        session = AsyncMock()
+        log = MagicMock()
+        arq_redis = AsyncMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        child1 = _make_task(
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            result={"tracks_found": 15},
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child1]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(session, task, arq_redis, log)
+
+        assert parent_task.status == types_module.SyncStatus.COMPLETED
+        # Only one commit (parent completion) — no dedup task created
+        session.commit.assert_called_once()
+        arq_redis.enqueue_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generation_parent_aggregates_generation_keys(self) -> None:
+        """PLAYLIST_GENERATION parent aggregates tracks_found and playlist_id."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id)
+        session = AsyncMock()
+        log = MagicMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+        )
+
+        playlist_id = str(uuid.uuid4())
+        child_discovery = _make_task(
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            result={"tracks_found": 10},
+        )
+        child_scoring = _make_task(
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            result={
+                "playlist_id": playlist_id,
+                "tracks_selected": 8,
+                "sources_summary": {"library": 5, "discovery": 3},
+            },
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child_discovery, child_scoring]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(session, task, AsyncMock(), log)
+
+        assert parent_task.result["tracks_found"] == 10
+        assert parent_task.result["playlist_id"] == playlist_id
+        assert parent_task.result["tracks_selected"] == 8
+        assert parent_task.result["sources_summary"] == {
+            "library": 5,
+            "discovery": 3,
+        }
+        assert parent_task.result["children_completed"] == 2
+        assert parent_task.result["children_failed"] == 0
+        # No items_created/items_updated keys for generation parents
+        assert "items_created" not in parent_task.result
 
 
 # ---------------------------------------------------------------------------
@@ -2006,11 +2125,9 @@ class TestGeneratePlaylist:
         artist_result = MagicMock()
         artist_result.scalars.return_value = artist_scalars
 
-        # 6-7. ListeningEvent count per artist — both return 0 (no library tracks)
-        listen_count_1 = MagicMock()
-        listen_count_1.scalar_one.return_value = 0
-        listen_count_2 = MagicMock()
-        listen_count_2.scalar_one.return_value = 0
+        # 6. Batched library coverage — both artists have 0 library tracks
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = []
 
         session.execute.side_effect = [
             task_result,
@@ -2018,8 +2135,7 @@ class TestGeneratePlaylist:
             ea_result,
             eac_result,
             artist_result,
-            listen_count_1,
-            listen_count_2,
+            listen_counts,
         ]
 
         ctx: dict[str, Any] = {
@@ -2109,9 +2225,9 @@ class TestGeneratePlaylist:
         artist_result = MagicMock()
         artist_result.scalars.return_value = artist_scalars
 
-        # 6. No library tracks
-        listen_count = MagicMock()
-        listen_count.scalar_one.return_value = 0
+        # 6. Batched library coverage — no library tracks
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = []
 
         session.execute.side_effect = [
             task_result,
@@ -2119,7 +2235,7 @@ class TestGeneratePlaylist:
             ea_result,
             eac_result,
             artist_result,
-            listen_count,
+            listen_counts,
         ]
 
         ctx: dict[str, Any] = {
@@ -2198,9 +2314,9 @@ class TestGeneratePlaylist:
         artist_result = MagicMock()
         artist_result.scalars.return_value = artist_scalars
 
-        # 6. Artist has plenty of library tracks
-        listen_count = MagicMock()
-        listen_count.scalar_one.return_value = 25
+        # 6. Batched library coverage — artist has plenty of tracks
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = [(artist_id, 25)]
 
         session.execute.side_effect = [
             task_result,
@@ -2208,7 +2324,7 @@ class TestGeneratePlaylist:
             ea_result,
             eac_result,
             artist_result,
-            listen_count,
+            listen_counts,
         ]
 
         ctx: dict[str, Any] = {

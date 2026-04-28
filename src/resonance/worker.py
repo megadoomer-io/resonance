@@ -551,22 +551,30 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
             artists_by_id = {a.id: a for a in artists_result.scalars().all()}
 
-            # Check library coverage per artist
-            artists_needing_discovery: list[uuid.UUID] = []
-            for aid in artist_ids:
-                count_result = await session.execute(
-                    sa.select(sa.func.count()).where(
-                        music_models.ListeningEvent.user_id == task.user_id,
-                        music_models.ListeningEvent.track_id.in_(
-                            sa.select(music_models.Track.id).where(
-                                music_models.Track.artist_id == aid
-                            )
-                        ),
-                    )
+            # Check library coverage for all artists in a single query
+            listen_counts_result = await session.execute(
+                sa.select(
+                    music_models.Track.artist_id,
+                    sa.func.count(music_models.ListeningEvent.id).label("cnt"),
                 )
-                listen_count: int = count_result.scalar_one()
-                if listen_count < _MIN_LIBRARY_TRACKS:
-                    artists_needing_discovery.append(aid)
+                .join(
+                    music_models.ListeningEvent,
+                    music_models.ListeningEvent.track_id == music_models.Track.id,
+                )
+                .where(
+                    music_models.Track.artist_id.in_(artist_ids),
+                    music_models.ListeningEvent.user_id == task.user_id,
+                )
+                .group_by(music_models.Track.artist_id)
+            )
+            listen_counts: dict[uuid.UUID, int] = {
+                row[0]: row[1] for row in listen_counts_result.all()
+            }
+            artists_needing_discovery = [
+                aid
+                for aid in artist_ids
+                if listen_counts.get(aid, 0) < _MIN_LIBRARY_TRACKS
+            ]
 
             # Create child tasks
             arq_redis = wctx["redis"]
@@ -1133,19 +1141,40 @@ async def _check_parent_completion(
     )
     children = children_result.scalars().all()
 
-    total_created = 0
-    total_updated = 0
-    for child in children:
-        child_result = child.result or {}
-        total_created += int(str(child_result.get("items_created", 0)))
-        total_updated += int(str(child_result.get("items_updated", 0)))
-
-    parent.result = {
-        "items_created": total_created,
-        "items_updated": total_updated,
+    base_result: dict[str, object] = {
         "children_completed": len(children) - failed_count,
         "children_failed": failed_count,
     }
+
+    if parent.task_type == types_module.TaskType.PLAYLIST_GENERATION:
+        total_tracks_found = 0
+        playlist_id: str | None = None
+        tracks_selected = 0
+        sources_summary: dict[str, object] = {}
+        for child in children:
+            child_result = child.result or {}
+            total_tracks_found += int(str(child_result.get("tracks_found", 0)))
+            if child_result.get("playlist_id"):
+                playlist_id = str(child_result["playlist_id"])
+                tracks_selected = int(str(child_result.get("tracks_selected", 0)))
+                raw = child_result.get("sources_summary", {})
+                sources_summary = dict(raw) if isinstance(raw, dict) else {}
+        base_result["tracks_found"] = total_tracks_found
+        if playlist_id is not None:
+            base_result["playlist_id"] = playlist_id
+            base_result["tracks_selected"] = tracks_selected
+            base_result["sources_summary"] = sources_summary
+    else:
+        total_created = 0
+        total_updated = 0
+        for child in children:
+            child_result = child.result or {}
+            total_created += int(str(child_result.get("items_created", 0)))
+            total_updated += int(str(child_result.get("items_updated", 0)))
+        base_result["items_created"] = total_created
+        base_result["items_updated"] = total_updated
+
+    parent.result = base_result
 
     if failed_count > 0:
         parent.status = types_module.SyncStatus.FAILED
@@ -1169,7 +1198,10 @@ async def _check_parent_completion(
     )
 
     # After a successful sync, run cross-service event dedup
-    if parent.status == types_module.SyncStatus.COMPLETED:
+    if parent.status == types_module.SyncStatus.COMPLETED and parent.task_type in (
+        types_module.TaskType.SYNC_JOB,
+        types_module.TaskType.CALENDAR_SYNC,
+    ):
         dedup_task = task_module.Task(
             task_type=types_module.TaskType.BULK_JOB,
             status=types_module.SyncStatus.PENDING,
