@@ -380,7 +380,7 @@ async def trigger_generation(
     running_stmt = sa.select(task_models.Task).where(
         task_models.Task.user_id == user_id,
         task_models.Task.task_type == types_module.TaskType.PLAYLIST_GENERATION,
-        task_models.Task.params["profile_id"].astext == str(profile_id),
+        task_models.Task.params["profile_id"].as_string() == str(profile_id),
         task_models.Task.status.in_(
             [
                 types_module.SyncStatus.PENDING,
