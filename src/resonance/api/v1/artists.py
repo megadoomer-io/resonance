@@ -21,6 +21,7 @@ def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
     return {
         "id": str(artist.id),
         "name": artist.name,
+        "origin": artist.origin,
         "service_links": artist.service_links,
     }
 
@@ -79,6 +80,7 @@ async def get_artist(
     return {
         "id": str(artist.id),
         "name": artist.name,
+        "origin": artist.origin,
         "service_links": artist.service_links,
         "created_at": artist.created_at.isoformat(),
         "updated_at": artist.updated_at.isoformat(),

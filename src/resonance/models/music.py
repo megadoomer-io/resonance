@@ -25,6 +25,9 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
         sa.JSON, nullable=True, default=None
     )
+    origin: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
 
     tracks: orm.Mapped[list[Track]] = orm.relationship(
         back_populates="artist", cascade="all, delete-orphan"

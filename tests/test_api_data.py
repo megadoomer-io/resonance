@@ -189,6 +189,7 @@ def _make_artist(**overrides: Any) -> SimpleNamespace:
     defaults: dict[str, Any] = {
         "id": uuid.uuid4(),
         "name": "The Red Pears",
+        "origin": None,
         "service_links": {"musicbrainz": "mb-123"},
         "created_at": datetime.datetime(2026, 4, 1, tzinfo=datetime.UTC),
         "updated_at": datetime.datetime(2026, 4, 1, tzinfo=datetime.UTC),
