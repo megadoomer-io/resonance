@@ -1,0 +1,25 @@
+{% if artists %}
+<figure>
+    <table>
+        <tbody>
+            {% for artist in artists %}
+            <tr>
+                <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
+                {% if event_id %}
+                <td>
+                    <button hx-post="/api/v1/events/{{ event_id }}/candidates"
+                            hx-ext="json-enc"
+                            hx-vals='{"artist_id": "{{ artist.id }}"}'
+                            hx-swap="none"
+                            class="outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% elif artists is defined %}
+<p><small>No artists found.</small></p>
+{% endif %}

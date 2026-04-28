@@ -1,0 +1,37 @@
+{% if candidates %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Event</th>
+                <th>Raw Name</th>
+                <th>Confidence</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for candidate in candidates %}
+            <tr id="candidate-{{ candidate.id }}">
+                <td><a href="/events/{{ candidate.event.id }}">{{ candidate.event.title }}</a></td>
+                <td>{{ candidate.raw_name }}</td>
+                <td>{{ candidate.confidence_score }}%</td>
+                <td>
+                    <button hx-post="/api/v1/events/{{ candidate.event_id }}/candidates/{{ candidate.id }}/accept"
+                            hx-target="#candidate-{{ candidate.id }}"
+                            hx-swap="outerHTML"
+                            class="outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;">Accept</button>
+                    <button hx-post="/api/v1/events/{{ candidate.event_id }}/candidates/{{ candidate.id }}/reject"
+                            hx-target="#candidate-{{ candidate.id }}"
+                            hx-swap="outerHTML"
+                            class="secondary outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;">Reject</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No pending matches.</p>
+{% endif %}

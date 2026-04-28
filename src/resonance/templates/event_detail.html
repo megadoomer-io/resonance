@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ event.title }} — resonance{% endblock %}
+{% block content %}
+<p><a href="/events">&larr; Back to Events</a></p>
+<h2>{{ event.title }}</h2>
+
+<article>
+    <table>
+        <tbody>
+            <tr>
+                <th>Date</th>
+                <td>{{ event.event_date }}</td>
+            </tr>
+            <tr>
+                <th>Venue</th>
+                <td>
+                    {% if event.venue %}
+                    {{ event.venue.name }}{% if event.venue.city %}, {{ event.venue.city }}{% endif %}{% if event.venue.state %}, {{ event.venue.state }}{% endif %}
+                    {% else %}
+                    Unknown
+                    {% endif %}
+                </td>
+            </tr>
+            {% if event.external_url %}
+            <tr>
+                <th>Link</th>
+                <td><a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.source_service.value }}&#x2197;</a></td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</article>
+
+{% if event.artists %}
+<h3>Confirmed Artists</h3>
+<div id="event-artists">
+    {% include "partials/event_confirmed_artists.html" %}
+</div>
+{% endif %}
+
+<h3>Candidates</h3>
+<div id="event-candidates">
+    {% include "partials/event_candidates.html" %}
+</div>
+
+<h3>Add Artist</h3>
+<input type="search"
+       name="q"
+       placeholder="Search artists by name..."
+       hx-get="/partials/artist-search"
+       hx-trigger="input changed delay:300ms, search"
+       hx-target="#artist-search-results"
+       hx-vals='{"event_id": "{{ event.id }}"}'
+       autocomplete="off">
+<div id="artist-search-results"></div>
+{% endblock %}

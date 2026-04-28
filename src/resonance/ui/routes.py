@@ -213,6 +213,99 @@ async def artists_page(
     return templates.TemplateResponse(request, "artists.html", context)
 
 
+@router.get("/artists/{artist_id}", response_model=None)
+async def artist_detail_page(
+    request: fastapi.Request,
+    artist_id: uuid.UUID,
+    page: int = 1,
+    section: str = "tracks",
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render artist detail page with tracks, events, candidates, and duplicates."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        artist_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
+        )
+        artist = artist_result.scalar_one_or_none()
+
+        if artist is None:
+            raise fastapi.HTTPException(status_code=404, detail="Artist not found")
+
+        track_count = await _count(
+            db, music_models.Track, music_models.Track.artist_id == artist_id
+        )
+
+        tracks_result = await db.execute(
+            sa.select(music_models.Track)
+            .where(music_models.Track.artist_id == artist_id)
+            .order_by(music_models.Track.title)
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        tracks = list(tracks_result.scalars().all())
+        tracks_has_next = len(tracks) > _PAGE_SIZE
+        tracks = tracks[:_PAGE_SIZE]
+        tracks_has_prev = page > 1
+
+        events_result = await db.execute(
+            sa.select(concert_models.EventArtist)
+            .where(concert_models.EventArtist.artist_id == artist_id)
+            .options(
+                sa_orm.joinedload(concert_models.EventArtist.event).joinedload(
+                    concert_models.Event.venue
+                )
+            )
+            .order_by(concert_models.EventArtist.position)
+        )
+        event_artists = list(events_result.scalars().unique().all())
+
+        candidates_result = await db.execute(
+            sa.select(concert_models.EventArtistCandidate)
+            .where(
+                concert_models.EventArtistCandidate.matched_artist_id == artist_id,
+                concert_models.EventArtistCandidate.status
+                == types_module.CandidateStatus.PENDING,
+            )
+            .options(sa_orm.joinedload(concert_models.EventArtistCandidate.event))
+        )
+        candidates = list(candidates_result.scalars().unique().all())
+
+        duplicates_result = await db.execute(
+            sa.select(music_models.Artist).where(
+                sa.func.lower(music_models.Artist.name) == sa.func.lower(artist.name),
+                music_models.Artist.id != artist_id,
+            )
+        )
+        duplicates = list(duplicates_result.scalars().all())
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "artist": artist,
+        "tracks": tracks,
+        "track_count": track_count,
+        "tracks_has_next": tracks_has_next,
+        "tracks_has_prev": tracks_has_prev,
+        "event_artists": event_artists,
+        "candidates": candidates,
+        "duplicates": duplicates,
+        "page": page,
+        "section": section,
+    }
+
+    if request.headers.get("HX-Request") and section == "tracks":
+        return templates.TemplateResponse(
+            request, "partials/artist_tracks.html", context
+        )
+    return templates.TemplateResponse(request, "artist_detail.html", context)
+
+
 @router.get("/tracks", response_model=None)
 async def tracks_page(
     request: fastapi.Request,
@@ -252,6 +345,76 @@ async def tracks_page(
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(request, "partials/track_list.html", context)
     return templates.TemplateResponse(request, "tracks.html", context)
+
+
+@router.get("/tracks/{track_id}", response_model=None)
+async def track_detail_page(
+    request: fastapi.Request,
+    track_id: uuid.UUID,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render track detail page with listening history and duplicates."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    offset = (page - 1) * _PAGE_SIZE
+
+    async with _get_db(request) as db:
+        track_result = await db.execute(
+            sa.select(music_models.Track)
+            .where(music_models.Track.id == track_id)
+            .options(sa_orm.joinedload(music_models.Track.artist))
+        )
+        track = track_result.scalar_one_or_none()
+
+        if track is None:
+            raise fastapi.HTTPException(status_code=404, detail="Track not found")
+
+        history_result = await db.execute(
+            sa.select(music_models.ListeningEvent)
+            .where(
+                music_models.ListeningEvent.track_id == track_id,
+                music_models.ListeningEvent.user_id == user_uuid,
+            )
+            .order_by(music_models.ListeningEvent.listened_at.desc())
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+        history = list(history_result.scalars().all())
+        has_next = len(history) > _PAGE_SIZE
+        history = history[:_PAGE_SIZE]
+        has_prev = page > 1
+
+        duplicates_result = await db.execute(
+            sa.select(music_models.Track)
+            .where(
+                sa.func.lower(music_models.Track.title) == sa.func.lower(track.title),
+                music_models.Track.artist_id == track.artist_id,
+                music_models.Track.id != track_id,
+            )
+            .options(sa_orm.joinedload(music_models.Track.artist))
+        )
+        duplicates = list(duplicates_result.scalars().unique().all())
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "track": track,
+        "history": history,
+        "duplicates": duplicates,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": has_prev,
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/track_history.html", context
+        )
+    return templates.TemplateResponse(request, "track_detail.html", context)
 
 
 @router.get("/events", response_model=None)
@@ -296,6 +459,91 @@ async def events_page(
     if request.headers.get("HX-Request"):
         return templates.TemplateResponse(request, "partials/event_list.html", context)
     return templates.TemplateResponse(request, "events.html", context)
+
+
+@router.get("/events/{event_id}", response_model=None)
+async def event_detail_page(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render event detail page with artists, candidates, and add-artist search."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        event_result = await db.execute(
+            sa.select(concert_models.Event)
+            .where(concert_models.Event.id == event_id)
+            .options(
+                sa_orm.joinedload(concert_models.Event.venue),
+                sa_orm.joinedload(concert_models.Event.artists),
+                sa_orm.joinedload(concert_models.Event.artist_candidates),
+            )
+        )
+        event = event_result.unique().scalar_one_or_none()
+
+        if event is None:
+            raise fastapi.HTTPException(status_code=404, detail="Event not found")
+
+        # Build dict of matched_artist_id -> Artist for candidates with matches
+        matched_ids = [
+            c.matched_artist_id
+            for c in event.artist_candidates
+            if c.matched_artist_id is not None
+        ]
+        matched_artists: dict[uuid.UUID, music_models.Artist] = {}
+        if matched_ids:
+            artists_result = await db.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id.in_(matched_ids)
+                )
+            )
+            for a in artists_result.scalars().all():
+                matched_artists[a.id] = a
+
+    context = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": _user_role(request),
+        "event": event,
+        "matched_artists": matched_artists,
+    }
+
+    return templates.TemplateResponse(request, "event_detail.html", context)
+
+
+@router.get("/partials/artist-search", response_model=None)
+async def artist_search_partial(
+    request: fastapi.Request,
+    q: str = "",
+    event_id: uuid.UUID | None = None,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Search artists by name and return results partial for HTMX."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    if len(q.strip()) < 2:
+        return fastapi.responses.HTMLResponse("")
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(music_models.Artist)
+            .where(music_models.Artist.name.ilike(f"%{q.strip()}%"))
+            .order_by(music_models.Artist.name)
+            .limit(10)
+        )
+        artists = list(result.scalars().all())
+
+    return templates.TemplateResponse(
+        request,
+        "partials/artist_search_results.html",
+        {
+            "artists": artists,
+            "event_id": event_id,
+        },
+    )
 
 
 @router.get("/history", response_model=None)

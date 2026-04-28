@@ -1,0 +1,24 @@
+{% if event_artists %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Event</th>
+                <th>Venue</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ea in event_artists %}
+            <tr>
+                <td>{{ ea.event.event_date }}</td>
+                <td><a href="/events/{{ ea.event.id }}">{{ ea.event.title }}</a></td>
+                <td>{{ ea.event.venue.name if ea.event.venue else "" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No events for this artist.</p>
+{% endif %}

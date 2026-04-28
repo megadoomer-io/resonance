@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
+{% block title %}{{ track.title }} — resonance{% endblock %}
+{% block content %}
+<p><a href="/tracks">&larr; Back to Tracks</a></p>
+<h2>{{ track.title }}</h2>
+<p>by <a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></p>
+
+<article>
+    <table>
+        <tbody>
+            <tr>
+                <th>Duration</th>
+                <td>
+                    {% if track.duration_ms %}
+                    {{ track.duration_ms // 60000 }}:{{ "%02d" | format((track.duration_ms % 60000) // 1000) }}
+                    {% else %}
+                    Unknown
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Services</th>
+                <td>
+                    {% if track.service_links %}
+                    {% for svc, val in track.service_links.items() %}
+                    {{ ", " if not loop.first }}{{ svc }}
+                    {% endfor %}
+                    {% else %}
+                    None
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Created</th>
+                <td>{{ track.created_at | localtime(user_tz) }}</td>
+            </tr>
+        </tbody>
+    </table>
+</article>
+
+<h3>Listening History</h3>
+<div id="track-history">
+    {% include "partials/track_history.html" %}
+</div>
+
+{% if duplicates %}
+<h3>Potential Duplicates</h3>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Artist</th>
+                {{ service_badge_headers() }}
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for dupe in duplicates %}
+            <tr>
+                <td><a href="/tracks/{{ dupe.id }}">{{ dupe.title }}</a></td>
+                <td>{{ dupe.artist.name }}</td>
+                {{ service_badge_cells(dupe.service_links, entity_type="track", entity_name=dupe.artist.name, track_title=dupe.title) }}
+                <td><a href="/tracks/{{ track.id }}/compare/{{ dupe.id }}" role="button" class="secondary outline" style="padding: 0.25em 0.5em; font-size: 0.85em;">Compare</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+{% endblock %}

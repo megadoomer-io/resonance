@@ -1,0 +1,22 @@
+{% if event.artists %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Artist</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ea in event.artists | sort(attribute="position") %}
+            <tr>
+                <td>{{ ea.position }}</td>
+                <td><a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No confirmed artists.</p>
+{% endif %}

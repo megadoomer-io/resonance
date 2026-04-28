@@ -1,0 +1,40 @@
+{% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
+{% if tracks %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                {{ service_badge_headers() }}
+            </tr>
+        </thead>
+        <tbody>
+            {% for track in tracks %}
+            <tr>
+                <td><a href="/tracks/{{ track.id }}">{{ track.title }}</a></td>
+                {{ service_badge_cells(track.service_links, entity_type="track", entity_name=artist.name, track_title=track.title) }}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if tracks_has_prev %}
+    <a href="/artists/{{ artist.id }}?page={{ page - 1 }}&section=tracks"
+       hx-get="/artists/{{ artist.id }}?page={{ page - 1 }}&section=tracks"
+       hx-target="#artist-tracks"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if tracks_has_next %}
+    <a href="/artists/{{ artist.id }}?page={{ page + 1 }}&section=tracks"
+       hx-get="/artists/{{ artist.id }}?page={{ page + 1 }}&section=tracks"
+       hx-target="#artist-tracks"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No tracks for this artist.</p>
+{% endif %}

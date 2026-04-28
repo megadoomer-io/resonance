@@ -1,0 +1,74 @@
+{% set pending = event.artist_candidates | selectattr("status.value", "equalto", "pending") | list %}
+{% set resolved = event.artist_candidates | selectattr("status.value", "ne", "pending") | list %}
+
+{% if pending %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Raw Name</th>
+                <th>Matched Artist</th>
+                <th>Confidence</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for candidate in pending %}
+            <tr id="candidate-{{ candidate.id }}">
+                <td>{{ candidate.raw_name }}</td>
+                <td>
+                    {% if candidate.matched_artist_id and candidate.matched_artist_id in matched_artists %}
+                    <a href="/artists/{{ candidate.matched_artist_id }}">{{ matched_artists[candidate.matched_artist_id].name }}</a>
+                    {% else %}
+                    <small style="opacity: 0.6;">No match</small>
+                    {% endif %}
+                </td>
+                <td>{{ candidate.confidence_score }}%</td>
+                <td>
+                    {% if candidate.matched_artist_id %}
+                    <button hx-post="/api/v1/events/{{ event.id }}/candidates/{{ candidate.id }}/accept"
+                            hx-target="#candidate-{{ candidate.id }}"
+                            hx-swap="outerHTML"
+                            class="outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;">Accept</button>
+                    {% endif %}
+                    <button hx-post="/api/v1/events/{{ event.id }}/candidates/{{ candidate.id }}/reject"
+                            hx-target="#candidate-{{ candidate.id }}"
+                            hx-swap="outerHTML"
+                            class="secondary outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;">Reject</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% else %}
+<p>No pending candidates.</p>
+{% endif %}
+
+{% if resolved %}
+<details>
+    <summary>Resolved Candidates ({{ resolved | length }})</summary>
+    <figure>
+        <table>
+            <thead>
+                <tr>
+                    <th>Raw Name</th>
+                    <th>Status</th>
+                    <th>Confidence</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for candidate in resolved %}
+                <tr>
+                    <td>{{ candidate.raw_name }}</td>
+                    <td>{{ candidate.status.value }}</td>
+                    <td>{{ candidate.confidence_score }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+</details>
+{% endif %}

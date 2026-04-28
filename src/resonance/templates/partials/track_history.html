@@ -1,0 +1,39 @@
+{% if history %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Listened At</th>
+                <th>Service</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for event in history %}
+            <tr>
+                <td>{{ event.listened_at | localtime(user_tz) }}</td>
+                <td>{{ event.source_service.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+<nav>
+    {% if has_prev %}
+    <a href="/tracks/{{ track.id }}?page={{ page - 1 }}"
+       hx-get="/tracks/{{ track.id }}?page={{ page - 1 }}"
+       hx-target="#track-history"
+       hx-swap="innerHTML"
+       role="button"
+       class="secondary">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="/tracks/{{ track.id }}?page={{ page + 1 }}"
+       hx-get="/tracks/{{ track.id }}?page={{ page + 1 }}"
+       hx-target="#track-history"
+       hx-swap="innerHTML"
+       role="button">Next</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No listening history for this track.</p>
+{% endif %}
