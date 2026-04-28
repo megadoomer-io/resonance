@@ -11,7 +11,7 @@
         <tbody>
             {% for artist in artists %}
             <tr>
-                <td>{{ artist.name }}</td>
+                <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
                 {{ service_badge_cells(artist.service_links, entity_type="artist", entity_name=artist.name) }}
             </tr>
             {% endfor %}

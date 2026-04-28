@@ -12,8 +12,8 @@
         <tbody>
             {% for track in tracks %}
             <tr>
-                <td>{{ track.title }}</td>
-                <td>{{ track.artist.name }}</td>
+                <td><a href="/tracks/{{ track.id }}">{{ track.title }}</a></td>
+                <td><a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></td>
                 {{ service_badge_cells(track.service_links, entity_type="track", entity_name=track.artist.name, track_title=track.title) }}
             </tr>
             {% endfor %}

@@ -14,15 +14,14 @@
             <tr>
                 <td>{{ event.event_date }}</td>
                 <td>
+                    <a href="/events/{{ event.id }}">{{ event.title }}</a>
                     {% if event.external_url %}
-                    <a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.title }}</a>
-                    {% else %}
-                    {{ event.title }}
+                    <a href="{{ event.external_url }}" target="_blank" rel="noopener" style="opacity: 0.5; margin-left: 0.25em;">&#x2197;</a>
                     {% endif %}
                 </td>
                 <td>{{ event.venue.name if event.venue else "" }}</td>
                 <td>
-                    {% for artist in event.artists %}{{ ", " if not loop.first }}{{ artist.raw_name }}{% endfor %}
+                    {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
                     {% if event.artists and event.artist_candidates %}, {% endif %}
                     {% for candidate in event.artist_candidates %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
                 </td>
