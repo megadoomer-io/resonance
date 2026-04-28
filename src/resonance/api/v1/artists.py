@@ -61,6 +61,28 @@ async def list_artists(
 
 
 @router.get(
+    "/search",
+    summary="Search artists by name",
+    description="Search for artists matching a query string.",
+)
+async def search_artists(
+    q: str,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    limit: int = 10,
+) -> dict[str, Any]:
+    stmt = (
+        sa.select(music_models.Artist)
+        .where(music_models.Artist.name.ilike(f"%{q}%"))
+        .order_by(music_models.Artist.name)
+        .limit(min(limit, 50))
+    )
+    result = await db.execute(stmt)
+    artists = list(result.scalars().all())
+    return {"items": [_format_artist_summary(a) for a in artists]}
+
+
+@router.get(
     "/{artist_id}",
     summary="Get artist detail",
     description="Get an artist with service links.",

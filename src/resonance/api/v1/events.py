@@ -6,12 +6,15 @@ import uuid
 from typing import Annotated, Any
 
 import fastapi
+import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
+import resonance.models.music as music_models
+import resonance.types as types_module
 
 _PAGE_SIZE = 50
 
@@ -140,3 +143,141 @@ async def get_event(
     detail["created_at"] = event.created_at.isoformat()
 
     return detail
+
+
+# --- Candidate management ---
+
+
+async def _get_candidate(
+    db: sa_async.AsyncSession,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> concert_models.EventArtistCandidate:
+    stmt = sa.select(concert_models.EventArtistCandidate).where(
+        concert_models.EventArtistCandidate.id == candidate_id,
+        concert_models.EventArtistCandidate.event_id == event_id,
+    )
+    candidate = (await db.execute(stmt)).scalar_one_or_none()
+    if candidate is None:
+        raise fastapi.HTTPException(status_code=404, detail="Candidate not found")
+    return candidate
+
+
+class _CreateCandidateBody(pydantic.BaseModel):
+    artist_id: uuid.UUID
+
+
+@router.post(
+    "/{event_id}/candidates/{candidate_id}/accept",
+    summary="Accept a candidate",
+    description="Create an EventArtist from a candidate and mark it accepted.",
+)
+async def accept_candidate(
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    candidate = await _get_candidate(db, event_id, candidate_id)
+
+    if candidate.matched_artist_id is None:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="Candidate must have a matched_artist_id before accepting",
+        )
+
+    event_artist = concert_models.EventArtist(
+        event_id=candidate.event_id,
+        artist_id=candidate.matched_artist_id,
+        position=candidate.position,
+        raw_name=candidate.raw_name,
+    )
+    db.add(event_artist)
+
+    candidate.status = types_module.CandidateStatus.ACCEPTED
+    await db.commit()
+
+    return {
+        "id": str(candidate.id),
+        "status": str(candidate.status),
+        "event_artist_id": str(event_artist.id),
+    }
+
+
+@router.post(
+    "/{event_id}/candidates/{candidate_id}/reject",
+    summary="Reject a candidate",
+    description="Mark a candidate as rejected.",
+)
+async def reject_candidate(
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    candidate = await _get_candidate(db, event_id, candidate_id)
+    candidate.status = types_module.CandidateStatus.REJECTED
+    await db.commit()
+
+    return {
+        "id": str(candidate.id),
+        "status": str(candidate.status),
+    }
+
+
+@router.post(
+    "/{event_id}/candidates",
+    summary="Create a candidate from artist search",
+    description="Create a new EventArtistCandidate linked to an existing artist.",
+)
+async def create_candidate(
+    event_id: uuid.UUID,
+    body: _CreateCandidateBody,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    # Verify event exists
+    event_stmt = sa.select(concert_models.Event).where(
+        concert_models.Event.id == event_id
+    )
+    event = (await db.execute(event_stmt)).scalar_one_or_none()
+    if event is None:
+        raise fastapi.HTTPException(status_code=404, detail="Event not found")
+
+    # Look up the artist
+    artist_stmt = sa.select(music_models.Artist).where(
+        music_models.Artist.id == body.artist_id
+    )
+    artist = (await db.execute(artist_stmt)).scalar_one_or_none()
+    if artist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Artist not found")
+
+    # Check for duplicate candidate with same raw_name
+    dup_stmt = sa.select(concert_models.EventArtistCandidate).where(
+        concert_models.EventArtistCandidate.event_id == event_id,
+        concert_models.EventArtistCandidate.raw_name == artist.name,
+    )
+    existing = (await db.execute(dup_stmt)).scalar_one_or_none()
+    if existing is not None:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Candidate with this name already exists for this event",
+        )
+
+    candidate = concert_models.EventArtistCandidate(
+        event_id=event_id,
+        raw_name=artist.name,
+        matched_artist_id=artist.id,
+        status=types_module.CandidateStatus.PENDING,
+        confidence_score=100,
+    )
+    db.add(candidate)
+    await db.commit()
+
+    return {
+        "id": str(candidate.id),
+        "event_id": str(candidate.event_id),
+        "raw_name": candidate.raw_name,
+        "matched_artist_id": str(candidate.matched_artist_id),
+        "status": str(candidate.status),
+    }
