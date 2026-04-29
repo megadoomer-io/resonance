@@ -1,11 +1,11 @@
 {% set statuses = [("going", "Going"), ("interested", "Interested"), ("none", "Not going")] %}
-{% set current = attendance.status.value if attendance else "none" %}
+{% set current = attendance.status.value if attendance else none %}
 {% set source = attendance.source_service.value if attendance else none %}
 <div style="display: flex; align-items: center; gap: 0.5em; flex-wrap: wrap;">
     {% for value, label in statuses %}
     {% if value == current %}
-    <button class="outline" disabled
-            style="padding: 0.2em 0.6em; font-size: 0.85em; opacity: 1; cursor: default;">{{ label }}</button>
+    <button class="" disabled
+            style="padding: 0.2em 0.6em; font-size: 0.85em; cursor: default;">{{ label }}</button>
     {% else %}
     <form hx-post="/events/{{ event_id }}/attendance"
           hx-target="#attendance-status"
