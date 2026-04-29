@@ -30,6 +30,12 @@
                             class="outline secondary"
                             style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em;">&darr;</button>
                     {% endif %}
+                    <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/remove"
+                            hx-target="#event-artists"
+                            hx-swap="innerHTML"
+                            hx-confirm="Remove {{ ea.raw_name }} from this event?"
+                            class="outline secondary"
+                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em; color: var(--pico-del-color);">&times;</button>
                 </td>
             </tr>
             {% endfor %}

@@ -697,6 +697,16 @@ async def event_detail_page(
     return templates.TemplateResponse(request, "event_detail.html", context)
 
 
+def _normalize_positions(
+    artists: list[concert_models.EventArtist],
+) -> list[concert_models.EventArtist]:
+    """Assign sequential positions (0, 1, 2, ...) based on current sort order."""
+    sorted_artists = sorted(artists, key=lambda ea: ea.position)
+    for i, ea in enumerate(sorted_artists):
+        ea.position = i
+    return sorted_artists
+
+
 @router.post("/events/{event_id}/artists/{ea_id}/move-up", response_model=None)
 async def move_artist_up(
     request: fastapi.Request,
@@ -710,15 +720,14 @@ async def move_artist_up(
 
     async with _get_db(request) as db:
         event = await _load_event_with_artists(db, event_id)
-        sorted_artists = sorted(event.artists, key=lambda ea: ea.position)
+        sorted_artists = _normalize_positions(list(event.artists))
         target_idx = next(
             (i for i, ea in enumerate(sorted_artists) if ea.id == ea_id), None
         )
         if target_idx is not None and target_idx > 0:
-            above = sorted_artists[target_idx - 1]
-            below = sorted_artists[target_idx]
-            above.position, below.position = below.position, above.position
-            await db.commit()
+            sorted_artists[target_idx - 1].position = target_idx
+            sorted_artists[target_idx].position = target_idx - 1
+        await db.commit()
 
     return templates.TemplateResponse(
         request,
@@ -740,15 +749,49 @@ async def move_artist_down(
 
     async with _get_db(request) as db:
         event = await _load_event_with_artists(db, event_id)
-        sorted_artists = sorted(event.artists, key=lambda ea: ea.position)
+        sorted_artists = _normalize_positions(list(event.artists))
         target_idx = next(
             (i for i, ea in enumerate(sorted_artists) if ea.id == ea_id), None
         )
         if target_idx is not None and target_idx < len(sorted_artists) - 1:
-            above = sorted_artists[target_idx]
-            below = sorted_artists[target_idx + 1]
-            above.position, below.position = below.position, above.position
+            sorted_artists[target_idx].position = target_idx + 1
+            sorted_artists[target_idx + 1].position = target_idx
+        await db.commit()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_confirmed_artists.html",
+        {"event": event},
+    )
+
+
+@router.post("/events/{event_id}/artists/{ea_id}/remove", response_model=None)
+async def remove_artist_from_event(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    ea_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Remove a confirmed artist from an event and return updated list."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        ea = (
+            await db.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.id == ea_id,
+                    concert_models.EventArtist.event_id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if ea is not None:
+            await db.delete(ea)
             await db.commit()
+
+        event = await _load_event_with_artists(db, event_id)
+        _normalize_positions(list(event.artists))
+        await db.commit()
 
     return templates.TemplateResponse(
         request,
