@@ -39,6 +39,9 @@ class MergeStats:
     artist_relations_deleted: int = 0
     track_relations_repointed: int = 0
     track_relations_deleted: int = 0
+    event_artists_repointed: int = 0
+    event_artists_deleted: int = 0
+    candidates_repointed: int = 0
 
 
 def pick_canonical(
@@ -188,6 +191,46 @@ async def merge_artists(
             rel.artist_id = canonical.id
             stats.artist_relations_repointed += 1
 
+    # Re-point confirmed event artists (handle unique constraint conflicts)
+    event_artists = (
+        (
+            await session.execute(
+                sa.select(models_module.EventArtist).where(
+                    models_module.EventArtist.artist_id == duplicate.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    for ea in event_artists:
+        ea_conflict = (
+            await session.execute(
+                sa.select(models_module.EventArtist).where(
+                    models_module.EventArtist.event_id == ea.event_id,
+                    models_module.EventArtist.artist_id == canonical.id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if ea_conflict:
+            await session.delete(ea)
+            stats.event_artists_deleted += 1
+        else:
+            ea.artist_id = canonical.id
+            stats.event_artists_repointed += 1
+
+    # Re-point candidate matches
+    candidate_result = await session.execute(
+        sa.update(models_module.EventArtistCandidate)
+        .where(models_module.EventArtistCandidate.matched_artist_id == duplicate.id)
+        .values(matched_artist_id=canonical.id)
+    )
+    stats.candidates_repointed = (
+        candidate_result.rowcount if hasattr(candidate_result, "rowcount") else 0
+    )
+
     # Delete the duplicate
     await session.execute(
         sa.delete(models_module.Artist).where(models_module.Artist.id == duplicate.id)
@@ -199,6 +242,9 @@ async def merge_artists(
         tracks_repointed=stats.tracks_repointed,
         relations_repointed=stats.artist_relations_repointed,
         relations_deleted=stats.artist_relations_deleted,
+        event_artists_repointed=stats.event_artists_repointed,
+        event_artists_deleted=stats.event_artists_deleted,
+        candidates_repointed=stats.candidates_repointed,
     )
     return stats
 

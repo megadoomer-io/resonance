@@ -1,13 +1,152 @@
-"""Tests for dedup_all orchestration function."""
+"""Tests for dedup functions: merge_artists, merge_tracks, dedup_all."""
 
 from __future__ import annotations
 
+import uuid
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import resonance.dedup as dedup_module
-from resonance.dedup import MergeStats, dedup_all
+from resonance.dedup import MergeStats, dedup_all, merge_artists
+
+
+class FakeResult:
+    """Fake DB result supporting common chains."""
+
+    def __init__(self, items: list[Any] | None = None, rowcount: int = 0) -> None:
+        self._items = items or []
+        self.rowcount = rowcount
+
+    def scalars(self) -> FakeResult:
+        return self
+
+    def all(self) -> list[Any]:
+        return self._items
+
+    def scalar_one_or_none(self) -> Any:
+        return self._items[0] if self._items else None
+
+
+def _make_artist(**overrides: Any) -> SimpleNamespace:
+    defaults: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "name": "Test Artist",
+        "service_links": {},
+        "created_at": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_event_artist(**overrides: Any) -> SimpleNamespace:
+    defaults: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "event_id": uuid.uuid4(),
+        "artist_id": uuid.uuid4(),
+        "position": 0,
+        "raw_name": "Test Artist",
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# merge_artists — EventArtist / EventArtistCandidate repointing (#67)
+# ---------------------------------------------------------------------------
+
+
+class TestMergeArtistsRepointsEventArtists:
+    """merge_artists must repoint EventArtist and EventArtistCandidate
+    records before deleting the duplicate, otherwise CASCADE deletes them."""
+
+    @pytest.mark.asyncio
+    async def test_repoints_event_artists_without_conflict(self) -> None:
+        """EventArtist rows for the duplicate are repointed to canonical."""
+        canonical = _make_artist(name="The Red Pears")
+        duplicate = _make_artist(name="Red Pears")
+
+        event_artist = _make_event_artist(artist_id=duplicate.id)
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                FakeResult(rowcount=0),  # UPDATE tracks
+                FakeResult(items=[]),  # SELECT UserArtistRelation
+                FakeResult(items=[event_artist]),  # SELECT EventArtist
+                FakeResult(items=[]),  # SELECT EventArtist conflict check → none
+                FakeResult(rowcount=1),  # UPDATE EventArtistCandidate
+                FakeResult(),  # DELETE duplicate artist
+            ]
+        )
+
+        stats = await merge_artists(session, canonical, duplicate)
+
+        assert stats.event_artists_repointed == 1
+        assert stats.event_artists_deleted == 0
+        assert event_artist.artist_id == canonical.id
+
+    @pytest.mark.asyncio
+    async def test_deletes_conflicting_event_artists(self) -> None:
+        """When canonical already has an EventArtist for the same event,
+        the duplicate's EventArtist is deleted instead of repointed."""
+        canonical = _make_artist(name="The Red Pears")
+        duplicate = _make_artist(name="Red Pears")
+
+        shared_event_id = uuid.uuid4()
+        dup_event_artist = _make_event_artist(
+            artist_id=duplicate.id, event_id=shared_event_id
+        )
+        existing_event_artist = _make_event_artist(
+            artist_id=canonical.id, event_id=shared_event_id
+        )
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                FakeResult(rowcount=0),  # UPDATE tracks
+                FakeResult(items=[]),  # SELECT UserArtistRelation
+                FakeResult(items=[dup_event_artist]),  # SELECT EventArtist
+                FakeResult(items=[existing_event_artist]),  # conflict exists
+                FakeResult(rowcount=0),  # UPDATE EventArtistCandidate
+                FakeResult(),  # DELETE duplicate artist
+            ]
+        )
+
+        stats = await merge_artists(session, canonical, duplicate)
+
+        assert stats.event_artists_deleted == 1
+        assert stats.event_artists_repointed == 0
+        session.delete.assert_called_once_with(dup_event_artist)
+
+    @pytest.mark.asyncio
+    async def test_repoints_candidate_matched_artist_ids(self) -> None:
+        """EventArtistCandidate.matched_artist_id pointing to duplicate
+        is repointed to canonical."""
+        canonical = _make_artist(name="The Red Pears")
+        duplicate = _make_artist(name="Red Pears")
+
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                FakeResult(rowcount=0),  # UPDATE tracks
+                FakeResult(items=[]),  # SELECT UserArtistRelation
+                FakeResult(items=[]),  # SELECT EventArtist (none)
+                FakeResult(rowcount=3),  # UPDATE EventArtistCandidate
+                FakeResult(),  # DELETE duplicate artist
+            ]
+        )
+
+        stats = await merge_artists(session, canonical, duplicate)
+
+        assert stats.candidates_repointed == 3
+
+
+# ---------------------------------------------------------------------------
+# dedup_all orchestration
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
