@@ -697,6 +697,101 @@ async def event_detail_page(
     return templates.TemplateResponse(request, "event_detail.html", context)
 
 
+@router.post("/events/{event_id}/artists/{ea_id}/move-up", response_model=None)
+async def move_artist_up(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    ea_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Swap an event artist with the one above it and return updated list."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        event = await _load_event_with_artists(db, event_id)
+        sorted_artists = sorted(event.artists, key=lambda ea: ea.position)
+        target_idx = next(
+            (i for i, ea in enumerate(sorted_artists) if ea.id == ea_id), None
+        )
+        if target_idx is not None and target_idx > 0:
+            above = sorted_artists[target_idx - 1]
+            below = sorted_artists[target_idx]
+            above.position, below.position = below.position, above.position
+            await db.commit()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_confirmed_artists.html",
+        {"event": event},
+    )
+
+
+@router.post("/events/{event_id}/artists/{ea_id}/move-down", response_model=None)
+async def move_artist_down(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    ea_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Swap an event artist with the one below it and return updated list."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        event = await _load_event_with_artists(db, event_id)
+        sorted_artists = sorted(event.artists, key=lambda ea: ea.position)
+        target_idx = next(
+            (i for i, ea in enumerate(sorted_artists) if ea.id == ea_id), None
+        )
+        if target_idx is not None and target_idx < len(sorted_artists) - 1:
+            above = sorted_artists[target_idx]
+            below = sorted_artists[target_idx + 1]
+            above.position, below.position = below.position, above.position
+            await db.commit()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_confirmed_artists.html",
+        {"event": event},
+    )
+
+
+@router.get("/events/{event_id}/artists", response_model=None)
+async def event_artists_partial(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Return confirmed artists partial for HTMX refresh."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        event = await _load_event_with_artists(db, event_id)
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_confirmed_artists.html",
+        {"event": event},
+    )
+
+
+async def _load_event_with_artists(
+    db: sa_async.AsyncSession,
+    event_id: uuid.UUID,
+) -> concert_models.Event:
+    result = await db.execute(
+        sa.select(concert_models.Event)
+        .where(concert_models.Event.id == event_id)
+        .options(sa_orm.joinedload(concert_models.Event.artists))
+    )
+    event = result.unique().scalar_one_or_none()
+    if event is None:
+        raise fastapi.HTTPException(status_code=404, detail="Event not found")
+    return event
+
+
 @router.post("/events/{event_id}/candidates/{candidate_id}/accept", response_model=None)
 async def accept_candidate_ui(
     request: fastapi.Request,
@@ -736,9 +831,11 @@ async def accept_candidate_ui(
         candidate.status = types_module.CandidateStatus.ACCEPTED
         await db.commit()
 
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request, "partials/candidate_accepted.html", {"candidate": candidate}
     )
+    response.headers["HX-Trigger"] = "artistsChanged"
+    return response
 
 
 @router.post("/events/{event_id}/candidates/{candidate_id}/reject", response_model=None)

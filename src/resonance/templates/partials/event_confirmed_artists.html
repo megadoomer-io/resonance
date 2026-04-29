@@ -1,22 +1,41 @@
-{% if event.artists %}
+{% set sorted_artists = event.artists | sort(attribute="position") | list %}
+{% if sorted_artists %}
 <figure>
     <table>
-        <thead>
-            <tr>
-                <th>#</th>
-                <th>Artist</th>
-            </tr>
-        </thead>
         <tbody>
-            {% for ea in event.artists | sort(attribute="position") %}
+            {% for ea in sorted_artists %}
             <tr>
-                <td>{{ ea.position }}</td>
-                <td><a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a></td>
+                <td>
+                    <a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>
+                    {% if sorted_artists | length > 1 %}
+                    {% if loop.first %}
+                    <small style="opacity: 0.5; margin-left: 0.5em;">headliner</small>
+                    {% elif loop.last %}
+                    <small style="opacity: 0.5; margin-left: 0.5em;">opener</small>
+                    {% endif %}
+                    {% endif %}
+                </td>
+                <td style="white-space: nowrap; width: 1%;">
+                    {% if not loop.first %}
+                    <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/move-up"
+                            hx-target="#event-artists"
+                            hx-swap="innerHTML"
+                            class="outline secondary"
+                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em;">&uarr;</button>
+                    {% endif %}
+                    {% if not loop.last %}
+                    <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/move-down"
+                            hx-target="#event-artists"
+                            hx-swap="innerHTML"
+                            class="outline secondary"
+                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em;">&darr;</button>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </figure>
 {% else %}
-<p>No confirmed artists.</p>
+<p><small style="opacity: 0.6;">No confirmed artists yet.</small></p>
 {% endif %}
