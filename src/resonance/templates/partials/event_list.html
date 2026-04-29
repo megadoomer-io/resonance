@@ -29,7 +29,7 @@
                     {% set confirmed_names = event.artists | map(attribute="raw_name") | list %}
                     {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
                     {% set pending = [] %}
-                    {% for candidate in event.artist_candidates %}{% if candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
+                    {% for candidate in event.artist_candidates %}{% if candidate.status.value == "pending" and candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
                     {% if event.artists and pending %}, {% endif %}
                     {% for candidate in pending %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
                 </td>
