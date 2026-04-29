@@ -213,8 +213,8 @@ class TestDateRangeField:
         )
         result = field.parse({"date_from": "2025-01-01"})
         assert result is not None
-        assert result["from"] == datetime.date(2025, 1, 1)
-        assert result.get("to") is None
+        assert result["date_from"] == datetime.date(2025, 1, 1)
+        assert result.get("date_to") is None
 
     def test_parse_to_only(self) -> None:
         field = filters_module.DateRangeField(
@@ -222,8 +222,8 @@ class TestDateRangeField:
         )
         result = field.parse({"date_to": "2025-12-31"})
         assert result is not None
-        assert result.get("from") is None
-        assert result["to"] == datetime.date(2025, 12, 31)
+        assert result.get("date_from") is None
+        assert result["date_to"] == datetime.date(2025, 12, 31)
 
     def test_parse_both(self) -> None:
         field = filters_module.DateRangeField(
@@ -231,8 +231,8 @@ class TestDateRangeField:
         )
         result = field.parse({"date_from": "2025-01-01", "date_to": "2025-12-31"})
         assert result is not None
-        assert result["from"] == datetime.date(2025, 1, 1)
-        assert result["to"] == datetime.date(2025, 12, 31)
+        assert result["date_from"] == datetime.date(2025, 1, 1)
+        assert result["date_to"] == datetime.date(2025, 12, 31)
 
     def test_parse_invalid_date_ignored(self) -> None:
         field = filters_module.DateRangeField(
@@ -252,7 +252,9 @@ class TestDateRangeField:
             name="date", column=events_table.c.event_date
         )
         base = sa.select(events_table)
-        result = field.apply(base, {"from": datetime.date(2025, 1, 1), "to": None})
+        result = field.apply(
+            base, {"date_from": datetime.date(2025, 1, 1), "date_to": None}
+        )
         compiled = _compile(result)
         assert ">=" in compiled
 
@@ -261,7 +263,9 @@ class TestDateRangeField:
             name="date", column=events_table.c.event_date
         )
         base = sa.select(events_table)
-        result = field.apply(base, {"from": None, "to": datetime.date(2025, 12, 31)})
+        result = field.apply(
+            base, {"date_from": None, "date_to": datetime.date(2025, 12, 31)}
+        )
         compiled = _compile(result)
         assert "<=" in compiled
 
@@ -273,8 +277,8 @@ class TestDateRangeField:
         result = field.apply(
             base,
             {
-                "from": datetime.date(2025, 1, 1),
-                "to": datetime.date(2025, 12, 31),
+                "date_from": datetime.date(2025, 1, 1),
+                "date_to": datetime.date(2025, 12, 31),
             },
         )
         compiled = _compile(result)
@@ -302,8 +306,8 @@ class TestNumericRangeField:
         )
         result = field.parse({"capacity_min": "100"})
         assert result is not None
-        assert result["min"] == 100
-        assert result.get("max") is None
+        assert result["capacity_min"] == 100
+        assert result.get("capacity_max") is None
 
     def test_parse_max_only(self) -> None:
         field = filters_module.NumericRangeField(
@@ -311,8 +315,8 @@ class TestNumericRangeField:
         )
         result = field.parse({"capacity_max": "500"})
         assert result is not None
-        assert result.get("min") is None
-        assert result["max"] == 500
+        assert result.get("capacity_min") is None
+        assert result["capacity_max"] == 500
 
     def test_parse_both(self) -> None:
         field = filters_module.NumericRangeField(
@@ -320,8 +324,8 @@ class TestNumericRangeField:
         )
         result = field.parse({"capacity_min": "100", "capacity_max": "500"})
         assert result is not None
-        assert result["min"] == 100
-        assert result["max"] == 500
+        assert result["capacity_min"] == 100
+        assert result["capacity_max"] == 500
 
     def test_parse_invalid_number_ignored(self) -> None:
         field = filters_module.NumericRangeField(
@@ -341,7 +345,7 @@ class TestNumericRangeField:
             name="capacity", column=events_table.c.capacity
         )
         base = sa.select(events_table)
-        result = field.apply(base, {"min": 100, "max": None})
+        result = field.apply(base, {"capacity_min": 100, "capacity_max": None})
         compiled = _compile(result)
         assert ">=" in compiled
 
@@ -350,7 +354,7 @@ class TestNumericRangeField:
             name="capacity", column=events_table.c.capacity
         )
         base = sa.select(events_table)
-        result = field.apply(base, {"min": None, "max": 500})
+        result = field.apply(base, {"capacity_min": None, "capacity_max": 500})
         compiled = _compile(result)
         assert "<=" in compiled
 

@@ -34,6 +34,7 @@ class TextField:
 
     name: str
     column: sa.Column[Any]
+    join: Any | None = None
 
     def parse(self, params: dict[str, str]) -> str | None:
         """Return the stripped search term, or ``None`` if absent/blank."""
@@ -116,16 +117,16 @@ class DateRangeField:
         if from_date is None and to_date is None:
             return None
 
-        return {"from": from_date, "to": to_date}
+        return {f"{self.name}_from": from_date, f"{self.name}_to": to_date}
 
     def apply(
         self, query: sa.Select[Any], value: dict[str, datetime.date | None]
     ) -> sa.Select[Any]:
         """Add >= and/or <= WHERE clauses for the date range."""
-        if value.get("from") is not None:
-            query = query.where(self.column >= value["from"])
-        if value.get("to") is not None:
-            query = query.where(self.column <= value["to"])
+        if value.get(f"{self.name}_from") is not None:
+            query = query.where(self.column >= value[f"{self.name}_from"])
+        if value.get(f"{self.name}_to") is not None:
+            query = query.where(self.column <= value[f"{self.name}_to"])
         return query
 
     @staticmethod
@@ -159,16 +160,16 @@ class NumericRangeField:
         if min_val is None and max_val is None:
             return None
 
-        return {"min": min_val, "max": max_val}
+        return {f"{self.name}_min": min_val, f"{self.name}_max": max_val}
 
     def apply(
         self, query: sa.Select[Any], value: dict[str, int | None]
     ) -> sa.Select[Any]:
         """Add >= and/or <= WHERE clauses for the numeric range."""
-        if value.get("min") is not None:
-            query = query.where(self.column >= value["min"])
-        if value.get("max") is not None:
-            query = query.where(self.column <= value["max"])
+        if value.get(f"{self.name}_min") is not None:
+            query = query.where(self.column >= value[f"{self.name}_min"])
+        if value.get(f"{self.name}_max") is not None:
+            query = query.where(self.column <= value[f"{self.name}_max"])
         return query
 
     @staticmethod
