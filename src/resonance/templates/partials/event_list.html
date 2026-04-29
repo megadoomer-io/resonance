@@ -40,16 +40,16 @@
 </figure>
 <nav>
     {% if has_prev %}
-    <a href="/events?page={{ page - 1 }}"
-       hx-get="/events?page={{ page - 1 }}"
+    <a href="/events?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/events?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#event-list"
        hx-swap="innerHTML"
        role="button"
        class="secondary">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a href="/events?page={{ page + 1 }}"
-       hx-get="/events?page={{ page + 1 }}"
+    <a href="/events?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/events?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#event-list"
        hx-swap="innerHTML"
        role="button">Next</a>

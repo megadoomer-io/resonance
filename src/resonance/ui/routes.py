@@ -27,6 +27,8 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.types as types_module
+import resonance.ui.filters as filters_module
+import resonance.ui.view_filters as view_filters_module
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -611,27 +613,132 @@ async def events_page(
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
 
+    user_uuid = uuid.UUID(user_id)
     offset = (page - 1) * _PAGE_SIZE
 
+    # Parse filter parameters
+    params = dict(request.query_params)
+    multi_params = {
+        "attendance": request.query_params.getlist("attendance"),
+    }
+
+    # Build presets (today's date resolved dynamically)
+    presets = view_filters_module.build_event_presets()
+    active_preset = view_filters_module.detect_active_preset(params, presets)
+
+    # If "upcoming" is the default preset and no date_from was explicitly set,
+    # inject today's date so the filter is applied.
+    if active_preset == "upcoming" and "date_from" not in params:
+        params["date_from"] = view_filters_module._today_iso()
+
+    # Parse filters to get active_filters for template context
+    applied = filters_module.parse_filter_params(
+        view_filters_module.EVENT_FILTERS, params, multi_params=multi_params
+    )
+
     async with _get_db(request) as db:
-        result = await db.execute(
+        # Build base query with joins for cross-entity filtering
+        query = (
             sa.select(concert_models.Event)
+            .outerjoin(
+                concert_models.Venue,
+                concert_models.Event.venue_id == concert_models.Venue.id,
+            )
+            .outerjoin(
+                concert_models.EventArtist,
+                concert_models.Event.id == concert_models.EventArtist.event_id,
+            )
+            .outerjoin(
+                music_models.Artist,
+                concert_models.EventArtist.artist_id == music_models.Artist.id,
+            )
+        )
+
+        # Apply registered filter fields (title, venue, artist, date, has_pending)
+        query = filters_module.apply_filters(
+            query,
+            view_filters_module.EVENT_FILTERS,
+            params,
+            multi_params=multi_params,
+        )
+
+        # Handle attendance filter manually (requires user_id context)
+        attendance_values = multi_params.get("attendance", [])
+        valid_attendance = [
+            v for v in attendance_values if v in ("GOING", "INTERESTED", "NONE")
+        ]
+        if valid_attendance:
+            attendance_subquery = sa.select(
+                concert_models.UserEventAttendance.event_id
+            ).where(
+                concert_models.UserEventAttendance.user_id == user_uuid,
+                concert_models.UserEventAttendance.status.in_(valid_attendance),
+            )
+            query = query.where(concert_models.Event.id.in_(attendance_subquery))
+
+        # Deduplicate rows from outer joins, order, and paginate
+        query = (
+            query.group_by(concert_models.Event.id)
+            .order_by(concert_models.Event.event_date.desc())
+            .offset(offset)
+            .limit(_PAGE_SIZE + 1)
+        )
+
+        # Wrap in a subquery so eager loads work correctly with group_by
+        event_ids_subquery = query.with_only_columns(concert_models.Event.id)
+        final_query = (
+            sa.select(concert_models.Event)
+            .where(concert_models.Event.id.in_(event_ids_subquery))
             .options(
                 sa_orm.joinedload(concert_models.Event.venue),
                 sa_orm.joinedload(concert_models.Event.artists),
                 sa_orm.joinedload(concert_models.Event.artist_candidates),
             )
             .order_by(concert_models.Event.event_date.desc())
-            .offset(offset)
-            .limit(_PAGE_SIZE + 1)
         )
+
+        result = await db.execute(final_query)
         events = list(result.unique().scalars().all())
 
         has_next = len(events) > _PAGE_SIZE
         events = events[:_PAGE_SIZE]
 
         event_ids = [e.id for e in events]
-        attendance_map = await _get_attendance_map(db, uuid.UUID(user_id), event_ids)
+        attendance_map = await _get_attendance_map(db, user_uuid, event_ids)
+
+    # Build filter query string for pagination links
+    filter_qs = view_filters_module.build_filter_query_string(
+        applied.active_filters, view_filters_module.EVENT_FILTERS
+    )
+    # Include attendance in filter_qs (handled outside the standard fields)
+    if valid_attendance:
+        attendance_parts = [f"attendance={v}" for v in valid_attendance]
+        if filter_qs:
+            filter_qs += "&" + "&".join(attendance_parts)
+        else:
+            filter_qs = "&".join(attendance_parts)
+    # Include quick search in filter_qs
+    q_value = params.get("q", "").strip()
+    if q_value:
+        if filter_qs:
+            filter_qs += f"&q={q_value}"
+        else:
+            filter_qs = f"q={q_value}"
+
+    # Build flat active_filters dict for the template
+    template_active_filters: dict[str, object] = {}
+    for key, value in applied.active_filters.items():
+        if isinstance(value, dict):
+            # DateRangeField stores {date_from: ..., date_to: ...}
+            for dk, dv in value.items():
+                if dv is not None:
+                    template_active_filters[dk] = str(dv)
+        else:
+            template_active_filters[key] = value
+    if valid_attendance:
+        template_active_filters["attendance"] = valid_attendance
+    if q_value:
+        template_active_filters["q"] = q_value
 
     context = {
         "user_id": user_id,
@@ -642,6 +749,13 @@ async def events_page(
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
+        "active_filters": template_active_filters,
+        "presets": presets,
+        "filters": view_filters_module.EVENT_TEMPLATE_FILTERS,
+        "active_preset": active_preset,
+        "list_url": "/events",
+        "list_target": "#event-list",
+        "filter_qs": filter_qs,
     }
 
     if request.headers.get("HX-Request"):

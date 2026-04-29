@@ -1,4 +1,4 @@
-"""Tests for the shared filter framework."""
+"""Tests for the shared filter framework and per-view filter registries."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import datetime
 import sqlalchemy as sa
 
 import resonance.ui.filters as filters_module
+import resonance.ui.view_filters as view_filters_module
 
 # ---------------------------------------------------------------------------
 # Test table fixtures — plain sa.Table, not ORM models
@@ -578,3 +579,172 @@ class TestApplyFilters:
         assert "WHERE" in compiled.upper()
         assert "LIKE" in compiled.upper()
         assert ">=" in compiled
+
+
+# ---------------------------------------------------------------------------
+# Event Filter Registry (view_filters)
+# ---------------------------------------------------------------------------
+
+
+class TestEventFilterRegistry:
+    """Test the event filter field definitions."""
+
+    def test_event_filters_has_expected_fields(self) -> None:
+        names = [f.name for f in view_filters_module.EVENT_FILTERS]
+        assert "title" in names
+        assert "venue" in names
+        assert "artist" in names
+        assert "date" in names
+        assert "has_pending" in names
+
+    def test_event_filters_field_types(self) -> None:
+        by_name = {f.name: f for f in view_filters_module.EVENT_FILTERS}
+        assert isinstance(by_name["title"], filters_module.TextField)
+        assert isinstance(by_name["venue"], filters_module.TextField)
+        assert isinstance(by_name["artist"], filters_module.TextField)
+        assert isinstance(by_name["date"], filters_module.DateRangeField)
+        assert isinstance(by_name["has_pending"], filters_module.ExistsField)
+
+    def test_event_filters_count(self) -> None:
+        assert len(view_filters_module.EVENT_FILTERS) == 5
+
+
+class TestEventPresets:
+    """Test event preset generation."""
+
+    def test_build_event_presets_returns_three(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        assert len(presets) == 3
+
+    def test_upcoming_preset_uses_today(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        upcoming = next(p for p in presets if p["name"] == "upcoming")
+        today = datetime.date.today().isoformat()
+        assert f"date_from={today}" in upcoming["params"]
+
+    def test_going_preset_params(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        going = next(p for p in presets if p["name"] == "going")
+        assert going["params"] == "attendance=GOING"
+
+    def test_needs_review_preset_params(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        review = next(p for p in presets if p["name"] == "needs_review")
+        assert review["params"] == "has_pending=true"
+
+    def test_preset_names_are_unique(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        names = [p["name"] for p in presets]
+        assert len(names) == len(set(names))
+
+
+class TestEventTemplateFilters:
+    """Test event template filter metadata."""
+
+    def test_template_filters_has_expected_count(self) -> None:
+        assert len(view_filters_module.EVENT_TEMPLATE_FILTERS) == 5
+
+    def test_template_filter_names(self) -> None:
+        names = [f["name"] for f in view_filters_module.EVENT_TEMPLATE_FILTERS]
+        assert names == ["title", "date", "venue", "artist", "attendance"]
+
+    def test_attendance_has_options(self) -> None:
+        att = next(
+            f
+            for f in view_filters_module.EVENT_TEMPLATE_FILTERS
+            if f["name"] == "attendance"
+        )
+        assert att["type"] == "multiselect"
+        assert len(att["options"]) == 3
+        option_values = [o["value"] for o in att["options"]]
+        assert option_values == ["GOING", "INTERESTED", "NONE"]
+
+
+class TestDetectActivePreset:
+    """Test active preset detection."""
+
+    def test_no_filters_defaults_to_upcoming(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        result = view_filters_module.detect_active_preset({}, presets)
+        assert result == "upcoming"
+
+    def test_matching_upcoming_params(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        today = datetime.date.today().isoformat()
+        result = view_filters_module.detect_active_preset({"date_from": today}, presets)
+        assert result == "upcoming"
+
+    def test_matching_going_params(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        result = view_filters_module.detect_active_preset(
+            {"attendance": "GOING"}, presets
+        )
+        assert result == "going"
+
+    def test_matching_needs_review_params(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        result = view_filters_module.detect_active_preset(
+            {"has_pending": "true"}, presets
+        )
+        assert result == "needs_review"
+
+    def test_custom_filters_returns_none(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        result = view_filters_module.detect_active_preset(
+            {"title": "concert", "venue": "arena"}, presets
+        )
+        assert result is None
+
+    def test_quick_search_returns_none(self) -> None:
+        presets = view_filters_module.build_event_presets()
+        result = view_filters_module.detect_active_preset({"q": "radiohead"}, presets)
+        assert result is None
+
+
+class TestBuildFilterQueryString:
+    """Test filter query string builder."""
+
+    def test_empty_filters_returns_empty(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {}, view_filters_module.EVENT_FILTERS
+        )
+        assert result == ""
+
+    def test_text_filter_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"title": "concert"}, view_filters_module.EVENT_FILTERS
+        )
+        assert "title=concert" in result
+
+    def test_date_range_from_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"date": {"date_from": datetime.date(2025, 6, 1), "date_to": None}},
+            view_filters_module.EVENT_FILTERS,
+        )
+        assert "date_from=2025-06-01" in result
+        assert "date_to" not in result
+
+    def test_date_range_both_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {
+                "date": {
+                    "date_from": datetime.date(2025, 1, 1),
+                    "date_to": datetime.date(2025, 12, 31),
+                }
+            },
+            view_filters_module.EVENT_FILTERS,
+        )
+        assert "date_from=2025-01-01" in result
+        assert "date_to=2025-12-31" in result
+
+    def test_exists_filter_true_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"has_pending": True}, view_filters_module.EVENT_FILTERS
+        )
+        assert "has_pending=true" in result
+
+    def test_exists_filter_false_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"has_pending": False}, view_filters_module.EVENT_FILTERS
+        )
+        assert "has_pending=false" in result

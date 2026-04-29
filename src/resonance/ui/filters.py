@@ -12,6 +12,13 @@ import datetime
 from typing import Any
 
 import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+
+# ---------------------------------------------------------------------------
+# Type alias — accepts both sa.Column (plain table) and ORM mapped attributes
+# ---------------------------------------------------------------------------
+
+FilterColumn = sa.Column[Any] | sa_orm.QueryableAttribute[Any]
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -33,7 +40,7 @@ class TextField:
     """ILIKE text search on a single column."""
 
     name: str
-    column: sa.Column[Any]
+    column: FilterColumn
     join: Any | None = None
 
     def parse(self, params: dict[str, str]) -> str | None:
@@ -67,7 +74,7 @@ class MultiSelectField:
     """OR-match across a set of allowed option values."""
 
     name: str
-    column: sa.Column[Any]
+    column: FilterColumn
     options: list[str]
 
     def parse(self, params: dict[str, str]) -> list[str] | None:
@@ -96,7 +103,7 @@ class DateRangeField:
     """From/to date range filter using ``{name}_from`` and ``{name}_to``."""
 
     name: str
-    column: sa.Column[Any]
+    column: FilterColumn
 
     def parse(self, params: dict[str, str]) -> dict[str, datetime.date | None] | None:
         """Parse ISO date strings; returns ``None`` if both are missing/invalid."""
@@ -139,7 +146,7 @@ class NumericRangeField:
     """Min/max numeric range using ``{name}_min`` and ``{name}_max``."""
 
     name: str
-    column: sa.Column[Any]
+    column: FilterColumn
 
     def parse(self, params: dict[str, str]) -> dict[str, int | None] | None:
         """Parse integer strings; returns ``None`` if both are missing/invalid."""
