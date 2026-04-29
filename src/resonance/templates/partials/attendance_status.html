@@ -7,7 +7,7 @@
     <button class="" disabled
             style="padding: 0.2em 0.6em; font-size: 0.85em; cursor: default;">{{ label }}</button>
     {% else %}
-    <form hx-post="/events/{{ event_id }}/attendance"
+    <form hx-post="/events/{{ event_id if event_id is defined else event.id }}/attendance"
           hx-target="#attendance-status"
           hx-swap="innerHTML"
           style="margin: 0; display: inline;">
