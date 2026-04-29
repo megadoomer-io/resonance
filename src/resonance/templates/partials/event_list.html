@@ -3,6 +3,7 @@
     <table>
         <thead>
             <tr>
+                <th style="width: 2em;"></th>
                 <th>Date</th>
                 <th>Event</th>
                 <th>Venue</th>
@@ -11,7 +12,11 @@
         </thead>
         <tbody>
             {% for event in events %}
-            <tr>
+            {% set att = attendance_map.get(event.id) if attendance_map is defined else none %}
+            <tr{% if att and att.status.value == "going" %} style="border-left: 3px solid var(--pico-primary);"{% endif %}>
+                <td style="text-align: center;" title="{{ att.status.value if att else 'no status' }}">
+                    {% if att and att.status.value == "going" %}&#x2714;{% elif att and att.status.value == "interested" %}&#x2606;{% endif %}
+                </td>
                 <td>{{ event.event_date }}</td>
                 <td>
                     <a href="/events/{{ event.id }}">{{ event.title }}</a>

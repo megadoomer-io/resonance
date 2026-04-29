@@ -27,6 +27,14 @@
                 <td><a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.source_service.value }}&#x2197;</a></td>
             </tr>
             {% endif %}
+            <tr>
+                <th>Status</th>
+                <td>
+                    <div id="attendance-status">
+                        {% include "partials/attendance_status.html" %}
+                    </div>
+                </td>
+            </tr>
         </tbody>
     </table>
 </article>

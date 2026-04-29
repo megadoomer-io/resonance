@@ -627,14 +627,18 @@ async def events_page(
         )
         events = list(result.unique().scalars().all())
 
-    has_next = len(events) > _PAGE_SIZE
-    events = events[:_PAGE_SIZE]
+        has_next = len(events) > _PAGE_SIZE
+        events = events[:_PAGE_SIZE]
+
+        event_ids = [e.id for e in events]
+        attendance_map = await _get_attendance_map(db, uuid.UUID(user_id), event_ids)
 
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
         "user_role": _user_role(request),
         "events": events,
+        "attendance_map": attendance_map,
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
@@ -686,12 +690,22 @@ async def event_detail_page(
             for a in artists_result.scalars().all():
                 matched_artists[a.id] = a
 
+        attendance = (
+            await db.execute(
+                sa.select(concert_models.UserEventAttendance).where(
+                    concert_models.UserEventAttendance.user_id == uuid.UUID(user_id),
+                    concert_models.UserEventAttendance.event_id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
         "user_role": _user_role(request),
         "event": event,
         "matched_artists": matched_artists,
+        "attendance": attendance,
     }
 
     return templates.TemplateResponse(request, "event_detail.html", context)
@@ -833,6 +847,68 @@ async def _load_event_with_artists(
     if event is None:
         raise fastapi.HTTPException(status_code=404, detail="Event not found")
     return event
+
+
+async def _get_attendance_map(
+    db: sa_async.AsyncSession,
+    user_id: uuid.UUID,
+    event_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, concert_models.UserEventAttendance]:
+    if not event_ids:
+        return {}
+    result = await db.execute(
+        sa.select(concert_models.UserEventAttendance).where(
+            concert_models.UserEventAttendance.user_id == user_id,
+            concert_models.UserEventAttendance.event_id.in_(event_ids),
+        )
+    )
+    return {a.event_id: a for a in result.scalars().all()}
+
+
+@router.post("/events/{event_id}/attendance", response_model=None)
+async def set_attendance(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    status: Annotated[str, fastapi.Form()],
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Set user's attendance status for an event, returns updated partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    new_status = types_module.AttendanceStatus(status)
+
+    async with _get_db(request) as db:
+        existing = (
+            await db.execute(
+                sa.select(concert_models.UserEventAttendance).where(
+                    concert_models.UserEventAttendance.user_id == user_uuid,
+                    concert_models.UserEventAttendance.event_id == event_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is not None:
+            existing.status = new_status
+            existing.source_service = types_module.ServiceType.MANUAL
+            attendance = existing
+        else:
+            attendance = concert_models.UserEventAttendance(
+                user_id=user_uuid,
+                event_id=event_id,
+                status=new_status,
+                source_service=types_module.ServiceType.MANUAL,
+            )
+            db.add(attendance)
+
+        await db.commit()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/attendance_status.html",
+        {"attendance": attendance, "event_id": event_id},
+    )
 
 
 @router.post("/events/{event_id}/candidates/{candidate_id}/accept", response_model=None)
