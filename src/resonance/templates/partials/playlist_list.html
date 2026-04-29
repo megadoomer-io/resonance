@@ -27,16 +27,16 @@
 </figure>
 <nav>
     {% if has_prev %}
-    <a href="/playlists?page={{ page - 1 }}"
-       hx-get="/playlists?page={{ page - 1 }}"
+    <a href="/playlists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/playlists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#playlist-list"
        hx-swap="innerHTML"
        role="button"
        class="secondary">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a href="/playlists?page={{ page + 1 }}"
-       hx-get="/playlists?page={{ page + 1 }}"
+    <a href="/playlists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/playlists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#playlist-list"
        hx-swap="innerHTML"
        role="button">Next</a>

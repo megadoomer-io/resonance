@@ -23,16 +23,16 @@
 </figure>
 <nav>
     {% if has_prev %}
-    <a href="/history?page={{ page - 1 }}"
-       hx-get="/history?page={{ page - 1 }}"
+    <a href="/history?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/history?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#history-list"
        hx-swap="innerHTML"
        role="button"
        class="secondary">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a href="/history?page={{ page + 1 }}"
-       hx-get="/history?page={{ page + 1 }}"
+    <a href="/history?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/history?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#history-list"
        hx-swap="innerHTML"
        role="button">Next</a>

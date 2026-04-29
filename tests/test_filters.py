@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import ClassVar
 
 import sqlalchemy as sa
 
@@ -40,6 +41,26 @@ tracks_table = sa.Table(
     sa.Column("id", sa.Integer, primary_key=True),
     sa.Column("title", sa.String),
     sa.Column("artist_id", sa.Integer),
+)
+
+listening_events_table = sa.Table(
+    "listening_events",
+    _metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("track_id", sa.Integer),
+    sa.Column("user_id", sa.Integer),
+    sa.Column("source_service", sa.String),
+    sa.Column("listened_at", sa.DateTime),
+)
+
+playlists_table = sa.Table(
+    "playlists",
+    _metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("name", sa.String),
+    sa.Column("user_id", sa.Integer),
+    sa.Column("track_count", sa.Integer),
+    sa.Column("created_at", sa.DateTime),
 )
 
 
@@ -661,43 +682,78 @@ class TestEventTemplateFilters:
 
 
 class TestDetectActivePreset:
-    """Test active preset detection."""
+    """Test active preset detection for events."""
+
+    _EVENT_FILTER_KEYS: ClassVar[set[str]] = {
+        "q",
+        "title",
+        "venue",
+        "artist",
+        "date_from",
+        "date_to",
+        "attendance",
+        "has_pending",
+    }
 
     def test_no_filters_defaults_to_upcoming(self) -> None:
         presets = view_filters_module.build_event_presets()
-        result = view_filters_module.detect_active_preset({}, presets)
+        result = view_filters_module.detect_active_preset(
+            {},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
+        )
         assert result == "upcoming"
 
     def test_matching_upcoming_params(self) -> None:
         presets = view_filters_module.build_event_presets()
         today = datetime.date.today().isoformat()
-        result = view_filters_module.detect_active_preset({"date_from": today}, presets)
+        result = view_filters_module.detect_active_preset(
+            {"date_from": today},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
+        )
         assert result == "upcoming"
 
     def test_matching_going_params(self) -> None:
         presets = view_filters_module.build_event_presets()
         result = view_filters_module.detect_active_preset(
-            {"attendance": "GOING"}, presets
+            {"attendance": "GOING"},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
         )
         assert result == "going"
 
     def test_matching_needs_review_params(self) -> None:
         presets = view_filters_module.build_event_presets()
         result = view_filters_module.detect_active_preset(
-            {"has_pending": "true"}, presets
+            {"has_pending": "true"},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
         )
         assert result == "needs_review"
 
     def test_custom_filters_returns_none(self) -> None:
         presets = view_filters_module.build_event_presets()
         result = view_filters_module.detect_active_preset(
-            {"title": "concert", "venue": "arena"}, presets
+            {"title": "concert", "venue": "arena"},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
         )
         assert result is None
 
     def test_quick_search_returns_none(self) -> None:
         presets = view_filters_module.build_event_presets()
-        result = view_filters_module.detect_active_preset({"q": "radiohead"}, presets)
+        result = view_filters_module.detect_active_preset(
+            {"q": "radiohead"},
+            presets,
+            filter_keys=self._EVENT_FILTER_KEYS,
+            default_preset="upcoming",
+        )
         assert result is None
 
 
@@ -748,3 +804,298 @@ class TestBuildFilterQueryString:
             {"has_pending": False}, view_filters_module.EVENT_FILTERS
         )
         assert "has_pending=false" in result
+
+    def test_numeric_range_min_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"tracks": {"tracks_min": 5, "tracks_max": None}},
+            view_filters_module.PLAYLIST_FILTERS,
+        )
+        assert "tracks_min=5" in result
+        assert "tracks_max" not in result
+
+    def test_numeric_range_both_in_qs(self) -> None:
+        result = view_filters_module.build_filter_query_string(
+            {"tracks": {"tracks_min": 5, "tracks_max": 20}},
+            view_filters_module.PLAYLIST_FILTERS,
+        )
+        assert "tracks_min=5" in result
+        assert "tracks_max=20" in result
+
+
+# ---------------------------------------------------------------------------
+# Artist Filter Registry (view_filters)
+# ---------------------------------------------------------------------------
+
+
+class TestArtistFilterRegistry:
+    """Test the artist filter field definitions."""
+
+    def test_artist_filters_has_expected_fields(self) -> None:
+        names = [f.name for f in view_filters_module.ARTIST_FILTERS]
+        assert "name" in names
+        assert "origin" in names
+        assert "has_events" in names
+        assert "has_tracks" in names
+
+    def test_artist_filters_field_types(self) -> None:
+        by_name = {f.name: f for f in view_filters_module.ARTIST_FILTERS}
+        assert isinstance(by_name["name"], filters_module.TextField)
+        assert isinstance(by_name["origin"], filters_module.TextField)
+        assert isinstance(by_name["has_events"], filters_module.ExistsField)
+        assert isinstance(by_name["has_tracks"], filters_module.ExistsField)
+
+    def test_artist_filters_count(self) -> None:
+        assert len(view_filters_module.ARTIST_FILTERS) == 4
+
+
+class TestArtistPresets:
+    """Test artist preset definitions."""
+
+    def test_preset_count(self) -> None:
+        assert len(view_filters_module.ARTIST_PRESETS) == 2
+
+    def test_has_events_preset_params(self) -> None:
+        preset = next(
+            p for p in view_filters_module.ARTIST_PRESETS if p["name"] == "has_events"
+        )
+        assert preset["params"] == "has_events=true"
+
+    def test_no_tracks_preset_params(self) -> None:
+        preset = next(
+            p for p in view_filters_module.ARTIST_PRESETS if p["name"] == "no_tracks"
+        )
+        assert preset["params"] == "has_tracks=false"
+
+    def test_preset_names_are_unique(self) -> None:
+        names = [p["name"] for p in view_filters_module.ARTIST_PRESETS]
+        assert len(names) == len(set(names))
+
+
+class TestArtistTemplateFilters:
+    """Test artist template filter metadata."""
+
+    def test_template_filters_count(self) -> None:
+        assert len(view_filters_module.ARTIST_TEMPLATE_FILTERS) == 2
+
+    def test_template_filter_names(self) -> None:
+        names = [f["name"] for f in view_filters_module.ARTIST_TEMPLATE_FILTERS]
+        assert names == ["name", "origin"]
+
+    def test_template_filter_types(self) -> None:
+        for f in view_filters_module.ARTIST_TEMPLATE_FILTERS:
+            assert f["type"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# Track Filter Registry (view_filters)
+# ---------------------------------------------------------------------------
+
+
+class TestTrackFilterRegistry:
+    """Test the track filter field definitions."""
+
+    def test_track_filters_has_expected_fields(self) -> None:
+        names = [f.name for f in view_filters_module.TRACK_FILTERS]
+        assert "title" in names
+        assert "artist" in names
+        assert "recently_played" in names
+
+    def test_track_filters_field_types(self) -> None:
+        by_name = {f.name: f for f in view_filters_module.TRACK_FILTERS}
+        assert isinstance(by_name["title"], filters_module.TextField)
+        assert isinstance(by_name["artist"], filters_module.TextField)
+        assert isinstance(by_name["recently_played"], filters_module.ExistsField)
+
+    def test_track_filters_count(self) -> None:
+        assert len(view_filters_module.TRACK_FILTERS) == 3
+
+
+class TestTrackPresets:
+    """Test track preset definitions."""
+
+    def test_preset_count(self) -> None:
+        assert len(view_filters_module.TRACK_PRESETS) == 1
+
+    def test_recently_played_preset_params(self) -> None:
+        preset = view_filters_module.TRACK_PRESETS[0]
+        assert preset["name"] == "recently_played"
+        assert preset["params"] == "recently_played=true"
+
+
+class TestTrackTemplateFilters:
+    """Test track template filter metadata."""
+
+    def test_template_filters_count(self) -> None:
+        assert len(view_filters_module.TRACK_TEMPLATE_FILTERS) == 2
+
+    def test_template_filter_names(self) -> None:
+        names = [f["name"] for f in view_filters_module.TRACK_TEMPLATE_FILTERS]
+        assert names == ["title", "artist"]
+
+
+# ---------------------------------------------------------------------------
+# History Filter Registry (view_filters)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryFilterRegistry:
+    """Test the history filter field definitions."""
+
+    def test_history_filters_has_expected_fields(self) -> None:
+        names = [f.name for f in view_filters_module.HISTORY_FILTERS]
+        assert "track" in names
+        assert "artist" in names
+        assert "date" in names
+
+    def test_history_filters_field_types(self) -> None:
+        by_name = {f.name: f for f in view_filters_module.HISTORY_FILTERS}
+        assert isinstance(by_name["track"], filters_module.TextField)
+        assert isinstance(by_name["artist"], filters_module.TextField)
+        assert isinstance(by_name["date"], filters_module.DateRangeField)
+
+    def test_history_filters_count(self) -> None:
+        assert len(view_filters_module.HISTORY_FILTERS) == 3
+
+
+class TestHistoryPresets:
+    """Test history preset definitions."""
+
+    def test_preset_count(self) -> None:
+        assert len(view_filters_module.HISTORY_PRESETS) == 3
+
+    def test_spotify_preset_params(self) -> None:
+        preset = next(
+            p for p in view_filters_module.HISTORY_PRESETS if p["name"] == "spotify"
+        )
+        assert preset["params"] == "source=SPOTIFY"
+
+    def test_listenbrainz_preset_params(self) -> None:
+        preset = next(
+            p
+            for p in view_filters_module.HISTORY_PRESETS
+            if p["name"] == "listenbrainz"
+        )
+        assert preset["params"] == "source=LISTENBRAINZ"
+
+    def test_lastfm_preset_params(self) -> None:
+        preset = next(
+            p for p in view_filters_module.HISTORY_PRESETS if p["name"] == "lastfm"
+        )
+        assert preset["params"] == "source=LASTFM"
+
+    def test_preset_names_are_unique(self) -> None:
+        names = [p["name"] for p in view_filters_module.HISTORY_PRESETS]
+        assert len(names) == len(set(names))
+
+
+class TestHistoryTemplateFilters:
+    """Test history template filter metadata."""
+
+    def test_template_filters_count(self) -> None:
+        assert len(view_filters_module.HISTORY_TEMPLATE_FILTERS) == 4
+
+    def test_template_filter_names(self) -> None:
+        names = [f["name"] for f in view_filters_module.HISTORY_TEMPLATE_FILTERS]
+        assert names == ["track", "artist", "source", "date"]
+
+    def test_source_has_options(self) -> None:
+        source = next(
+            f
+            for f in view_filters_module.HISTORY_TEMPLATE_FILTERS
+            if f["name"] == "source"
+        )
+        assert source["type"] == "multiselect"
+        assert len(source["options"]) == 3
+        option_values = [o["value"] for o in source["options"]]
+        assert option_values == ["SPOTIFY", "LISTENBRAINZ", "LASTFM"]
+
+
+# ---------------------------------------------------------------------------
+# Playlist Filter Registry (view_filters)
+# ---------------------------------------------------------------------------
+
+
+class TestPlaylistFilterRegistry:
+    """Test the playlist filter field definitions."""
+
+    def test_playlist_filters_has_expected_fields(self) -> None:
+        names = [f.name for f in view_filters_module.PLAYLIST_FILTERS]
+        assert "name" in names
+        assert "created" in names
+        assert "tracks" in names
+
+    def test_playlist_filters_field_types(self) -> None:
+        by_name = {f.name: f for f in view_filters_module.PLAYLIST_FILTERS}
+        assert isinstance(by_name["name"], filters_module.TextField)
+        assert isinstance(by_name["created"], filters_module.DateRangeField)
+        assert isinstance(by_name["tracks"], filters_module.NumericRangeField)
+
+    def test_playlist_filters_count(self) -> None:
+        assert len(view_filters_module.PLAYLIST_FILTERS) == 3
+
+
+class TestPlaylistPresets:
+    """Test playlist preset definitions."""
+
+    def test_no_presets(self) -> None:
+        assert len(view_filters_module.PLAYLIST_PRESETS) == 0
+
+
+class TestPlaylistTemplateFilters:
+    """Test playlist template filter metadata."""
+
+    def test_template_filters_count(self) -> None:
+        assert len(view_filters_module.PLAYLIST_TEMPLATE_FILTERS) == 3
+
+    def test_template_filter_names(self) -> None:
+        names = [f["name"] for f in view_filters_module.PLAYLIST_TEMPLATE_FILTERS]
+        assert names == ["name", "created", "tracks"]
+
+    def test_template_filter_types(self) -> None:
+        by_name = {f["name"]: f for f in view_filters_module.PLAYLIST_TEMPLATE_FILTERS}
+        assert by_name["name"]["type"] == "text"
+        assert by_name["created"]["type"] == "daterange"
+        assert by_name["tracks"]["type"] == "numericrange"
+
+
+# ---------------------------------------------------------------------------
+# detect_active_preset (generic version)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectActivePresetGeneric:
+    """Test the generic detect_active_preset with explicit parameters."""
+
+    def test_no_filters_returns_default(self) -> None:
+        presets = view_filters_module.ARTIST_PRESETS
+        result = view_filters_module.detect_active_preset(
+            {}, presets, default_preset="has_events"
+        )
+        assert result == "has_events"
+
+    def test_no_filters_no_default_returns_none(self) -> None:
+        presets = view_filters_module.ARTIST_PRESETS
+        result = view_filters_module.detect_active_preset({}, presets)
+        assert result is None
+
+    def test_matching_preset_detected(self) -> None:
+        presets = view_filters_module.ARTIST_PRESETS
+        result = view_filters_module.detect_active_preset(
+            {"has_events": "true"}, presets
+        )
+        assert result == "has_events"
+
+    def test_non_matching_params_returns_none(self) -> None:
+        presets = view_filters_module.ARTIST_PRESETS
+        result = view_filters_module.detect_active_preset(
+            {"name": "Radiohead"}, presets
+        )
+        assert result is None
+
+    def test_empty_presets_no_default_returns_none(self) -> None:
+        result = view_filters_module.detect_active_preset({}, [])
+        assert result is None
+
+    def test_empty_presets_with_default_returns_default(self) -> None:
+        result = view_filters_module.detect_active_preset({}, [], default_preset="foo")
+        assert result == "foo"

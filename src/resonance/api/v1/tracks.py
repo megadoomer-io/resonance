@@ -12,6 +12,7 @@ import sqlalchemy.orm as sa_orm
 
 import resonance.dependencies as deps_module
 import resonance.models.music as music_models
+import resonance.ui.filters as filters_module
 
 _PAGE_SIZE = 50
 
@@ -39,7 +40,8 @@ async def list_tracks(
     )
 
     if q:
-        stmt = stmt.where(music_models.Track.title.ilike(f"%{q}%"))
+        escaped = filters_module._escape_ilike(q)
+        stmt = stmt.where(music_models.Track.title.ilike(f"%{escaped}%"))
 
     stmt = stmt.offset(offset).limit(_PAGE_SIZE + 1)
 

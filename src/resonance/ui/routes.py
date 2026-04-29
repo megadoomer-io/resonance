@@ -187,24 +187,68 @@ async def artists_page(
     request: fastapi.Request,
     page: int = 1,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
-    """Render paginated artists list, or redirect to login."""
+    """Render paginated artists list with filtering, or redirect to login."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
 
     offset = (page - 1) * _PAGE_SIZE
 
+    # Parse filter parameters
+    params = dict(request.query_params)
+    presets = view_filters_module.ARTIST_PRESETS
+    active_preset = view_filters_module.detect_active_preset(params, presets)
+
+    # Parse filters to get active_filters for template context
+    applied = filters_module.parse_filter_params(
+        view_filters_module.ARTIST_FILTERS, params
+    )
+
     async with _get_db(request) as db:
-        result = await db.execute(
-            sa.select(music_models.Artist)
-            .order_by(music_models.Artist.name)
+        query = sa.select(music_models.Artist)
+
+        # Apply registered filter fields (name, origin, has_events, has_tracks)
+        query = filters_module.apply_filters(
+            query, view_filters_module.ARTIST_FILTERS, params
+        )
+
+        query = (
+            query.order_by(music_models.Artist.name)
             .offset(offset)
             .limit(_PAGE_SIZE + 1)
         )
+
+        result = await db.execute(query)
         artists = list(result.scalars().all())
 
     has_next = len(artists) > _PAGE_SIZE
     artists = artists[:_PAGE_SIZE]
+
+    # Build filter query string for pagination links
+    filter_qs = view_filters_module.build_filter_query_string(
+        applied.active_filters, view_filters_module.ARTIST_FILTERS
+    )
+    # Include quick search in filter_qs
+    q_value = params.get("q", "").strip()
+    if q_value:
+        if filter_qs:
+            filter_qs += f"&q={q_value}"
+        else:
+            filter_qs = f"q={q_value}"
+
+    # Build flat active_filters dict for the template
+    template_active_filters: dict[str, object] = {}
+    for key, value in applied.active_filters.items():
+        if isinstance(value, dict):
+            for dk, dv in value.items():
+                if dv is not None:
+                    template_active_filters[dk] = str(dv)
+        elif isinstance(value, bool):
+            template_active_filters[key] = value
+        else:
+            template_active_filters[key] = value
+    if q_value:
+        template_active_filters["q"] = q_value
 
     context = {
         "user_id": user_id,
@@ -214,6 +258,13 @@ async def artists_page(
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
+        "active_filters": template_active_filters,
+        "presets": presets,
+        "filters": view_filters_module.ARTIST_TEMPLATE_FILTERS,
+        "active_preset": active_preset,
+        "list_url": "/artists",
+        "list_target": "#artist-list",
+        "filter_qs": filter_qs,
     }
 
     if request.headers.get("HX-Request"):
@@ -319,26 +370,70 @@ async def tracks_page(
     request: fastapi.Request,
     page: int = 1,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
-    """Render paginated tracks list with artist names, or redirect to login."""
+    """Render paginated tracks list with artist names and filtering."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
 
     offset = (page - 1) * _PAGE_SIZE
 
+    # Parse filter parameters
+    params = dict(request.query_params)
+    presets = view_filters_module.TRACK_PRESETS
+    active_preset = view_filters_module.detect_active_preset(params, presets)
+
+    # Parse filters to get active_filters for template context
+    applied = filters_module.parse_filter_params(
+        view_filters_module.TRACK_FILTERS, params
+    )
+
     async with _get_db(request) as db:
-        result = await db.execute(
-            sa.select(music_models.Track)
-            .join(music_models.Artist)
-            .order_by(music_models.Track.title)
+        # Build base query — join Artist for artist name filtering
+        query = sa.select(music_models.Track).join(music_models.Artist)
+
+        # Apply registered filter fields (title, artist, recently_played)
+        query = filters_module.apply_filters(
+            query, view_filters_module.TRACK_FILTERS, params
+        )
+
+        query = (
+            query.order_by(music_models.Track.title)
             .options(sa_orm.joinedload(music_models.Track.artist))
             .offset(offset)
             .limit(_PAGE_SIZE + 1)
         )
+
+        result = await db.execute(query)
         tracks = list(result.scalars().unique().all())
 
     has_next = len(tracks) > _PAGE_SIZE
     tracks = tracks[:_PAGE_SIZE]
+
+    # Build filter query string for pagination links
+    filter_qs = view_filters_module.build_filter_query_string(
+        applied.active_filters, view_filters_module.TRACK_FILTERS
+    )
+    # Include quick search in filter_qs
+    q_value = params.get("q", "").strip()
+    if q_value:
+        if filter_qs:
+            filter_qs += f"&q={q_value}"
+        else:
+            filter_qs = f"q={q_value}"
+
+    # Build flat active_filters dict for the template
+    template_active_filters: dict[str, object] = {}
+    for key, value in applied.active_filters.items():
+        if isinstance(value, dict):
+            for dk, dv in value.items():
+                if dv is not None:
+                    template_active_filters[dk] = str(dv)
+        elif isinstance(value, bool):
+            template_active_filters[key] = value
+        else:
+            template_active_filters[key] = value
+    if q_value:
+        template_active_filters["q"] = q_value
 
     context = {
         "user_id": user_id,
@@ -348,6 +443,13 @@ async def tracks_page(
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
+        "active_filters": template_active_filters,
+        "presets": presets,
+        "filters": view_filters_module.TRACK_TEMPLATE_FILTERS,
+        "active_preset": active_preset,
+        "list_url": "/tracks",
+        "list_target": "#track-list",
+        "filter_qs": filter_qs,
     }
 
     if request.headers.get("HX-Request"):
@@ -624,7 +726,22 @@ async def events_page(
 
     # Build presets (today's date resolved dynamically)
     presets = view_filters_module.build_event_presets()
-    active_preset = view_filters_module.detect_active_preset(params, presets)
+    _event_filter_keys = {
+        "q",
+        "title",
+        "venue",
+        "artist",
+        "date_from",
+        "date_to",
+        "attendance",
+        "has_pending",
+    }
+    active_preset = view_filters_module.detect_active_preset(
+        params,
+        presets,
+        filter_keys=_event_filter_keys,
+        default_preset="upcoming",
+    )
 
     # If "upcoming" is the default preset and no date_from was explicitly set,
     # inject today's date so the filter is applied.
@@ -1225,7 +1342,7 @@ async def history_page(
     request: fastapi.Request,
     page: int = 1,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
-    """Render paginated listening history, or redirect to login."""
+    """Render paginated listening history with filtering."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
@@ -1233,11 +1350,51 @@ async def history_page(
     user_uuid = uuid.UUID(user_id)
     offset = (page - 1) * _PAGE_SIZE
 
+    # Parse filter parameters
+    params = dict(request.query_params)
+    multi_params = {
+        "source": request.query_params.getlist("source"),
+    }
+    presets = view_filters_module.HISTORY_PRESETS
+    active_preset = view_filters_module.detect_active_preset(params, presets)
+
+    # Parse filters to get active_filters for template context
+    applied = filters_module.parse_filter_params(
+        view_filters_module.HISTORY_FILTERS, params
+    )
+
     async with _get_db(request) as db:
-        result = await db.execute(
+        # Build base query with joins for track/artist filtering
+        query = (
             sa.select(music_models.ListeningEvent)
+            .join(
+                music_models.Track,
+                music_models.ListeningEvent.track_id == music_models.Track.id,
+            )
+            .join(
+                music_models.Artist,
+                music_models.Track.artist_id == music_models.Artist.id,
+            )
             .where(music_models.ListeningEvent.user_id == user_uuid)
-            .order_by(music_models.ListeningEvent.listened_at.desc())
+        )
+
+        # Apply registered filter fields (track, artist, date)
+        query = filters_module.apply_filters(
+            query, view_filters_module.HISTORY_FILTERS, params
+        )
+
+        # Handle source filter manually (multiselect outside framework)
+        source_values = multi_params.get("source", [])
+        valid_sources = [
+            v for v in source_values if v in ("SPOTIFY", "LISTENBRAINZ", "LASTFM")
+        ]
+        if valid_sources:
+            query = query.where(
+                music_models.ListeningEvent.source_service.in_(valid_sources)
+            )
+
+        query = (
+            query.order_by(music_models.ListeningEvent.listened_at.desc())
             .options(
                 sa_orm.joinedload(music_models.ListeningEvent.track).joinedload(
                     music_models.Track.artist
@@ -1246,10 +1403,45 @@ async def history_page(
             .offset(offset)
             .limit(_PAGE_SIZE + 1)
         )
+
+        result = await db.execute(query)
         events = list(result.scalars().unique().all())
 
     has_next = len(events) > _PAGE_SIZE
     events = events[:_PAGE_SIZE]
+
+    # Build filter query string for pagination links
+    filter_qs = view_filters_module.build_filter_query_string(
+        applied.active_filters, view_filters_module.HISTORY_FILTERS
+    )
+    # Include source in filter_qs (handled outside the standard fields)
+    if valid_sources:
+        source_parts = [f"source={v}" for v in valid_sources]
+        if filter_qs:
+            filter_qs += "&" + "&".join(source_parts)
+        else:
+            filter_qs = "&".join(source_parts)
+    # Include quick search in filter_qs
+    q_value = params.get("q", "").strip()
+    if q_value:
+        if filter_qs:
+            filter_qs += f"&q={q_value}"
+        else:
+            filter_qs = f"q={q_value}"
+
+    # Build flat active_filters dict for the template
+    template_active_filters: dict[str, object] = {}
+    for key, value in applied.active_filters.items():
+        if isinstance(value, dict):
+            for dk, dv in value.items():
+                if dv is not None:
+                    template_active_filters[dk] = str(dv)
+        else:
+            template_active_filters[key] = value
+    if valid_sources:
+        template_active_filters["source"] = valid_sources
+    if q_value:
+        template_active_filters["q"] = q_value
 
     context = {
         "user_id": user_id,
@@ -1259,6 +1451,13 @@ async def history_page(
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
+        "active_filters": template_active_filters,
+        "presets": presets,
+        "filters": view_filters_module.HISTORY_TEMPLATE_FILTERS,
+        "active_preset": active_preset,
+        "list_url": "/history",
+        "list_target": "#history-list",
+        "filter_qs": filter_qs,
     }
 
     if request.headers.get("HX-Request"):
@@ -1273,7 +1472,7 @@ async def playlists_page(
     request: fastapi.Request,
     page: int = 1,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
-    """Render paginated playlists list, or redirect to login."""
+    """Render paginated playlists list with filtering."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
@@ -1281,14 +1480,33 @@ async def playlists_page(
     user_uuid = uuid.UUID(user_id)
     offset = (page - 1) * _PAGE_SIZE
 
+    # Parse filter parameters
+    params = dict(request.query_params)
+    presets = view_filters_module.PLAYLIST_PRESETS
+    active_preset = view_filters_module.detect_active_preset(params, presets)
+
+    # Parse filters to get active_filters for template context
+    applied = filters_module.parse_filter_params(
+        view_filters_module.PLAYLIST_FILTERS, params
+    )
+
     async with _get_db(request) as db:
-        result = await db.execute(
-            sa.select(playlist_models.Playlist)
-            .where(playlist_models.Playlist.user_id == user_uuid)
-            .order_by(playlist_models.Playlist.created_at.desc())
+        query = sa.select(playlist_models.Playlist).where(
+            playlist_models.Playlist.user_id == user_uuid
+        )
+
+        # Apply registered filter fields (name, created, tracks)
+        query = filters_module.apply_filters(
+            query, view_filters_module.PLAYLIST_FILTERS, params
+        )
+
+        query = (
+            query.order_by(playlist_models.Playlist.created_at.desc())
             .offset(offset)
             .limit(_PAGE_SIZE + 1)
         )
+
+        result = await db.execute(query)
         playlists = list(result.scalars().all())
 
         has_next = len(playlists) > _PAGE_SIZE
@@ -1314,6 +1532,30 @@ async def playlists_page(
         for p in playlists:
             p._generator_type = gen_type_map.get(p.id)  # type: ignore[attr-defined]
 
+    # Build filter query string for pagination links
+    filter_qs = view_filters_module.build_filter_query_string(
+        applied.active_filters, view_filters_module.PLAYLIST_FILTERS
+    )
+    # Include quick search in filter_qs
+    q_value = params.get("q", "").strip()
+    if q_value:
+        if filter_qs:
+            filter_qs += f"&q={q_value}"
+        else:
+            filter_qs = f"q={q_value}"
+
+    # Build flat active_filters dict for the template
+    template_active_filters: dict[str, object] = {}
+    for key, value in applied.active_filters.items():
+        if isinstance(value, dict):
+            for dk, dv in value.items():
+                if dv is not None:
+                    template_active_filters[dk] = str(dv)
+        else:
+            template_active_filters[key] = value
+    if q_value:
+        template_active_filters["q"] = q_value
+
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
@@ -1322,6 +1564,13 @@ async def playlists_page(
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
+        "active_filters": template_active_filters,
+        "presets": presets,
+        "filters": view_filters_module.PLAYLIST_TEMPLATE_FILTERS,
+        "active_preset": active_preset,
+        "list_url": "/playlists",
+        "list_target": "#playlist-list",
+        "filter_qs": filter_qs,
     }
 
     if request.headers.get("HX-Request"):

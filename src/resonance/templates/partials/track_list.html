@@ -22,16 +22,16 @@
 </figure>
 <nav>
     {% if has_prev %}
-    <a href="/tracks?page={{ page - 1 }}"
-       hx-get="/tracks?page={{ page - 1 }}"
+    <a href="/tracks?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/tracks?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#track-list"
        hx-swap="innerHTML"
        role="button"
        class="secondary">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a href="/tracks?page={{ page + 1 }}"
-       hx-get="/tracks?page={{ page + 1 }}"
+    <a href="/tracks?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/tracks?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#track-list"
        hx-swap="innerHTML"
        role="button">Next</a>

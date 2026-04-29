@@ -20,16 +20,16 @@
 </figure>
 <nav>
     {% if has_prev %}
-    <a href="/artists?page={{ page - 1 }}"
-       hx-get="/artists?page={{ page - 1 }}"
+    <a href="/artists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/artists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#artist-list"
        hx-swap="innerHTML"
        role="button"
        class="secondary">Previous</a>
     {% endif %}
     {% if has_next %}
-    <a href="/artists?page={{ page + 1 }}"
-       hx-get="/artists?page={{ page + 1 }}"
+    <a href="/artists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
+       hx-get="/artists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
        hx-target="#artist-list"
        hx-swap="innerHTML"
        role="button">Next</a>
