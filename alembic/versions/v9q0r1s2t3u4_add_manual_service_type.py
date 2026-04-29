@@ -8,6 +8,7 @@ Create Date: 2026-04-29
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "v9q0r1s2t3u4"
@@ -33,24 +34,39 @@ _NEW_VALUES = (
     "'BANDSINTOWN', 'BANDCAMP', 'SOUNDCLOUD', 'ICAL', 'MANUAL', 'TEST'"
 )
 
+_FIND_CONSTRAINTS_SQL = sa.text("""
+    SELECT con.conname
+    FROM pg_constraint con
+    JOIN pg_class rel ON rel.oid = con.conrelid
+    JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+    JOIN pg_attribute att ON att.attrelid = rel.oid
+    WHERE con.contype = 'c'
+      AND rel.relname = :table_name
+      AND nsp.nspname = 'public'
+      AND pg_get_constraintdef(con.oid) LIKE '%' || :column_name || '%'
+""")
+
+
+def _replace_constraints(values: str) -> None:
+    conn = op.get_bind()
+    for table, column in _TABLES_AND_COLUMNS:
+        result = conn.execute(
+            _FIND_CONSTRAINTS_SQL,
+            {"table_name": table, "column_name": column},
+        )
+        for (constraint_name,) in result:
+            op.drop_constraint(constraint_name, table, type_="check")
+
+        op.create_check_constraint(
+            f"ck_{table}_{column}_servicetype",
+            table,
+            f"{column} IN ({values})",
+        )
+
 
 def upgrade() -> None:
-    for table, column in _TABLES_AND_COLUMNS:
-        constraint_name = f"ck_{table}_{column}"
-        op.drop_constraint(constraint_name, table, type_="check")
-        op.create_check_constraint(
-            constraint_name,
-            table,
-            f"{column} IN ({_NEW_VALUES})",
-        )
+    _replace_constraints(_NEW_VALUES)
 
 
 def downgrade() -> None:
-    for table, column in _TABLES_AND_COLUMNS:
-        constraint_name = f"ck_{table}_{column}"
-        op.drop_constraint(constraint_name, table, type_="check")
-        op.create_check_constraint(
-            constraint_name,
-            table,
-            f"{column} IN ({_OLD_VALUES})",
-        )
+    _replace_constraints(_OLD_VALUES)
