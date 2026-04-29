@@ -21,9 +21,12 @@
                 </td>
                 <td>{{ event.venue.name if event.venue else "" }}</td>
                 <td>
+                    {% set confirmed_names = event.artists | map(attribute="raw_name") | list %}
                     {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
-                    {% if event.artists and event.artist_candidates %}, {% endif %}
-                    {% for candidate in event.artist_candidates %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
+                    {% set pending = [] %}
+                    {% for candidate in event.artist_candidates %}{% if candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
+                    {% if event.artists and pending %}, {% endif %}
+                    {% for candidate in pending %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
                 </td>
             </tr>
             {% endfor %}

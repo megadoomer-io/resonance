@@ -39,7 +39,7 @@ class TestServiceType:
         assert types_module.ServiceType.TEST == "test"
 
     def test_service_type_count(self) -> None:
-        assert len(types_module.ServiceType) == 9
+        assert len(types_module.ServiceType) == 10
 
 
 class TestArtistRelationType:

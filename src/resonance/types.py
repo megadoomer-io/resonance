@@ -4,7 +4,7 @@ import enum
 
 
 class ServiceType(enum.StrEnum):
-    """External music services that Resonance can connect to."""
+    """Data sources that Resonance can connect to or receive data from."""
 
     SPOTIFY = "spotify"
     LASTFM = "lastfm"
@@ -14,6 +14,7 @@ class ServiceType(enum.StrEnum):
     BANDCAMP = "bandcamp"
     SOUNDCLOUD = "soundcloud"
     ICAL = "ical"
+    MANUAL = "manual"
     TEST = "test"
 
 
