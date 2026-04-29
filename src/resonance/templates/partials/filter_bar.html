@@ -1,0 +1,184 @@
+{# partials/filter_bar.html
+   Shared filter bar: presets + quick search + collapsible column filters.
+
+   Required vars:
+     list_url       — base URL for the list (e.g., "/events")
+     list_target    — HTMX target ID (e.g., "#event-list")
+     presets        — list of {name, label, params} dicts
+     filters        — list of {name, label, type, options?} dicts
+     active_filters — dict of currently active filter values
+     active_preset  — name of active preset or None
+#}
+
+{# -- Presets + Quick Search Row -- #}
+<div class="filter-bar">
+  <div class="filter-presets">
+    {% for preset in presets %}
+    <button
+      type="button"
+      class="preset-btn{% if active_preset == preset.name %} preset-active{% endif %}"
+      hx-get="{{ list_url }}?{{ preset.params }}&page=1"
+      hx-target="{{ list_target }}"
+      hx-swap="innerHTML"
+      hx-push-url="true"
+    >{{ preset.label }}</button>
+    {% endfor %}
+    {% if active_preset or active_filters|length > 0 %}
+    <button
+      type="button"
+      class="preset-btn preset-clear"
+      hx-get="{{ list_url }}?page=1"
+      hx-target="{{ list_target }}"
+      hx-swap="innerHTML"
+      hx-push-url="true"
+    >Clear</button>
+    {% endif %}
+  </div>
+  <div class="filter-search">
+    <input
+      type="search"
+      name="q"
+      placeholder="Search..."
+      value="{{ active_filters.get('q', '') }}"
+      hx-get="{{ list_url }}"
+      hx-target="{{ list_target }}"
+      hx-swap="innerHTML"
+      hx-trigger="input changed delay:300ms"
+      hx-push-url="true"
+      hx-include="[data-filter-input]"
+      hx-vals='{"page": "1"}'
+    />
+  </div>
+</div>
+
+{# -- Collapsible Column Filters -- #}
+{% if filters %}
+{% set has_column_filters = namespace(value=false) %}
+{% for f in filters %}
+  {% if f.type == "text" and active_filters.get(f.name, '') %}
+    {% set has_column_filters.value = true %}
+  {% elif f.type == "multiselect" and active_filters.get(f.name, []) %}
+    {% set has_column_filters.value = true %}
+  {% elif f.type == "daterange" and (active_filters.get(f.name ~ '_from', '') or active_filters.get(f.name ~ '_to', '')) %}
+    {% set has_column_filters.value = true %}
+  {% elif f.type == "numericrange" and (active_filters.get(f.name ~ '_min', '') or active_filters.get(f.name ~ '_max', '')) %}
+    {% set has_column_filters.value = true %}
+  {% endif %}
+{% endfor %}
+<details class="filter-panel"{% if has_column_filters.value %} open{% endif %}>
+  <summary>Filters</summary>
+  <div class="filter-fields">
+    {% for f in filters %}
+    <div class="filter-field">
+      <label for="filter-{{ f.name }}">{{ f.label }}</label>
+      {% if f.type == "text" %}
+      <input
+        id="filter-{{ f.name }}"
+        type="text"
+        name="{{ f.name }}"
+        value="{{ active_filters.get(f.name, '') }}"
+        data-filter-input
+        hx-get="{{ list_url }}"
+        hx-target="{{ list_target }}"
+        hx-swap="innerHTML"
+        hx-trigger="input changed delay:300ms"
+        hx-push-url="true"
+        hx-include="[data-filter-input], .filter-search input"
+        hx-vals='{"page": "1"}'
+      />
+      {% elif f.type == "multiselect" %}
+      <details class="multiselect-dropdown" id="filter-{{ f.name }}">
+        <summary>
+          {% set selected = active_filters.get(f.name, []) %}
+          {% if selected %}{{ selected|length }} selected{% else %}All{% endif %}
+        </summary>
+        <div class="multiselect-options">
+          {% for opt in f.options %}
+          <label>
+            <input
+              type="checkbox"
+              name="{{ f.name }}"
+              value="{{ opt.value }}"
+              data-filter-input
+              {% if opt.value in active_filters.get(f.name, []) %}checked{% endif %}
+              hx-get="{{ list_url }}"
+              hx-target="{{ list_target }}"
+              hx-swap="innerHTML"
+              hx-trigger="change"
+              hx-push-url="true"
+              hx-include="[data-filter-input], .filter-search input"
+              hx-vals='{"page": "1"}'
+            />
+            {{ opt.label }}
+          </label>
+          {% endfor %}
+        </div>
+      </details>
+      {% elif f.type == "daterange" %}
+      <div class="daterange-inputs">
+        <input
+          type="date"
+          name="{{ f.name }}_from"
+          value="{{ active_filters.get(f.name ~ '_from', '') }}"
+          data-filter-input
+          hx-get="{{ list_url }}"
+          hx-target="{{ list_target }}"
+          hx-swap="innerHTML"
+          hx-trigger="change"
+          hx-push-url="true"
+          hx-include="[data-filter-input], .filter-search input"
+          hx-vals='{"page": "1"}'
+        />
+        <span>to</span>
+        <input
+          type="date"
+          name="{{ f.name }}_to"
+          value="{{ active_filters.get(f.name ~ '_to', '') }}"
+          data-filter-input
+          hx-get="{{ list_url }}"
+          hx-target="{{ list_target }}"
+          hx-swap="innerHTML"
+          hx-trigger="change"
+          hx-push-url="true"
+          hx-include="[data-filter-input], .filter-search input"
+          hx-vals='{"page": "1"}'
+        />
+      </div>
+      {% elif f.type == "numericrange" %}
+      <div class="numrange-inputs">
+        <input
+          type="number"
+          name="{{ f.name }}_min"
+          placeholder="Min"
+          value="{{ active_filters.get(f.name ~ '_min', '') }}"
+          data-filter-input
+          hx-get="{{ list_url }}"
+          hx-target="{{ list_target }}"
+          hx-swap="innerHTML"
+          hx-trigger="input changed delay:300ms"
+          hx-push-url="true"
+          hx-include="[data-filter-input], .filter-search input"
+          hx-vals='{"page": "1"}'
+        />
+        <span>to</span>
+        <input
+          type="number"
+          name="{{ f.name }}_max"
+          placeholder="Max"
+          value="{{ active_filters.get(f.name ~ '_max', '') }}"
+          data-filter-input
+          hx-get="{{ list_url }}"
+          hx-target="{{ list_target }}"
+          hx-swap="innerHTML"
+          hx-trigger="input changed delay:300ms"
+          hx-push-url="true"
+          hx-include="[data-filter-input], .filter-search input"
+          hx-vals='{"page": "1"}'
+        />
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}

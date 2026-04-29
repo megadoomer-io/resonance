@@ -4,8 +4,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+import pathlib
+
 import arq.connections as arq_connections
 import fastapi
+import fastapi.staticfiles
 import redis.asyncio as aioredis
 import sqlalchemy as sa
 import structlog
@@ -96,6 +99,14 @@ def create_app() -> fastapi.FastAPI:
 
     # Register UI routes
     application.include_router(ui_routes_module.router)
+
+    # Serve static assets (CSS, JS)
+    _static_dir = pathlib.Path(__file__).resolve().parent / "static"
+    application.mount(
+        "/static",
+        fastapi.staticfiles.StaticFiles(directory=str(_static_dir)),
+        name="static",
+    )
 
     # Set up connector registry
     connector_registry = registry_module.ConnectorRegistry()

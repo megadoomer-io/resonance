@@ -1,0 +1,124 @@
+/* Filter bar layout — supplements Pico CSS defaults. */
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.filter-presets {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.preset-btn {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--pico-primary);
+  border-radius: 2rem;
+  background: transparent;
+  color: var(--pico-primary);
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.preset-btn.preset-active {
+  background: var(--pico-primary);
+  color: var(--pico-primary-inverse);
+}
+
+.preset-btn.preset-clear {
+  border-color: var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
+}
+
+.filter-search {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.filter-search input {
+  margin-bottom: 0;
+}
+
+.filter-panel {
+  margin-bottom: 1rem;
+}
+
+.filter-panel summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--pico-muted-color);
+}
+
+.filter-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.filter-field label {
+  font-size: 0.8rem;
+  margin-bottom: 0.125rem;
+}
+
+.filter-field input[type="text"],
+.filter-field input[type="search"],
+.filter-field input[type="number"],
+.filter-field input[type="date"] {
+  margin-bottom: 0;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+}
+
+.daterange-inputs,
+.numrange-inputs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.daterange-inputs span,
+.numrange-inputs span {
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+
+.multiselect-dropdown {
+  position: relative;
+}
+
+.multiselect-dropdown summary {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--pico-form-element-border-color);
+  border-radius: var(--pico-border-radius);
+  font-size: 0.875rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.multiselect-options {
+  position: absolute;
+  z-index: 10;
+  background: var(--pico-background-color);
+  border: 1px solid var(--pico-form-element-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.25rem;
+  min-width: 100%;
+}
+
+.multiselect-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.25rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.multiselect-options input[type="checkbox"] {
+  margin: 0;
+}
