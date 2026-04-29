@@ -46,17 +46,17 @@
 </div>
 {% endif %}
 
-<h3>Tracks</h3>
-<div id="artist-tracks">
-    {% include "partials/artist_tracks.html" %}
-</div>
-
 {% if event_artists %}
 <h3>Events</h3>
 <div id="artist-events">
     {% include "partials/artist_events.html" %}
 </div>
 {% endif %}
+
+<h3>Tracks</h3>
+<div id="artist-tracks">
+    {% include "partials/artist_tracks.html" %}
+</div>
 
 {% if duplicates %}
 <h3>Potential Duplicates</h3>

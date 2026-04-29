@@ -7,12 +7,15 @@
                 <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
                 {% if event_id %}
                 <td>
-                    <button hx-post="/api/v1/events/{{ event_id }}/candidates"
-                            hx-ext="json-enc"
-                            hx-vals='{"artist_id": "{{ artist.id }}"}'
-                            hx-swap="none"
-                            class="outline"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
+                    <form hx-post="/events/{{ event_id }}/add-artist"
+                          hx-target="#event-candidates"
+                          hx-swap="innerHTML"
+                          style="margin: 0;">
+                        <input type="hidden" name="artist_id" value="{{ artist.id }}">
+                        <button type="submit"
+                                class="outline"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
+                    </form>
                 </td>
                 {% endif %}
             </tr>

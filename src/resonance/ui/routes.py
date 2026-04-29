@@ -5,7 +5,7 @@ import pathlib
 import uuid
 import zoneinfo
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import fastapi
 import fastapi.requests
@@ -770,6 +770,90 @@ async def reject_candidate_ui(
 
     return templates.TemplateResponse(
         request, "partials/candidate_rejected.html", {"candidate": candidate}
+    )
+
+
+@router.post("/events/{event_id}/add-artist", response_model=None)
+async def add_artist_to_event_ui(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    artist_id: Annotated[uuid.UUID, fastapi.Form()],
+) -> fastapi.responses.HTMLResponse:
+    """Create a candidate from artist search and return feedback partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("Unauthorized", status_code=401)
+
+    async with _get_db(request) as db:
+        artist = (
+            await db.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id == artist_id
+                )
+            )
+        ).scalar_one_or_none()
+        if artist is None:
+            return fastapi.responses.HTMLResponse(
+                '<small style="color: var(--pico-del-color);">Artist not found</small>'
+            )
+
+        existing = (
+            await db.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.event_id == event_id,
+                    concert_models.EventArtistCandidate.raw_name == artist.name,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return fastapi.responses.HTMLResponse(
+                '<small style="opacity: 0.6;">Already added</small>'
+            )
+
+        candidate = concert_models.EventArtistCandidate(
+            event_id=event_id,
+            raw_name=artist.name,
+            matched_artist_id=artist.id,
+            status=types_module.CandidateStatus.PENDING,
+            confidence_score=100,
+        )
+        db.add(candidate)
+        await db.commit()
+
+        # Reload event with candidates for refreshing the candidates section
+        event = (
+            (
+                await db.execute(
+                    sa.select(concert_models.Event)
+                    .where(concert_models.Event.id == event_id)
+                    .options(
+                        sa_orm.joinedload(concert_models.Event.artist_candidates),
+                    )
+                )
+            )
+            .unique()
+            .scalar_one()
+        )
+
+        matched_artist_ids = [
+            c.matched_artist_id
+            for c in event.artist_candidates
+            if c.matched_artist_id is not None
+        ]
+        matched_artists: dict[uuid.UUID, music_models.Artist] = {}
+        if matched_artist_ids:
+            ma_result = await db.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id.in_(matched_artist_ids)
+                )
+            )
+            for a in ma_result.scalars().all():
+                matched_artists[a.id] = a
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_candidates.html",
+        {"event": event, "matched_artists": matched_artists},
     )
 
 
