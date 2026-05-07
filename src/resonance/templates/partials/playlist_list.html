@@ -7,6 +7,7 @@
                 <th>Tracks</th>
                 <th>Source</th>
                 <th>Created</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -20,6 +21,16 @@
                     {% endif %}
                 </td>
                 <td>{{ playlist.created_at | localtime(user_tz) }}</td>
+                <td>
+                    <button
+                        hx-delete="/api/v1/playlists/{{ playlist.id }}"
+                        hx-confirm="Delete '{{ playlist.name }}'?"
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        class="outline secondary"
+                        style="padding: 0.15rem 0.4rem; font-size: 0.75rem;"
+                    >Delete</button>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
