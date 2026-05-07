@@ -67,7 +67,20 @@ GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
 def apply_defaults(
     provided: dict[str, object],
 ) -> dict[str, int]:
-    """Fill in missing parameter values with registry defaults."""
+    """Fill in missing parameter values with registry defaults.
+
+    Validates that all provided parameter names are recognized and
+    that values are integers in the 0-100 range.
+
+    Raises:
+        ValueError: If a parameter name is unknown or value is out of range.
+        TypeError: If a parameter value is not numeric.
+    """
+    unknown = set(provided) - set(PARAMETER_REGISTRY)
+    if unknown:
+        msg = f"Unknown parameter(s): {', '.join(sorted(unknown))}"
+        raise ValueError(msg)
+
     result: dict[str, int] = {}
     for name, defn in PARAMETER_REGISTRY.items():
         raw = provided.get(name)
@@ -75,7 +88,11 @@ def apply_defaults(
             if not isinstance(raw, (int, float, str)):
                 msg = f"Parameter {name} must be numeric, got {type(raw)}"
                 raise TypeError(msg)
-            result[name] = int(raw)
+            value = int(raw)
+            if value < 0 or value > 100:
+                msg = f"Parameter {name} must be 0-100, got {value}"
+                raise ValueError(msg)
+            result[name] = value
         else:
             result[name] = defn.default_value
     return result
