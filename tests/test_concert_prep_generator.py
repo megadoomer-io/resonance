@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import resonance.generators.concert_prep as concert_prep_module
+import resonance.types as types_module
 
 
 class TestBuildCandidateList:
@@ -21,7 +22,7 @@ class TestBuildCandidateList:
                 listen_count=50,
                 in_library=True,
                 popularity_score=0,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
         ]
         result = concert_prep_module.score_and_select(
@@ -45,7 +46,7 @@ class TestBuildCandidateList:
                 listen_count=i,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
             for i in range(50)
         ]
@@ -73,7 +74,7 @@ class TestFreshnessFilter:
                 listen_count=100,
                 in_library=True,
                 popularity_score=90,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
             concert_prep_module.CandidateTrack(
                 track_id=new_id,
@@ -84,7 +85,7 @@ class TestFreshnessFilter:
                 listen_count=10,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -110,7 +111,7 @@ class TestFreshnessFilter:
                 listen_count=100,
                 in_library=True,
                 popularity_score=90,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -136,7 +137,7 @@ class TestFreshnessFilter:
                 listen_count=100 + i,
                 in_library=True,
                 popularity_score=80,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
             for i, pid in enumerate(prev_ids)
         ] + [
@@ -149,7 +150,7 @@ class TestFreshnessFilter:
                 listen_count=50 + i,
                 in_library=True,
                 popularity_score=60,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
             for i, nid in enumerate(new_ids)
         ]
@@ -177,7 +178,7 @@ class TestFreshnessFilter:
                 listen_count=100,
                 in_library=True,
                 popularity_score=90,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -202,7 +203,7 @@ class TestSelectionResult:
                 listen_count=i * 10,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
             for i in range(5)
         ]
@@ -227,7 +228,7 @@ class TestSelectionResult:
                 listen_count=10,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
             concert_prep_module.CandidateTrack(
                 track_id=uuid.uuid4(),
@@ -238,7 +239,7 @@ class TestSelectionResult:
                 listen_count=0,
                 in_library=False,
                 popularity_score=60,
-                source="discovery",
+                source=types_module.TrackSource.DISCOVERY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -248,8 +249,8 @@ class TestSelectionResult:
             previous_track_ids=set(),
             freshness_target=None,
         )
-        assert result.sources_summary["library"] == 1
-        assert result.sources_summary["discovery"] == 1
+        assert result.sources_summary[types_module.TrackSource.LIBRARY] == 1
+        assert result.sources_summary[types_module.TrackSource.DISCOVERY] == 1
 
     def test_freshness_actual_no_previous(self) -> None:
         """When no previous tracks, freshness_actual should be None."""
@@ -263,7 +264,7 @@ class TestSelectionResult:
                 listen_count=10,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -289,7 +290,7 @@ class TestSelectionResult:
                 listen_count=100,
                 in_library=True,
                 popularity_score=90,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
             concert_prep_module.CandidateTrack(
                 track_id=new_id,
@@ -300,7 +301,7 @@ class TestSelectionResult:
                 listen_count=50,
                 in_library=True,
                 popularity_score=50,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             ),
         ]
         result = concert_prep_module.score_and_select(
@@ -338,7 +339,7 @@ class TestSelectionResult:
                 listen_count=i * 10,
                 in_library=True,
                 popularity_score=i * 10,
-                source="library",
+                source=types_module.TrackSource.LIBRARY,
             )
             for i in range(10)
         ]

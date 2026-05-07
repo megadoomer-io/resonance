@@ -943,10 +943,10 @@ class TestPlaylistTrackModel:
             playlist_id=uuid.uuid4(),
             track_id=uuid.uuid4(),
             position=1,
-            source="library",
+            source=types_module.TrackSource.LIBRARY,
         )
         assert track.position == 1
-        assert track.source == "library"
+        assert track.source == types_module.TrackSource.LIBRARY
         assert track.score is None
 
 

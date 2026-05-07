@@ -9,6 +9,7 @@ import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
 import resonance.models.base as base_module
+import resonance.types as types_module
 
 if TYPE_CHECKING:
     import resonance.models.music as music_module
@@ -76,7 +77,9 @@ class PlaylistTrack(base_module.TimestampMixin, base_module.Base):
     )
     position: orm.Mapped[int] = orm.mapped_column(sa.Integer, nullable=False)
     score: orm.Mapped[float | None] = orm.mapped_column(sa.Float, nullable=True)
-    source: orm.Mapped[str] = orm.mapped_column(sa.String(64), nullable=False)
+    source: orm.Mapped[types_module.TrackSource] = orm.mapped_column(
+        sa.Enum(types_module.TrackSource, native_enum=False), nullable=False
+    )
 
     playlist: orm.Mapped[Playlist] = orm.relationship(back_populates="tracks")
     track: orm.Mapped[music_module.Track] = orm.relationship(

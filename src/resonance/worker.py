@@ -937,7 +937,11 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         listen_count=lc,
                         in_library=in_library,
                         popularity_score=0,
-                        source="library" if in_library else "discovery",
+                        source=(
+                            types_module.TrackSource.LIBRARY
+                            if in_library
+                            else types_module.TrackSource.DISCOVERY
+                        ),
                     )
                 )
 

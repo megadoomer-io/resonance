@@ -12,6 +12,7 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 import resonance.generators.scoring as scoring_module
+import resonance.types as types_module
 
 if TYPE_CHECKING:
     import uuid
@@ -29,7 +30,7 @@ class CandidateTrack:
     listen_count: int
     in_library: bool
     popularity_score: int
-    source: str  # "library" or "discovery"
+    source: types_module.TrackSource
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,7 +42,7 @@ class ScoredTrack:
     artist_name: str
     position: int
     score: float
-    source: str
+    source: types_module.TrackSource
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,7 +50,7 @@ class SelectionResult:
     """The output of score_and_select."""
 
     tracks: list[ScoredTrack]
-    sources_summary: dict[str, int]
+    sources_summary: dict[types_module.TrackSource, int]
     freshness_actual: float | None
 
 
