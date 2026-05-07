@@ -703,12 +703,12 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 service_links_dict = {str(k): str(v) for k, v in service_links.items()}
 
             try:
-                # discover_tracks is defined on connectors that declare
-                # TRACK_DISCOVERY capability (e.g., ListenBrainzConnector).
-                # BaseConnector doesn't declare it, so cast to Any.
-                discovered: list[base_module.DiscoveredTrack] = await typing.cast(
-                    "Any", connector
-                ).discover_tracks(
+                if not isinstance(connector, base_module.TrackDiscoveryCapable):
+                    msg = f"{type(connector).__name__} does not support track discovery"
+                    raise TypeError(msg)
+                discovered: list[
+                    base_module.DiscoveredTrack
+                ] = await connector.discover_tracks(
                     artist_name,
                     service_links_dict,
                     limit=20,

@@ -4,6 +4,7 @@ import abc
 import asyncio
 import dataclasses
 import enum
+import typing
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -94,6 +95,18 @@ class DiscoveredTrack(pydantic.BaseModel):
     service: types_module.ServiceType
     popularity_score: int = 0
     duration_ms: int | None = None
+
+
+@typing.runtime_checkable
+class TrackDiscoveryCapable(typing.Protocol):
+    """Protocol for connectors that can discover tracks for an artist."""
+
+    async def discover_tracks(
+        self,
+        artist_name: str,
+        service_links: dict[str, str] | None,
+        limit: int = 20,
+    ) -> list[DiscoveredTrack]: ...
 
 
 class BaseConnector(abc.ABC):
