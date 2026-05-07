@@ -808,11 +808,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
     async with session_factory() as session:
         task: task_module.Task | None = None
         try:
+            import time as time_module
+
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("score_and_build_task_not_found")
                 return
 
+            generation_start = time_module.monotonic()
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -1000,6 +1003,9 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 session.add(pt)
 
             # Create GenerationRecord
+            generation_duration_ms = int(
+                (time_module.monotonic() - generation_start) * 1000
+            )
             gen_record = generator_models.GenerationRecord(
                 id=uuid.uuid4(),
                 profile_id=uuid.UUID(profile_id),
@@ -1008,6 +1014,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 freshness_target=freshness_target,
                 freshness_actual=selection.freshness_actual,
                 track_sources_summary=selection.sources_summary,
+                generation_duration_ms=generation_duration_ms,
             )
             session.add(gen_record)
 
