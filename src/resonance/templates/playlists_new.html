@@ -33,24 +33,26 @@
     <article>
         <header>Parameters</header>
         {% for name, param in parameters.items() %}
-        <label>
-            {{ param.display_name }}
-            <small>{{ param.description }}</small>
-            <div style="display: flex; align-items: center; gap: 0.5rem;">
-                <small>{{ param.labels[0] }}</small>
+        <div style="margin-bottom: 1.5rem;">
+            <strong>{{ param.display_name }}</strong>
+            <small style="margin-left: 0.5rem; opacity: 0.7;">{{ param.description }}</small>
+            <div style="display: grid; grid-template-columns: 8rem 1fr 3rem 8rem; align-items: center; gap: 0.5rem; margin-top: 0.25rem;">
+                <small style="text-align: right; white-space: nowrap;">{{ param.labels[0] }}</small>
                 <input type="range" name="param_{{ name }}" min="0" max="100"
-                       value="{{ param.default_value }}"
+                       value="{{ param.default_value }}" style="margin: 0;"
                        oninput="this.nextElementSibling.textContent = this.value">
-                <small>{{ param.default_value }}</small>
-                <small>{{ param.labels[1] }}</small>
+                <small style="text-align: center; font-weight: bold;">{{ param.default_value }}</small>
+                <small style="white-space: nowrap;">{{ param.labels[1] }}</small>
             </div>
-        </label>
+        </div>
         {% endfor %}
 
-        <label for="max_tracks">
-            Max Tracks
-            <input type="number" id="max_tracks" name="max_tracks" value="30" min="5" max="200">
-        </label>
+        <div style="max-width: 12rem;">
+            <label for="max_tracks">
+                Max Tracks
+                <input type="number" id="max_tracks" name="max_tracks" value="30" min="5" max="200">
+            </label>
+        </div>
     </article>
 
     <article>
