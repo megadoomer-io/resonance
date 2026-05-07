@@ -82,6 +82,7 @@ Commands:
   generate <profile-id>        Generate a playlist from a profile
   playlists                    List playlists
   playlist <id> [diff <other>] Show or diff a playlist
+  watermark <service> [--reset] View or reset sync watermark (direct DB)
   api [METHOD] PATH [opts]     Raw API request (like gh api)
   set-role <user_id> <role>    Set user role (direct DB)
 """
@@ -815,6 +816,51 @@ def _cmd_set_role() -> None:
     asyncio.run(_set_role(sys.argv[2], sys.argv[3]))
 
 
+async def _watermark(service: str, *, reset: bool = False) -> None:
+    """View or reset a service connection's sync watermark."""
+    settings = config_module.Settings()
+    engine = database_module.create_async_engine(settings)
+    session_factory = database_module.create_session_factory(engine)
+
+    try:
+        svc_type = types_module.ServiceType(service)
+    except ValueError:
+        valid = ", ".join(s.value for s in types_module.ServiceType)
+        print(f"Error: Unknown service '{service}'. Valid: {valid}")
+        sys.exit(1)
+
+    async with session_factory() as db:
+        result = await db.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.service_type == svc_type.name
+            )
+        )
+        conn = result.scalar_one_or_none()
+        if conn is None:
+            print(f"No connection found for {service}")
+            sys.exit(1)
+
+        if reset:
+            old = conn.sync_watermark
+            conn.sync_watermark = {}
+            await db.commit()
+            print(f"Watermark reset for {service}")
+            print(f"  was: {json.dumps(old, indent=2)}")
+        else:
+            print(json.dumps(conn.sync_watermark, indent=2))
+
+    await engine.dispose()
+
+
+def _cmd_watermark() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api watermark <service> [--reset]")
+        sys.exit(1)
+    service = sys.argv[2]
+    reset = "--reset" in sys.argv[3:]
+    asyncio.run(_watermark(service, reset=reset))
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -830,6 +876,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "generate": ("Generate a playlist", _cmd_generate),
     "playlists": ("List playlists", _cmd_playlists),
     "playlist": ("Show or diff a playlist", _cmd_playlist),
+    "watermark": ("View/reset sync watermark", _cmd_watermark),
     "api": ("Raw API request", _cmd_api),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }
