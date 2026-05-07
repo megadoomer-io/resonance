@@ -26,6 +26,7 @@ import resonance.models.generator as generator_models
 import resonance.models.music as music_models
 import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
+import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.types as types_module
 import resonance.ui.filters as filters_module
@@ -650,6 +651,73 @@ async def track_compare_page(
             "duplicate": duplicate,
             "a_listen_count": a_listen_count,
             "b_listen_count": b_listen_count,
+        },
+    )
+
+
+@router.post("/tracks/{track_id}/merge-preview/{other_id}", response_model=None)
+async def track_merge_preview(
+    request: fastapi.Request,
+    track_id: uuid.UUID,
+    other_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Return track merge impact summary partial for HTMX."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        canonical_result = await db.execute(
+            sa.select(music_models.Track).where(music_models.Track.id == track_id)
+        )
+        canonical = canonical_result.scalar_one_or_none()
+
+        duplicate_result = await db.execute(
+            sa.select(music_models.Track).where(music_models.Track.id == other_id)
+        )
+        duplicate = duplicate_result.scalar_one_or_none()
+
+        if canonical is None or duplicate is None:
+            raise fastapi.HTTPException(status_code=404, detail="Track not found")
+
+        events_to_repoint = await _count(
+            db,
+            music_models.ListeningEvent,
+            music_models.ListeningEvent.track_id == other_id,
+        )
+        relations_to_repoint = await _count(
+            db,
+            taste_models.UserTrackRelation,
+            taste_models.UserTrackRelation.track_id == other_id,
+        )
+        playlist_appearances = await _count(
+            db,
+            playlist_models.PlaylistTrack,
+            playlist_models.PlaylistTrack.track_id == other_id,
+        )
+
+        merged_links = dict(canonical.service_links or {})
+        for k, v in (duplicate.service_links or {}).items():
+            if v and k not in merged_links:
+                merged_links[k] = v
+
+        duration_backfill = None
+        if not canonical.duration_ms and duplicate.duration_ms:
+            mins = duplicate.duration_ms // 60000
+            secs = (duplicate.duration_ms % 60000) // 1000
+            duration_backfill = f"{mins}:{secs:02d}"
+
+    return templates.TemplateResponse(
+        request,
+        "partials/track_merge_preview.html",
+        {
+            "canonical": canonical,
+            "duplicate": duplicate,
+            "events_to_repoint": events_to_repoint,
+            "relations_to_repoint": relations_to_repoint,
+            "playlist_appearances": playlist_appearances,
+            "merged_links": merged_links,
+            "duration_backfill": duration_backfill,
         },
     )
 

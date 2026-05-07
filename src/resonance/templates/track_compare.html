@@ -73,10 +73,11 @@
 <p><a href="/tracks/{{ track_b.id }}/compare/{{ track_a.id }}">Swap canonical selection</a></p>
 
 <h3>Merge</h3>
-<button
-    hx-post="/api/v1/matching/tracks/{{ canonical.id }}/merge/{{ duplicate.id }}/confirm"
-    hx-target="body"
-    hx-swap="none"
-    hx-on::after-request="if(event.detail.successful) window.location='/tracks/{{ canonical.id }}'">Confirm Merge</button>
-<a href="/tracks/{{ track_a.id }}" role="button" class="secondary outline">Cancel</a>
+<div id="merge-preview">
+    <button
+        hx-post="/tracks/{{ canonical.id }}/merge-preview/{{ duplicate.id }}"
+        hx-target="#merge-preview"
+        hx-swap="innerHTML">Preview Merge</button>
+    <a href="/tracks/{{ track_a.id }}" role="button" class="secondary outline">Cancel</a>
+</div>
 {% endblock %}
