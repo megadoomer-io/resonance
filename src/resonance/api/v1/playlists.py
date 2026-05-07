@@ -249,3 +249,43 @@ async def diff_playlists(
         track_ids_a=track_ids_a,
         track_ids_b=track_ids_b,
     )
+
+
+@router.delete(
+    "/{playlist_id}",
+    summary="Delete playlist",
+    description="Delete a playlist and its tracks.",
+)
+async def delete_playlist(
+    playlist_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Delete a playlist owned by the authenticated user.
+
+    Args:
+        playlist_id: The playlist UUID.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+
+    Returns:
+        Confirmation dict.
+
+    Raises:
+        HTTPException: 404 if playlist not found.
+    """
+    result = await db.execute(
+        sa.select(playlist_models.Playlist).where(
+            playlist_models.Playlist.id == playlist_id,
+            playlist_models.Playlist.user_id == user_id,
+        )
+    )
+    playlist = result.scalar_one_or_none()
+
+    if playlist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+
+    await db.delete(playlist)
+    await db.commit()
+    logger.info("playlist_deleted", playlist_id=str(playlist_id))
+    return {"status": "deleted"}
