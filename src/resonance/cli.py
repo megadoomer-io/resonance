@@ -232,7 +232,7 @@ def _poll_task(task_id: str, label: str) -> dict[str, object]:
             sys.stdout.flush()
         else:
             now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"{now} {label} {status} {p_str}")
+            print(f"{now} {label} {status} {p_str}", flush=True)
 
         time.sleep(poll_interval)
 
@@ -401,13 +401,13 @@ def _cmd_feed_sync() -> None:
             return
         for c in connections:
             if not c["enabled"]:
-                print(f"Skipping disabled: {c['service_type']}")
+                print(f"Skipping disabled: {c['service_type']}", flush=True)
                 continue
             name = c["service_type"]
             ext_id = c.get("external_user_id")
             if ext_id:
                 name += f" ({ext_id})"
-            print(f"Syncing {name}...")
+            print(f"Syncing {name}...", flush=True)
             resp = _api_request(
                 "POST",
                 f"/api/v1/sync/connection/{c['id']}",
@@ -415,8 +415,8 @@ def _cmd_feed_sync() -> None:
             data = resp.json()
             task_id = data.get("task_id", "")
             result = _poll_task(task_id, f"  {name}")
-            print(f"  Done: {json.dumps(result)}")
-            print()
+            print(f"  Done: {json.dumps(result)}", flush=True)
+            print(flush=True)
     else:
         print(f"Syncing connection {target}...")
         resp = _api_request(
