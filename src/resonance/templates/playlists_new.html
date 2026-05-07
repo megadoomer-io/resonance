@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}New Playlist — resonance{% endblock %}
+{% block content %}
+<p><a href="/playlists">&larr; Back to Playlists</a></p>
+<h2>New Playlist</h2>
+
+<form method="post" action="/playlists/new">
+    <article>
+        <label for="generator_type">
+            Type
+            <select id="generator_type" name="generator_type" required>
+                {% for gt, config in generator_types.items() %}
+                <option value="{{ gt.value }}"{% if selected_type == gt.value %} selected{% endif %}>
+                    {{ gt.value | replace('_', ' ') | title }} — {{ config.description }}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+
+        <label for="event_id">
+            Event
+            <select id="event_id" name="event_id" required>
+                <option value="">Select an event...</option>
+                {% for event in events %}
+                <option value="{{ event.id }}"{% if selected_event_id == event.id | string %} selected{% endif %}>
+                    {{ event.title }} — {{ event.event_date }}{% if event.venue %} @ {{ event.venue.name }}{% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+    </article>
+
+    <article>
+        <header>Parameters</header>
+        {% for name, param in parameters.items() %}
+        <label>
+            {{ param.display_name }}
+            <small>{{ param.description }}</small>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <small>{{ param.labels[0] }}</small>
+                <input type="range" name="param_{{ name }}" min="0" max="100"
+                       value="{{ param.default_value }}"
+                       oninput="this.nextElementSibling.textContent = this.value">
+                <small>{{ param.default_value }}</small>
+                <small>{{ param.labels[1] }}</small>
+            </div>
+        </label>
+        {% endfor %}
+
+        <label for="max_tracks">
+            Max Tracks
+            <input type="number" id="max_tracks" name="max_tracks" value="30" min="5" max="200">
+        </label>
+    </article>
+
+    <article>
+        <label for="name">
+            Playlist Name
+            <input type="text" id="name" name="name" placeholder="Auto-generated if blank">
+        </label>
+    </article>
+
+    <button type="submit">Generate Playlist</button>
+</form>
+{% endblock %}

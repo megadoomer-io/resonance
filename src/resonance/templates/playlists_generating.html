@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Generating Playlist — resonance{% endblock %}
+{% block content %}
+<h2>{{ playlist_name }}</h2>
+
+<div id="generating-status"
+     hx-get="/partials/generating-status/{{ task_id }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+    <article aria-busy="true">
+        Generating your playlist...
+    </article>
+</div>
+{% endblock %}

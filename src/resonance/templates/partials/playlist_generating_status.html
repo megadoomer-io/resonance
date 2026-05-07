@@ -1,0 +1,27 @@
+{% if status == "completed" and playlist_id %}
+<article>
+    <p>Playlist ready! Redirecting...</p>
+    <script>window.location = '/playlists/{{ playlist_id }}';</script>
+</article>
+{% elif status == "failed" %}
+<article>
+    <p><mark>Generation failed: {{ error or "Unknown error" }}</mark></p>
+    <a href="/playlists/new" role="button" class="secondary">Try Again</a>
+</article>
+{% else %}
+<div id="generating-status"
+     hx-get="/partials/generating-status/{{ task_id }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+    <article aria-busy="true">
+        {% if description %}
+        <p>{{ description }}</p>
+        {% else %}
+        <p>Generating your playlist...</p>
+        {% endif %}
+        {% if progress_total %}
+        <progress value="{{ progress_current }}" max="{{ progress_total }}"></progress>
+        {% endif %}
+    </article>
+</div>
+{% endif %}

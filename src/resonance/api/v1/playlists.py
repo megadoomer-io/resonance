@@ -285,7 +285,38 @@ async def delete_playlist(
     if playlist is None:
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
+    # Find associated profile before deleting the playlist
+    gen_result = await db.execute(
+        sa.select(generator_models.GenerationRecord.profile_id).where(
+            generator_models.GenerationRecord.playlist_id == playlist_id
+        )
+    )
+    profile_id = gen_result.scalar_one_or_none()
+
     await db.delete(playlist)
+    await db.flush()
+
+    # Clean up orphaned profile if no playlists remain
+    if profile_id is not None:
+        remaining = await db.execute(
+            sa.select(sa.func.count()).where(
+                generator_models.GenerationRecord.profile_id == profile_id
+            )
+        )
+        if remaining.scalar_one() == 0:
+            profile_result = await db.execute(
+                sa.select(generator_models.GeneratorProfile).where(
+                    generator_models.GeneratorProfile.id == profile_id
+                )
+            )
+            orphan = profile_result.scalar_one_or_none()
+            if orphan is not None:
+                await db.delete(orphan)
+                logger.info(
+                    "orphan_profile_deleted",
+                    profile_id=str(profile_id),
+                )
+
     await db.commit()
     logger.info("playlist_deleted", playlist_id=str(playlist_id))
     return {"status": "deleted"}

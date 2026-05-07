@@ -1593,6 +1593,188 @@ async def playlists_page(
     return templates.TemplateResponse(request, "playlists.html", context)
 
 
+@router.get("/playlists/new", response_model=None)
+async def new_playlist_page(
+    request: fastapi.Request,
+    event_id: str = "",
+    type: str = "",
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render the New Playlist form."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    import resonance.generators.parameters as params_module
+
+    async with _get_db(request) as db:
+        events_result = await db.execute(
+            sa.select(concert_models.Event)
+            .where(concert_models.Event.event_date >= datetime.date.today())
+            .options(
+                sa_orm.joinedload(concert_models.Event.venue),
+                sa_orm.subqueryload(concert_models.Event.artists),
+            )
+            .order_by(concert_models.Event.event_date)
+        )
+        all_events = events_result.unique().scalars().all()
+        events = [e for e in all_events if len(e.artists) > 0]
+
+    return templates.TemplateResponse(
+        request,
+        "playlists_new.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
+            "events": events,
+            "generator_types": params_module.GENERATOR_TYPE_CONFIG,
+            "parameters": params_module.PARAMETER_REGISTRY,
+            "selected_event_id": event_id,
+            "selected_type": type or "",
+        },
+    )
+
+
+@router.post("/playlists/new", response_model=None)
+async def create_playlist(
+    request: fastapi.Request,
+) -> fastapi.responses.RedirectResponse:
+    """Handle New Playlist form submission."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    form = await request.form()
+
+    gen_type = str(form.get("generator_type", ""))
+    event_id_str = str(form.get("event_id", ""))
+    max_tracks = int(str(form.get("max_tracks", "30")))
+    name = str(form.get("name", "")).strip()
+
+    param_values: dict[str, int] = {}
+    for key, val in form.items():
+        if key.startswith("param_"):
+            param_name = key[6:]
+            param_values[param_name] = int(str(val))
+
+    if not name:
+        async with _get_db(request) as db:
+            event_result = await db.execute(
+                sa.select(concert_models.Event)
+                .where(concert_models.Event.id == uuid.UUID(event_id_str))
+                .options(sa_orm.joinedload(concert_models.Event.venue))
+            )
+            event = event_result.unique().scalar_one_or_none()
+            if event:
+                venue_str = f" @ {event.venue.name}" if event.venue else ""
+                name = f"Concert Prep: {event.title}{venue_str}"
+            else:
+                now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M")
+                name = f"Playlist {now_str}"
+
+    async with _get_db(request) as db:
+        profile = generator_models.GeneratorProfile(
+            user_id=user_uuid,
+            name=name,
+            generator_type=types_module.GeneratorType(gen_type),
+            input_references={"event_id": event_id_str},
+            parameter_values=param_values,
+        )
+        db.add(profile)
+        await db.flush()
+
+        task = task_models.Task(
+            user_id=user_uuid,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "profile_id": str(profile.id),
+                "max_tracks": max_tracks,
+            },
+            description=name,
+        )
+        db.add(task)
+        await db.commit()
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "generate_playlist",
+        str(task.id),
+        _job_id=f"generate_playlist:{task.id}",
+    )
+
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/generating/{task.id}", status_code=303
+    )
+
+
+@router.get("/playlists/generating/{task_id}", response_model=None)
+async def generating_page(
+    request: fastapi.Request,
+    task_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render the playlist generation status page."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+    if task is None:
+        raise fastapi.HTTPException(status_code=404, detail="Task not found")
+
+    return templates.TemplateResponse(
+        request,
+        "playlists_generating.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
+            "task_id": str(task_id),
+            "playlist_name": task.description or "New Playlist",
+        },
+    )
+
+
+@router.get("/partials/generating-status/{task_id}", response_model=None)
+async def generating_status_partial(
+    request: fastapi.Request,
+    task_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse:
+    """Polled partial for playlist generation progress."""
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+    if task is None:
+        return fastapi.responses.HTMLResponse("<p>Task not found</p>")
+
+    playlist_id = None
+    if task.status == types_module.SyncStatus.COMPLETED:
+        playlist_id = (task.result or {}).get("playlist_id")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/playlist_generating_status.html",
+        {
+            "task_id": str(task_id),
+            "status": task.status.value,
+            "playlist_id": playlist_id,
+            "description": task.description,
+            "progress_current": task.progress_current,
+            "progress_total": task.progress_total,
+            "error": task.error_message,
+        },
+    )
+
+
 @router.get("/playlists/{playlist_id}", response_model=None)
 async def playlist_detail_page(
     request: fastapi.Request,
