@@ -16,6 +16,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.concerts.sync as concert_sync
 import resonance.dedup as dedup_module
 import resonance.dependencies as deps_module
 import resonance.merge as merge_module
@@ -904,6 +905,18 @@ async def event_detail_page(
 
         if event is None:
             raise fastapi.HTTPException(status_code=404, detail="Event not found")
+
+        # Re-match any unmatched candidates against the current artist catalog
+        has_unmatched = any(
+            c.matched_artist_id is None
+            for c in event.artist_candidates
+            if c.status == types_module.CandidateStatus.PENDING
+        )
+        if has_unmatched:
+            matched = await concert_sync.match_candidates_to_artists(db, event)
+            if matched > 0:
+                await db.commit()
+                await db.refresh(event, ["artist_candidates"])
 
         # Build dict of matched_artist_id -> Artist for candidates with matches
         matched_ids = [

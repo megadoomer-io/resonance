@@ -20,6 +20,7 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 import structlog
 
+import resonance.concerts.sync as concert_sync
 import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
 import resonance.connectors.base as base_module
@@ -435,6 +436,9 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 result = {"events_deleted": deleted}
             elif operation == "dedup_all":
                 result = {**await dedup_module.dedup_all(session)}
+            elif operation == "reconcile_event_artists":
+                matched = await concert_sync.reconcile_unmatched_candidates(session)
+                result = {"candidates_matched": matched}
             else:
                 msg = f"Unknown bulk operation: {operation}"
                 raise ValueError(msg)
@@ -1227,6 +1231,29 @@ async def _check_parent_completion(
             _job_id=f"bulk:{dedup_task.id}",
         )
         log.info("post_sync_dedup_enqueued", task_id=str(dedup_task.id))
+
+    # After a music sync, reconcile unmatched concert event artists
+    if (
+        parent.status == types_module.SyncStatus.COMPLETED
+        and parent.task_type == types_module.TaskType.SYNC_JOB
+    ):
+        reconcile_task = task_module.Task(
+            task_type=types_module.TaskType.BULK_JOB,
+            status=types_module.SyncStatus.PENDING,
+            params={"operation": "reconcile_event_artists"},
+            description="Post-sync event artist reconciliation",
+        )
+        session.add(reconcile_task)
+        await session.commit()
+        await arq_redis.enqueue_job(
+            "run_bulk_job",
+            str(reconcile_task.id),
+            _job_id=f"bulk:{reconcile_task.id}",
+        )
+        log.info(
+            "post_sync_reconcile_enqueued",
+            task_id=str(reconcile_task.id),
+        )
 
 
 # ---------------------------------------------------------------------------

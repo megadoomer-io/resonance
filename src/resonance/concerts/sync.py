@@ -230,3 +230,56 @@ async def match_candidates_to_artists(
             matched_count += 1
 
     return matched_count
+
+
+async def reconcile_unmatched_candidates(
+    session: AsyncSession,
+) -> int:
+    """Re-match all unmatched EventArtistCandidates against the Artist catalog.
+
+    Finds all PENDING candidates with no matched_artist_id and attempts
+    to match them. Intended as a post-sync hook so that newly synced
+    artists get linked to existing concert events.
+
+    Args:
+        session: The async database session.
+
+    Returns:
+        The number of candidates that were newly matched.
+    """
+    # Find distinct events that have unmatched candidates
+    event_ids_stmt = (
+        sa.select(concert_models.EventArtistCandidate.event_id)
+        .where(
+            concert_models.EventArtistCandidate.matched_artist_id.is_(None),
+            concert_models.EventArtistCandidate.status
+            == types_module.CandidateStatus.PENDING,
+        )
+        .distinct()
+    )
+    event_ids_result = await session.execute(event_ids_stmt)
+    event_ids = [row[0] for row in event_ids_result.all()]
+
+    if not event_ids:
+        return 0
+
+    events_stmt = sa.select(concert_models.Event).where(
+        concert_models.Event.id.in_(event_ids)
+    )
+    events_result = await session.execute(events_stmt)
+    events = events_result.scalars().all()
+
+    total_matched = 0
+    for event in events:
+        matched = await match_candidates_to_artists(session, event)
+        total_matched += matched
+
+    if total_matched > 0:
+        await session.commit()
+        logger.info(
+            "reconcile_unmatched_completed",
+            events_checked=len(events),
+            candidates_matched=total_matched,
+        )
+
+    return total_matched
