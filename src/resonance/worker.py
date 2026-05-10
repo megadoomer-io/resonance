@@ -967,7 +967,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 parent = parent_result.scalar_one_or_none()
                 if parent is not None:
                     parent_params = parent.params or {}
-            max_tracks = int(str(parent_params.get("max_tracks", 30)))
+            max_tracks = int(str(parent_params.get("max_tracks", 50)))
             freshness_target_raw = parent_params.get("freshness_target")
             freshness_target: int | None = (
                 int(str(freshness_target_raw))
