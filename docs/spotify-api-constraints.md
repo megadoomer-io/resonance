@@ -39,6 +39,10 @@ These endpoints survived the February 2026 changes and are available in dev mode
 | `GET /me/player/recently-played` | Sync recent listening history |
 | `POST /authorize` | OAuth authorization flow |
 | `POST /api/token` | Token exchange and refresh |
+| `POST /me/playlists` | Create private playlist for export |
+| `POST /playlists/{id}/items` | Add tracks to exported playlist |
+| `PUT /playlists/{id}/items` | Replace tracks on re-export |
+| `GET /search` | Search for tracks by title/artist |
 
 ## Removed Endpoints (previously available)
 
