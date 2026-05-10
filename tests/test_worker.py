@@ -44,7 +44,7 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 7
+        assert len(funcs) == 8
         names = {f.name for f in funcs}
         assert names == {
             "plan_sync",
@@ -54,6 +54,7 @@ class TestWorkerSettings:
             "generate_playlist",
             "discover_tracks_for_artist",
             "score_and_build_playlist",
+            "export_playlist",
         }
 
     def test_lifecycle_hooks(self) -> None:
@@ -2812,3 +2813,26 @@ class TestScoreAndBuildPlaylist:
         # Parent should be marked completed
         assert parent_task.status == types_module.SyncStatus.COMPLETED
         assert parent_task.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# ExportPlaylist tests
+# ---------------------------------------------------------------------------
+
+
+class TestExportPlaylist:
+    """Tests for the export_playlist worker function."""
+
+    def test_export_playlist_is_coroutine_function(self) -> None:
+        """export_playlist is an async function."""
+        import inspect
+
+        assert inspect.iscoroutinefunction(worker_module.export_playlist)
+
+    def test_dispatch_entry_exists(self) -> None:
+        """PLAYLIST_EXPORT is registered in _TASK_DISPATCH."""
+        assert types_module.TaskType.PLAYLIST_EXPORT in worker_module._TASK_DISPATCH
+        job_name, _ = worker_module._TASK_DISPATCH[
+            types_module.TaskType.PLAYLIST_EXPORT
+        ]
+        assert job_name == "export_playlist"

@@ -31,6 +31,7 @@ import resonance.connectors.registry as registry_module
 import resonance.connectors.songkick as songkick_module
 import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
+import resonance.crypto as crypto_module
 import resonance.database as database_module
 import resonance.generators.concert_prep as concert_prep_module
 import resonance.generators.parameters as params_module
@@ -80,6 +81,10 @@ _TASK_DISPATCH: dict[
     ),
     types_module.TaskType.TRACK_SCORING: (
         "score_and_build_playlist",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.PLAYLIST_EXPORT: (
+        "export_playlist",
         lambda t: (str(t.id),),
     ),
 }
@@ -1055,6 +1060,235 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Playlist export to external services
+# ---------------------------------------------------------------------------
+
+
+async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
+    """Export a playlist to an external service (e.g. Spotify).
+
+    Loads the PLAYLIST_EXPORT task, matches playlist tracks to Spotify IDs
+    (via service_links or search), then creates or updates the external
+    playlist. Persists track matches back to service_links for future reuse.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the PLAYLIST_EXPORT Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    connector_registry = wctx["connector_registry"]
+    settings = wctx["settings"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("export_playlist_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            playlist_id_str = str(task.params.get("playlist_id", ""))
+            connection_id_str = str(task.params.get("connection_id", ""))
+            log = log.bind(playlist_id=playlist_id_str, connection_id=connection_id_str)
+            log.info("export_playlist_started")
+
+            # Load playlist with tracks and artist info
+            playlist_result = await session.execute(
+                sa.select(playlist_models.Playlist)
+                .where(playlist_models.Playlist.id == uuid.UUID(playlist_id_str))
+                .options(
+                    sa_orm.selectinload(playlist_models.Playlist.tracks)
+                    .joinedload(playlist_models.PlaylistTrack.track)
+                    .joinedload(music_models.Track.artist)
+                )
+            )
+            playlist = playlist_result.scalar_one_or_none()
+            if playlist is None:
+                await lifecycle_module.fail_task(
+                    session, task, f"Playlist not found: {playlist_id_str}"
+                )
+                await session.commit()
+                return
+
+            # Load service connection
+            conn_result = await session.execute(
+                sa.select(user_models.ServiceConnection).where(
+                    user_models.ServiceConnection.id == uuid.UUID(connection_id_str)
+                )
+            )
+            connection = conn_result.scalar_one_or_none()
+            if connection is None:
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"Connection not found: {connection_id_str}",
+                )
+                await session.commit()
+                return
+
+            # Get Spotify connector
+            connector = connector_registry.get_base_connector(
+                types_module.ServiceType.SPOTIFY
+            )
+            if connector is None or not isinstance(
+                connector, spotify_module.SpotifyConnector
+            ):
+                await lifecycle_module.fail_task(
+                    session, task, "Spotify connector not available"
+                )
+                await session.commit()
+                return
+
+            # Decrypt access token
+            assert connection.encrypted_access_token is not None, (
+                "Spotify connection requires an access token"
+            )
+            access_token = crypto_module.decrypt_token(
+                connection.encrypted_access_token,
+                settings.token_encryption_key,
+            )
+
+            # Refresh token if expired
+            if (
+                connection.token_expires_at is not None
+                and connection.token_expires_at <= datetime.datetime.now(datetime.UTC)
+                and connection.encrypted_refresh_token is not None
+            ):
+                refresh_token = crypto_module.decrypt_token(
+                    connection.encrypted_refresh_token,
+                    settings.token_encryption_key,
+                )
+                token_response = await connector.refresh_access_token(refresh_token)
+                access_token = token_response.access_token
+                connection.encrypted_access_token = crypto_module.encrypt_token(
+                    access_token, settings.token_encryption_key
+                )
+                if token_response.expires_in is not None:
+                    connection.token_expires_at = datetime.datetime.now(
+                        datetime.UTC
+                    ) + datetime.timedelta(seconds=token_response.expires_in)
+                await session.commit()
+                log.info("export_playlist_token_refreshed")
+
+            # Match tracks to Spotify IDs
+            spotify_uris: list[str] = []
+            skipped_tracks: list[str] = []
+
+            for pt in playlist.tracks:
+                track = pt.track
+                track_links = track.service_links or {}
+                spotify_id = track_links.get("spotify")
+
+                if spotify_id is None:
+                    # Search Spotify for the track
+                    artist_name = track.artist.name if track.artist else ""
+                    found_id = await connector.search_track(
+                        access_token, track.title, artist_name
+                    )
+                    if found_id is not None:
+                        # Persist the match (copy-on-write for JSON column)
+                        updated_links = dict(track_links)
+                        updated_links["spotify"] = found_id
+                        track.service_links = updated_links
+                        spotify_id = found_id
+                    else:
+                        skipped_tracks.append(track.title)
+                        continue
+
+                spotify_uris.append(f"spotify:track:{spotify_id}")
+
+            if not spotify_uris:
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    "No tracks could be matched to Spotify",
+                )
+                await session.commit()
+                return
+
+            # Check if playlist was already exported to this connection
+            playlist_links = playlist.service_links or {}
+            spotify_links = playlist_links.get("spotify", {})
+            existing_export = (
+                spotify_links.get(connection_id_str)
+                if isinstance(spotify_links, dict)
+                else None
+            )
+
+            if existing_export and isinstance(existing_export, dict):
+                # Update existing playlist
+                spotify_playlist_id = str(existing_export["playlist_id"])
+                await connector.replace_playlist_tracks(
+                    access_token, spotify_playlist_id, spotify_uris
+                )
+                log.info(
+                    "export_playlist_replaced",
+                    spotify_playlist_id=spotify_playlist_id,
+                )
+            else:
+                # Create new playlist
+                spotify_playlist_id = await connector.create_playlist(
+                    access_token,
+                    playlist.name,
+                    playlist.description or "",
+                )
+                await connector.add_tracks_to_playlist(
+                    access_token, spotify_playlist_id, spotify_uris
+                )
+                log.info(
+                    "export_playlist_created",
+                    spotify_playlist_id=spotify_playlist_id,
+                )
+
+            # Update playlist service_links (copy-on-write)
+            updated_playlist_links = dict(playlist_links)
+            spotify_section = dict(
+                updated_playlist_links.get("spotify", {})
+                if isinstance(updated_playlist_links.get("spotify"), dict)
+                else {}
+            )
+            spotify_section[connection_id_str] = {
+                "playlist_id": spotify_playlist_id,
+                "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+            updated_playlist_links["spotify"] = spotify_section
+            playlist.service_links = updated_playlist_links
+
+            await lifecycle_module.complete_task(
+                session,
+                task,
+                {
+                    "spotify_playlist_id": spotify_playlist_id,
+                    "exported": len(spotify_uris),
+                    "skipped": len(skipped_tracks),
+                    "skipped_tracks": skipped_tracks,
+                },
+            )
+            await session.commit()
+            log.info(
+                "export_playlist_completed",
+                spotify_playlist_id=spotify_playlist_id,
+                exported=len(spotify_uris),
+                skipped=len(skipped_tracks),
+            )
+
+        except Exception:
+            log.exception("export_playlist_failed")
+            task_reload = await _load_task(session, task_id)
+            if task_reload is not None:
+                await lifecycle_module.fail_task(
+                    session, task_reload, traceback.format_exc()
+                )
+                await session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Parent completion check
 # ---------------------------------------------------------------------------
 
@@ -1596,6 +1830,7 @@ class WorkerSettings:
         arq.func(
             heartbeat_module.with_heartbeat(score_and_build_playlist), timeout=600
         ),
+        arq.func(heartbeat_module.with_heartbeat(export_playlist), timeout=600),
     ]
     on_startup = startup
     on_shutdown = shutdown
