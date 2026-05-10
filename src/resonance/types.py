@@ -58,6 +58,7 @@ class TaskType(enum.StrEnum):
     PLAYLIST_GENERATION = "playlist_generation"
     TRACK_DISCOVERY = "track_discovery"
     TRACK_SCORING = "track_scoring"
+    PLAYLIST_EXPORT = "playlist_export"
 
 
 class SyncStatus(enum.StrEnum):

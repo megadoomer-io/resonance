@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 import sqlalchemy.orm as orm
@@ -33,6 +33,9 @@ class Playlist(base_module.TimestampMixin, base_module.Base):
     )
     is_pinned: orm.Mapped[bool] = orm.mapped_column(
         sa.Boolean, nullable=False, default=False
+    )
+    service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
+        sa.JSON, nullable=True, default=None
     )
 
     tracks: orm.Mapped[list[PlaylistTrack]] = orm.relationship(

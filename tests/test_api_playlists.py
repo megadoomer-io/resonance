@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+import resonance.models.playlist as playlist_models
+
 
 class TestDiffLogic:
     """Tests for the pure set-operation logic used by the diff endpoint."""
@@ -175,3 +177,32 @@ class TestFormatPlaylistSummary:
         assert result["description"] is None
         assert result["is_pinned"] is False
         assert result["track_count"] == 0
+
+
+class TestPlaylistServiceLinks:
+    """Tests for service_links field on Playlist model."""
+
+    def test_service_links_defaults_to_none(self) -> None:
+        playlist = playlist_models.Playlist(
+            user_id=uuid.uuid4(),
+            name="Test",
+        )
+        assert playlist.service_links is None
+
+    def test_service_links_stores_export_data(self) -> None:
+        connection_id = str(uuid.uuid4())
+        links = {
+            "spotify": {
+                connection_id: {
+                    "playlist_id": "abc123",
+                    "exported_at": "2026-05-10T22:30:00Z",
+                }
+            }
+        }
+        playlist = playlist_models.Playlist(
+            user_id=uuid.uuid4(),
+            name="Test",
+            service_links=links,
+        )
+        spotify_link = playlist.service_links["spotify"][connection_id]
+        assert spotify_link["playlist_id"] == "abc123"
