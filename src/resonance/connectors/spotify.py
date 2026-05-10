@@ -271,7 +271,11 @@ class SpotifyConnector(base_module.BaseConnector):
         name: str,
         description: str = "",
     ) -> str:
-        """Create a private playlist on the user's Spotify account."""
+        """Create a playlist on the user's Spotify account.
+
+        Spotify dev mode ignores ``public=False``, so playlists are always
+        public.  We send ``public=True`` to match the actual behavior.
+        """
         response = await self._request(
             "POST",
             f"{SPOTIFY_API_BASE}/me/playlists",
@@ -279,7 +283,7 @@ class SpotifyConnector(base_module.BaseConnector):
             json={
                 "name": name,
                 "description": description,
-                "public": False,
+                "public": True,
             },
         )
         data: dict[str, str] = response.json()
