@@ -1843,6 +1843,130 @@ async def generating_status_partial(
     )
 
 
+@router.post("/playlists/{playlist_id}/export", response_model=None)
+async def export_playlist_submit(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+) -> fastapi.responses.RedirectResponse:
+    """Handle export form submission.
+
+    Enqueue export tasks and redirect to status page.
+    """
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_uuid = uuid.UUID(user_id)
+    form = await request.form()
+    connection_id = form.get("connection_id")
+
+    async with _get_db(request) as db:
+        # Verify playlist
+        playlist_result = await db.execute(
+            sa.select(playlist_models.Playlist).where(
+                playlist_models.Playlist.id == playlist_id,
+                playlist_models.Playlist.user_id == user_uuid,
+            )
+        )
+        playlist = playlist_result.scalar_one_or_none()
+        if playlist is None:
+            raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+
+        # Determine connections
+        if connection_id:
+            conn_result = await db.execute(
+                sa.select(user_models.ServiceConnection).where(
+                    user_models.ServiceConnection.id == uuid.UUID(str(connection_id)),
+                    user_models.ServiceConnection.user_id == user_uuid,
+                    user_models.ServiceConnection.service_type
+                    == types_module.ServiceType.SPOTIFY,
+                )
+            )
+            connections = list(conn_result.scalars().all())
+        else:
+            conn_result = await db.execute(
+                sa.select(user_models.ServiceConnection).where(
+                    user_models.ServiceConnection.user_id == user_uuid,
+                    user_models.ServiceConnection.service_type
+                    == types_module.ServiceType.SPOTIFY,
+                )
+            )
+            connections = list(conn_result.scalars().all())
+
+        if not connections:
+            raise fastapi.HTTPException(
+                status_code=400, detail="No Spotify connections found"
+            )
+
+        # Create tasks
+        task_ids: list[str] = []
+        for conn in connections:
+            task = task_models.Task(
+                id=uuid.uuid4(),
+                user_id=user_uuid,
+                task_type=types_module.TaskType.PLAYLIST_EXPORT,
+                status=types_module.SyncStatus.PENDING,
+                params={
+                    "playlist_id": str(playlist_id),
+                    "connection_id": str(conn.id),
+                },
+                description=f"Export to Spotify ({conn.external_user_id or 'account'})",
+            )
+            db.add(task)
+            task_ids.append(str(task.id))
+        await db.commit()
+
+    # Enqueue tasks
+    arq_redis = request.app.state.arq_redis
+    for tid in task_ids:
+        await arq_redis.enqueue_job(
+            "export_playlist",
+            tid,
+            _job_id=f"export_playlist:{tid}",
+        )
+
+    task_ids_param = ",".join(task_ids)
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/exporting/{playlist_id}?task_ids={task_ids_param}",
+        status_code=303,
+    )
+
+
+@router.get("/playlists/exporting/{playlist_id}", response_model=None)
+async def export_status_page(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+    task_ids: str = "",
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Render the playlist export status page."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(playlist_models.Playlist).where(
+                playlist_models.Playlist.id == playlist_id
+            )
+        )
+        playlist = result.scalar_one_or_none()
+
+    playlist_name = playlist.name if playlist else "Playlist"
+
+    return templates.TemplateResponse(
+        request,
+        "playlists_exporting.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": _user_role(request),
+            "playlist_id": str(playlist_id),
+            "playlist_name": playlist_name,
+            "task_ids": task_ids,
+        },
+    )
+
+
 @router.get("/playlists/{playlist_id}", response_model=None)
 async def playlist_detail_page(
     request: fastapi.Request,
@@ -1894,6 +2018,16 @@ async def playlist_detail_page(
         )
         generation = gen_result.scalar_one_or_none()
 
+        # Load Spotify connections for export section
+        spotify_conn_result = await db.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == user_uuid,
+                user_models.ServiceConnection.service_type
+                == types_module.ServiceType.SPOTIFY,
+            )
+        )
+        spotify_connections = list(spotify_conn_result.scalars().all())
+
     context = {
         "user_id": user_id,
         "user_tz": _user_tz(request),
@@ -1902,6 +2036,7 @@ async def playlist_detail_page(
         "playlist_id": playlist_id,
         "tracks": tracks,
         "generation": generation,
+        "spotify_connections": spotify_connections,
         "page": page,
         "has_next": has_next,
         "has_prev": page > 1,
@@ -1912,6 +2047,64 @@ async def playlist_detail_page(
             request, "partials/playlist_detail_tracks.html", context
         )
     return templates.TemplateResponse(request, "playlist_detail.html", context)
+
+
+@router.get("/partials/export-status/{playlist_id}", response_model=None)
+async def export_status_partial(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+    task_ids: str = "",
+) -> fastapi.responses.HTMLResponse:
+    """Polled partial for playlist export progress."""
+    task_id_list = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+
+    task_results: list[dict[str, object]] = []
+    all_completed = True
+    any_failed = False
+
+    async with _get_db(request) as db:
+        for tid in task_id_list:
+            result = await db.execute(
+                sa.select(task_models.Task).where(task_models.Task.id == uuid.UUID(tid))
+            )
+            task = result.scalar_one_or_none()
+            if task is None:
+                continue
+
+            task_info: dict[str, object] = {
+                "description": task.description or "Export",
+                "status": task.status.value,
+            }
+
+            if task.status == types_module.SyncStatus.COMPLETED:
+                task_result = task.result or {}
+                task_info["exported"] = task_result.get("exported", 0)
+                task_info["skipped"] = task_result.get("skipped", 0)
+                task_info["spotify_playlist_id"] = task_result.get(
+                    "spotify_playlist_id"
+                )
+            elif task.status == types_module.SyncStatus.FAILED:
+                task_info["error"] = task.error_message or "Unknown error"
+                any_failed = True
+            else:
+                all_completed = False
+
+            task_results.append(task_info)
+
+    if not task_results:
+        all_completed = False
+
+    return templates.TemplateResponse(
+        request,
+        "partials/playlist_export_status.html",
+        {
+            "playlist_id": str(playlist_id),
+            "task_ids": task_ids,
+            "task_results": task_results,
+            "all_completed": all_completed,
+            "any_failed": any_failed,
+        },
+    )
 
 
 @router.get("/account", response_model=None)

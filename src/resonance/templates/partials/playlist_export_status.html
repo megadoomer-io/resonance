@@ -1,0 +1,37 @@
+{% if all_completed %}
+<article>
+    <p>Export complete!</p>
+    {% for result in task_results %}
+    <p>
+        {{ result.description }}:
+        {{ result.exported }} tracks exported
+        {% if result.skipped > 0 %}
+        ({{ result.skipped }} not found on Spotify)
+        {% endif %}
+    </p>
+    {% if result.spotify_playlist_id %}
+    <p><a href="https://open.spotify.com/playlist/{{ result.spotify_playlist_id }}" target="_blank" rel="noopener">Open in Spotify</a></p>
+    {% endif %}
+    {% endfor %}
+    <p><a href="/playlists/{{ playlist_id }}">&larr; Back to playlist</a></p>
+</article>
+{% elif any_failed %}
+<article>
+    <p><mark>Export failed</mark></p>
+    {% for result in task_results %}
+    {% if result.error %}
+    <p>{{ result.description }}: {{ result.error }}</p>
+    {% endif %}
+    {% endfor %}
+    <p><a href="/playlists/{{ playlist_id }}">&larr; Back to playlist</a></p>
+</article>
+{% else %}
+<div id="export-status"
+     hx-get="/partials/export-status/{{ playlist_id }}?task_ids={{ task_ids }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+    <article aria-busy="true">
+        Exporting to Spotify...
+    </article>
+</div>
+{% endif %}

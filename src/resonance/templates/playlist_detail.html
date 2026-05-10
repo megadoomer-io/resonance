@@ -57,6 +57,44 @@
 </article>
 {% endif %}
 
+{# Export to Spotify #}
+{% if spotify_connections %}
+<article>
+    <h3>Spotify Export</h3>
+    {% for conn in spotify_connections %}
+    {% set conn_id = conn.id | string %}
+    {% set export_info = (playlist.service_links or {}).get('spotify', {}).get(conn_id) %}
+    <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem;">
+        <span>{{ conn.external_user_id or 'Spotify Account' }}</span>
+        {% if export_info %}
+            {% set exported_at = export_info.get('exported_at', '') %}
+            {% if playlist.updated_at and playlist.updated_at.isoformat() > exported_at %}
+            <small style="color: var(--pico-color-amber-500, orange);">Playlist changed since last export</small>
+            <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                <input type="hidden" name="connection_id" value="{{ conn_id }}">
+                <button type="submit" class="outline" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;">Update on Spotify</button>
+            </form>
+            {% else %}
+            <small>Synced {{ exported_at[:10] }}</small>
+            <a href="https://open.spotify.com/playlist/{{ export_info.get('playlist_id', '') }}" target="_blank" rel="noopener" style="font-size: 0.8rem;">Open in Spotify</a>
+            <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                <input type="hidden" name="connection_id" value="{{ conn_id }}">
+                <button type="submit" class="outline secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;">Re-export</button>
+            </form>
+            {% endif %}
+        {% else %}
+            <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                <input type="hidden" name="connection_id" value="{{ conn_id }}">
+                <button type="submit" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;">Export to Spotify</button>
+            </form>
+        {% endif %}
+    </div>
+    {% endfor %}
+</article>
+{% elif not spotify_connections and spotify_connections is defined %}
+<p><small>No Spotify connections. <a href="/account">Connect Spotify</a> to export playlists.</small></p>
+{% endif %}
+
 <div id="playlist-tracks">
     {% include "partials/playlist_detail_tracks.html" %}
 </div>

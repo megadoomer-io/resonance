@@ -94,6 +94,6 @@ class TestTaskTypeNewValues:
         assert types_module.TaskType.BULK_JOB == "bulk_job"
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
-    def test_tasktype_has_eight_members(self) -> None:
-        """TaskType should have 8 members total (5 original + 3 new)."""
-        assert len(types_module.TaskType) == 8
+    def test_tasktype_has_nine_members(self) -> None:
+        """TaskType should have 9 members (5 original + 3 gen + 1 export)."""
+        assert len(types_module.TaskType) == 9

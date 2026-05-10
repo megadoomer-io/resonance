@@ -8,6 +8,7 @@
                 <th>Tracks</th>
                 <th>Source</th>
                 <th>Created</th>
+                <th>Spotify</th>
                 <th></th>
             </tr>
         </thead>
@@ -22,6 +23,24 @@
                     {% endif %}
                 </td>
                 <td>{{ playlist.created_at | localtime(user_tz) }}</td>
+                <td>
+                    {% set sp_links = (playlist.service_links or {}).get('spotify', {}) %}
+                    {% if sp_links %}
+                        {% set any_stale = [] %}
+                        {% for cid, info in sp_links.items() %}
+                            {% if playlist.updated_at and playlist.updated_at.isoformat() > info.get('exported_at', '') %}
+                                {% if any_stale.append(1) %}{% endif %}
+                            {% endif %}
+                        {% endfor %}
+                        {% if any_stale %}
+                        <small style="color: var(--pico-color-amber-500, orange);">needs update</small>
+                        {% else %}
+                        <small style="color: var(--pico-color-green-500, green);">synced</small>
+                        {% endif %}
+                    {% else %}
+                    <small style="color: var(--pico-color-grey-500, grey);">—</small>
+                    {% endif %}
+                </td>
                 <td>
                     <button
                         hx-delete="/api/v1/playlists/{{ playlist.id }}"
