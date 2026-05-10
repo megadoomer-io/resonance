@@ -21,7 +21,8 @@ _SCOPES = (
     "user-follow-read "
     "user-library-read "
     "user-read-email "
-    "user-read-private"
+    "user-read-private "
+    "playlist-modify-private"
 )
 
 
@@ -57,6 +58,7 @@ class SpotifyConnector(base_module.BaseConnector):
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.FOLLOWS,
             base_module.ConnectorCapability.TRACK_RATINGS,
+            base_module.ConnectorCapability.PLAYLIST_WRITE,
         }
     )
 
@@ -262,3 +264,78 @@ class SpotifyConnector(base_module.BaseConnector):
 
         logger.info("Fetched %d recently played tracks", len(items))
         return items
+
+    async def create_playlist(
+        self,
+        access_token: str,
+        name: str,
+        description: str = "",
+    ) -> str:
+        """Create a private playlist on the user's Spotify account."""
+        response = await self._request(
+            "POST",
+            f"{SPOTIFY_API_BASE}/me/playlists",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "name": name,
+                "description": description,
+                "public": False,
+            },
+        )
+        data: dict[str, str] = response.json()
+        logger.info("spotify_playlist_created", playlist_id=data["id"])
+        return data["id"]
+
+    async def add_tracks_to_playlist(
+        self,
+        access_token: str,
+        playlist_id: str,
+        uris: list[str],
+    ) -> None:
+        """Add tracks to a Spotify playlist, batching if over 100."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        for i in range(0, len(uris), 100):
+            batch = uris[i : i + 100]
+            await self._request(
+                "POST",
+                f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/items",
+                headers=headers,
+                json={"uris": batch},
+            )
+        logger.info("spotify_tracks_added", playlist_id=playlist_id, count=len(uris))
+
+    async def replace_playlist_tracks(
+        self,
+        access_token: str,
+        playlist_id: str,
+        uris: list[str],
+    ) -> None:
+        """Replace all tracks in a Spotify playlist."""
+        await self._request(
+            "PUT",
+            f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/items",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={"uris": uris},
+        )
+        logger.info("spotify_tracks_replaced", playlist_id=playlist_id, count=len(uris))
+
+    async def search_track(
+        self,
+        access_token: str,
+        title: str,
+        artist_name: str,
+    ) -> str | None:
+        """Search Spotify for a track by title and artist. Returns track ID or None."""
+        query = f"track:{title} artist:{artist_name}"
+        response = await self._request(
+            "GET",
+            f"{SPOTIFY_API_BASE}/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": query, "type": "track", "limit": 1},
+        )
+        data = response.json()
+        items = data.get("tracks", {}).get("items", [])
+        if not items:
+            return None
+        result: str = items[0]["id"]
+        return result

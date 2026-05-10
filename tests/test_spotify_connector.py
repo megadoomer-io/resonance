@@ -36,6 +36,7 @@ class TestSpotifyConnectorProperties:
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.FOLLOWS,
                 base_module.ConnectorCapability.TRACK_RATINGS,
+                base_module.ConnectorCapability.PLAYLIST_WRITE,
             }
         )
         assert connector.capabilities == expected
@@ -90,6 +91,7 @@ class TestGetAuthUrl:
         assert "user-library-read" in scopes
         assert "user-read-email" in scopes
         assert "user-read-private" in scopes
+        assert "playlist-modify-private" in scopes
 
     def test_starts_with_spotify_auth_url(self) -> None:
         connector = spotify_module.SpotifyConnector(settings=_make_settings())
