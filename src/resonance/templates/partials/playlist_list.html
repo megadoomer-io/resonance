@@ -33,12 +33,16 @@
                             {% endif %}
                         {% endfor %}
                         {% if any_stale %}
-                        <small style="color: var(--pico-color-amber-500, orange);">needs update</small>
+                        <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                            <button type="submit" class="outline" style="padding: 0.15rem 0.4rem; font-size: 0.75rem; color: var(--pico-color-amber-500, orange); border-color: var(--pico-color-amber-500, orange);">Update</button>
+                        </form>
                         {% else %}
-                        <small style="color: var(--pico-color-green-500, green);">synced</small>
+                        <small style="color: var(--pico-color-green-500, green);">Synced</small>
                         {% endif %}
                     {% else %}
-                    <small style="color: var(--pico-color-grey-500, grey);">—</small>
+                    <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                        <button type="submit" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;">Export</button>
+                    </form>
                     {% endif %}
                 </td>
                 <td>
