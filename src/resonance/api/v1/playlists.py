@@ -1,4 +1,4 @@
-"""Playlist API routes — list, detail, and diff endpoints."""
+"""Playlist API routes — list, detail, diff, and export endpoints."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated, Any
 
 import fastapi
+import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
@@ -15,6 +16,9 @@ import resonance.dependencies as deps_module
 import resonance.models.generator as generator_models
 import resonance.models.music as music_models
 import resonance.models.playlist as playlist_models
+import resonance.models.task as task_models
+import resonance.models.user as user_models
+import resonance.types as types_module
 
 logger = structlog.get_logger()
 
@@ -38,7 +42,9 @@ def format_playlist_summary(playlist: playlist_models.Playlist) -> dict[str, Any
         "description": playlist.description,
         "track_count": playlist.track_count,
         "is_pinned": playlist.is_pinned,
+        "service_links": playlist.service_links,
         "created_at": playlist.created_at.isoformat(),
+        "updated_at": playlist.updated_at.isoformat(),
     }
 
 
@@ -320,3 +326,133 @@ async def delete_playlist(
     await db.commit()
     logger.info("playlist_deleted", playlist_id=str(playlist_id))
     return {"status": "deleted"}
+
+
+class ExportRequest(pydantic.BaseModel):
+    """Request body for playlist export."""
+
+    connection_ids: list[uuid.UUID] | None = None
+
+
+@router.post(
+    "/{playlist_id}/export",
+    summary="Export playlist to external services",
+    description="Export a playlist to connected Spotify accounts.",
+    status_code=202,
+)
+async def export_playlist(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    body: ExportRequest | None = None,
+) -> dict[str, Any]:
+    """Export a playlist to one or more Spotify connections.
+
+    Creates a background task per connection and enqueues them for processing.
+
+    Args:
+        request: The incoming HTTP request (for arq access).
+        playlist_id: The playlist UUID to export.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+        body: Optional request body with specific connection IDs.
+
+    Returns:
+        A dict with a list of created task/connection pairs.
+
+    Raises:
+        HTTPException: 404 if playlist not found, 400 if no valid connections.
+    """
+    # Verify playlist exists and belongs to user
+    result = await db.execute(
+        sa.select(playlist_models.Playlist).where(
+            playlist_models.Playlist.id == playlist_id,
+            playlist_models.Playlist.user_id == user_id,
+        )
+    )
+    playlist = result.scalar_one_or_none()
+
+    if playlist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+
+    # Resolve target Spotify connections
+    requested_ids = body.connection_ids if body is not None else None
+
+    if requested_ids is not None:
+        # Validate provided connection IDs are Spotify connections owned by user
+        conn_result = await db.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.id.in_(requested_ids),
+                user_models.ServiceConnection.user_id == user_id,
+                user_models.ServiceConnection.service_type
+                == types_module.ServiceType.SPOTIFY,
+            )
+        )
+        connections = list(conn_result.scalars().all())
+
+        if len(connections) != len(requested_ids):
+            found_ids = {c.id for c in connections}
+            invalid_ids = [str(cid) for cid in requested_ids if cid not in found_ids]
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail=f"Invalid or non-Spotify connection IDs: {invalid_ids}",
+            )
+    else:
+        # Find all Spotify connections for the user
+        conn_result = await db.execute(
+            sa.select(user_models.ServiceConnection).where(
+                user_models.ServiceConnection.user_id == user_id,
+                user_models.ServiceConnection.service_type
+                == types_module.ServiceType.SPOTIFY,
+            )
+        )
+        connections = list(conn_result.scalars().all())
+
+        if not connections:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="No Spotify connections found for user",
+            )
+
+    # Create one task per connection and enqueue
+    tasks_info: list[dict[str, str]] = []
+    arq_redis = request.app.state.arq_redis
+
+    for connection in connections:
+        task = task_models.Task(
+            user_id=user_id,
+            service_connection_id=connection.id,
+            task_type=types_module.TaskType.PLAYLIST_EXPORT,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "playlist_id": str(playlist_id),
+                "connection_id": str(connection.id),
+            },
+        )
+        db.add(task)
+        await db.flush()
+
+        await arq_redis.enqueue_job(
+            "export_playlist",
+            str(task.id),
+            _job_id=f"export_playlist:{task.id}",
+        )
+
+        tasks_info.append(
+            {
+                "task_id": str(task.id),
+                "connection_id": str(connection.id),
+            }
+        )
+
+        logger.info(
+            "playlist_export_enqueued",
+            playlist_id=str(playlist_id),
+            task_id=str(task.id),
+            connection_id=str(connection.id),
+        )
+
+    await db.commit()
+
+    return {"tasks": tasks_info}
