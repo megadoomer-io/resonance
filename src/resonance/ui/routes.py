@@ -1224,6 +1224,52 @@ async def set_attendance(
     )
 
 
+@router.get("/events/{event_id}/candidates", response_model=None)
+async def event_candidates_partial(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Return candidates partial for HTMX refresh."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        event = (
+            (
+                await db.execute(
+                    sa.select(concert_models.Event)
+                    .where(concert_models.Event.id == event_id)
+                    .options(
+                        sa_orm.joinedload(concert_models.Event.artist_candidates),
+                    )
+                )
+            )
+            .unique()
+            .scalar_one()
+        )
+        matched_artist_ids = [
+            c.matched_artist_id
+            for c in event.artist_candidates
+            if c.matched_artist_id is not None
+        ]
+        matched_artists: dict[uuid.UUID, music_models.Artist] = {}
+        if matched_artist_ids:
+            ma_result = await db.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id.in_(matched_artist_ids)
+                )
+            )
+            for a in ma_result.scalars().all():
+                matched_artists[a.id] = a
+
+    return templates.TemplateResponse(
+        request,
+        "partials/event_candidates.html",
+        {"event": event, "matched_artists": matched_artists},
+    )
+
+
 @router.post("/events/{event_id}/candidates/{candidate_id}/accept", response_model=None)
 async def accept_candidate_ui(
     request: fastapi.Request,
