@@ -78,6 +78,12 @@
         }
         if (eventId) params += '&event_id=' + eventId;
         if (candidateId) params += '&candidate_id=' + candidateId;
+        var resultsDiv = document.getElementById('modal-search-results');
+        var serviceNames = services.map(function(s) {
+            return s.charAt(0).toUpperCase() + s.slice(1);
+        });
+        resultsDiv.innerHTML = '<p aria-busy="true"><small>Querying '
+            + serviceNames.join(', ') + '...</small></p>';
         htmx.ajax('GET', '/partials/artist-search-external?' + params, {
             target: '#modal-search-results',
             swap: 'innerHTML'
