@@ -1792,26 +1792,63 @@ async def artist_import_partial(
             db.add(artist)
             await db.flush()
 
-        if candidate_id and event_id:
-            candidate = (
+        if event_id:
+            # Check if already on event
+            already = (
                 await db.execute(
-                    sa.select(concert_models.EventArtistCandidate).where(
-                        concert_models.EventArtistCandidate.id == candidate_id,
-                        concert_models.EventArtistCandidate.event_id == event_id,
+                    sa.select(concert_models.EventArtist.id).where(
+                        concert_models.EventArtist.event_id == event_id,
+                        concert_models.EventArtist.artist_id == artist.id,
                     )
                 )
             ).scalar_one_or_none()
-            if candidate is not None:
-                candidate.matched_artist_id = artist.id
-                candidate.confidence_score = 100
-                candidate.status = types_module.CandidateStatus.ACCEPTED
-                event_artist = concert_models.EventArtist(
-                    event_id=event_id,
-                    artist_id=artist.id,
-                    position=candidate.position,
-                    raw_name=candidate.raw_name,
+
+            if already is None:
+                # Resolve specific candidate if provided
+                if candidate_id:
+                    candidate = (
+                        await db.execute(
+                            sa.select(concert_models.EventArtistCandidate).where(
+                                concert_models.EventArtistCandidate.id == candidate_id,
+                                concert_models.EventArtistCandidate.event_id
+                                == event_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if candidate is not None:
+                        candidate.matched_artist_id = artist.id
+                        candidate.confidence_score = 100
+                        candidate.status = types_module.CandidateStatus.ACCEPTED
+
+                # Also check for unresolved candidate by name
+                if not candidate_id:
+                    existing_candidate = (
+                        await db.execute(
+                            sa.select(concert_models.EventArtistCandidate).where(
+                                concert_models.EventArtistCandidate.event_id
+                                == event_id,
+                                concert_models.EventArtistCandidate.raw_name
+                                == artist.name,
+                                concert_models.EventArtistCandidate.status
+                                == types_module.CandidateStatus.PENDING,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing_candidate is not None:
+                        existing_candidate.matched_artist_id = artist.id
+                        existing_candidate.confidence_score = 100
+                        existing_candidate.status = (
+                            types_module.CandidateStatus.ACCEPTED
+                        )
+
+                db.add(
+                    concert_models.EventArtist(
+                        event_id=event_id,
+                        artist_id=artist.id,
+                        position=0,
+                        raw_name=artist.name,
+                    )
                 )
-                db.add(event_artist)
 
         await db.commit()
 
