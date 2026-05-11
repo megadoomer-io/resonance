@@ -95,6 +95,17 @@
         if (modal && modal.open) modal.close();
     });
 
+    document.body.addEventListener('htmx:afterRequest', function(e) {
+        var modal = document.getElementById('external-search-modal');
+        if (!modal || !modal.open) return;
+        if (e.detail.elt && modal.contains(e.detail.elt) && e.detail.successful) {
+            var target = e.detail.target;
+            if (target && target.id !== 'modal-search-results') {
+                modal.close();
+            }
+        }
+    });
+
     document.body.addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && e.target && e.target.id === 'external-search-input') {
             e.preventDefault();
