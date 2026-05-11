@@ -808,6 +808,7 @@ async def events_page(
         "date_to",
         "attendance",
         "has_pending",
+        "include_not_going",
     }
     active_preset = view_filters_module.detect_active_preset(
         params,
@@ -876,7 +877,7 @@ async def events_page(
                 )
                 conditions.append(concert_models.Event.id.not_in(has_attendance))
             query = query.where(sa.or_(*conditions))
-        else:
+        elif params.get("include_not_going") != "true":
             # Default: exclude NOT_GOING events
             not_going_subquery = sa.select(
                 concert_models.UserEventAttendance.event_id

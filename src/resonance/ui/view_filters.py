@@ -70,6 +70,11 @@ def build_event_presets() -> list[dict[str, str]]:
             "label": "Needs Review",
             "params": "has_pending=true",
         },
+        {
+            "name": "all",
+            "label": "All Events",
+            "params": "include_not_going=true",
+        },
     ]
 
 

@@ -633,9 +633,11 @@ class TestEventFilterRegistry:
 class TestEventPresets:
     """Test event preset generation."""
 
-    def test_build_event_presets_returns_three(self) -> None:
+    def test_build_event_presets(self) -> None:
         presets = view_filters_module.build_event_presets()
-        assert len(presets) == 3
+        assert len(presets) == 4
+        names = [p["name"] for p in presets]
+        assert names == ["upcoming", "going", "needs_review", "all"]
 
     def test_upcoming_preset_uses_today(self) -> None:
         presets = view_filters_module.build_event_presets()
