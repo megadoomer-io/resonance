@@ -676,9 +676,9 @@ class TestEventTemplateFilters:
             if f["name"] == "attendance"
         )
         assert att["type"] == "multiselect"
-        assert len(att["options"]) == 3
+        assert len(att["options"]) == 4
         option_values = [o["value"] for o in att["options"]]
-        assert option_values == ["GOING", "INTERESTED", "NONE"]
+        assert option_values == ["GOING", "INTERESTED", "NOT_GOING", "UNSET"]
 
 
 class TestDetectActivePreset:

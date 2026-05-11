@@ -851,17 +851,37 @@ async def events_page(
 
         # Handle attendance filter manually (requires user_id context)
         attendance_values = multi_params.get("attendance", [])
-        valid_attendance = [
-            v for v in attendance_values if v in ("GOING", "INTERESTED", "NONE")
-        ]
+        _valid_set = {"GOING", "INTERESTED", "NOT_GOING", "UNSET"}
+        valid_attendance = [v for v in attendance_values if v in _valid_set]
         if valid_attendance:
-            attendance_subquery = sa.select(
+            status_values = [v for v in valid_attendance if v != "UNSET"]
+            include_unset = "UNSET" in valid_attendance
+            conditions: list[sa.ColumnElement[bool]] = []
+            if status_values:
+                attendance_subquery = sa.select(
+                    concert_models.UserEventAttendance.event_id
+                ).where(
+                    concert_models.UserEventAttendance.user_id == user_uuid,
+                    concert_models.UserEventAttendance.status.in_(status_values),
+                )
+                conditions.append(concert_models.Event.id.in_(attendance_subquery))
+            if include_unset:
+                has_attendance = sa.select(
+                    concert_models.UserEventAttendance.event_id
+                ).where(
+                    concert_models.UserEventAttendance.user_id == user_uuid,
+                )
+                conditions.append(concert_models.Event.id.not_in(has_attendance))
+            query = query.where(sa.or_(*conditions))
+        else:
+            # Default: exclude NOT_GOING events
+            not_going_subquery = sa.select(
                 concert_models.UserEventAttendance.event_id
             ).where(
                 concert_models.UserEventAttendance.user_id == user_uuid,
-                concert_models.UserEventAttendance.status.in_(valid_attendance),
+                concert_models.UserEventAttendance.status == "NOT_GOING",
             )
-            query = query.where(concert_models.Event.id.in_(attendance_subquery))
+            query = query.where(concert_models.Event.id.not_in(not_going_subquery))
 
         # Deduplicate rows from outer joins, order, and paginate
         query = (

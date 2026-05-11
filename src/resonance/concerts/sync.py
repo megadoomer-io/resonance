@@ -166,7 +166,7 @@ async def upsert_attendance(
         status_str: Raw status string ("going" or "interested").
         source_service: The service this attendance originated from.
     """
-    status = _ATTENDANCE_MAP.get(status_str, types_module.AttendanceStatus.NONE)
+    status = _ATTENDANCE_MAP.get(status_str, types_module.AttendanceStatus.NOT_GOING)
 
     stmt = sa.select(concert_models.UserEventAttendance).where(
         concert_models.UserEventAttendance.user_id == user_id,

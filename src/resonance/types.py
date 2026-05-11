@@ -84,7 +84,7 @@ class AttendanceStatus(enum.StrEnum):
 
     GOING = "going"
     INTERESTED = "interested"
-    NONE = "none"
+    NOT_GOING = "not_going"
 
 
 class CandidateStatus(enum.StrEnum):

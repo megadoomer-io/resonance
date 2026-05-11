@@ -85,7 +85,8 @@ EVENT_TEMPLATE_FILTERS: list[dict[str, Any]] = [
         "options": [
             {"value": "GOING", "label": "Going"},
             {"value": "INTERESTED", "label": "Interested"},
-            {"value": "NONE", "label": "None"},
+            {"value": "NOT_GOING", "label": "Not going"},
+            {"value": "UNSET", "label": "No status"},
         ],
     },
 ]

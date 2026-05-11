@@ -108,7 +108,7 @@ class TestAttendanceStatus:
     def test_values(self) -> None:
         assert types_module.AttendanceStatus.GOING == "going"
         assert types_module.AttendanceStatus.INTERESTED == "interested"
-        assert types_module.AttendanceStatus.NONE == "none"
+        assert types_module.AttendanceStatus.NOT_GOING == "not_going"
 
     def test_attendance_status_count(self) -> None:
         assert len(types_module.AttendanceStatus) == 3
