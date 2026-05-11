@@ -42,8 +42,7 @@
                     {% endif %}
                     {% else %}
                     <form hx-post="/partials/artist-import"
-                          hx-target="closest tr"
-                          hx-swap="outerHTML"
+                          hx-swap="none"
                           style="margin: 0;">
                         <input type="hidden" name="mbid" value="{{ artist.mbid or '' }}">
                         <input type="hidden" name="spotify_id" value="{{ artist.spotify_id or '' }}">

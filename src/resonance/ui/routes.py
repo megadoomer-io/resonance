@@ -1815,15 +1815,8 @@ async def artist_import_partial(
 
         await db.commit()
 
-    triggers = ["artist-imported"]
-    if candidate_id and event_id:
-        triggers.append("artistsChanged")
-    response = templates.TemplateResponse(
-        request,
-        "partials/artist_row.html",
-        {"artist": artist, "event_id": event_id},
-    )
-    response.headers["HX-Trigger"] = ", ".join(triggers)
+    response = fastapi.responses.HTMLResponse("")
+    response.headers["HX-Trigger"] = "artist-imported, artistsChanged"
     return response
 
 
