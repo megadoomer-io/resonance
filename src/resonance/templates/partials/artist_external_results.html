@@ -45,7 +45,8 @@
                           hx-target="closest tr"
                           hx-swap="outerHTML"
                           style="margin: 0;">
-                        <input type="hidden" name="mbid" value="{{ artist.mbid }}">
+                        <input type="hidden" name="mbid" value="{{ artist.mbid or '' }}">
+                        <input type="hidden" name="spotify_id" value="{{ artist.spotify_id or '' }}">
                         <input type="hidden" name="name" value="{{ artist.name }}">
                         <input type="hidden" name="disambiguation" value="{{ artist.disambiguation }}">
                         <input type="hidden" name="artist_type" value="{{ artist.artist_type }}">

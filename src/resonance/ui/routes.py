@@ -1734,8 +1734,9 @@ async def artist_search_external_partial(
 @router.post("/partials/artist-import", response_model=None)
 async def artist_import_partial(
     request: fastapi.Request,
-    mbid: Annotated[str, fastapi.Form()],
-    name: Annotated[str, fastapi.Form()],
+    mbid: Annotated[str, fastapi.Form()] = "",
+    spotify_id: Annotated[str, fastapi.Form()] = "",
+    name: Annotated[str, fastapi.Form()] = "",
     disambiguation: Annotated[str, fastapi.Form()] = "",
     artist_type: Annotated[str, fastapi.Form()] = "",
     area: Annotated[str, fastapi.Form()] = "",
@@ -1750,17 +1751,35 @@ async def artist_import_partial(
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
 
     async with _get_db(request) as db:
-        stmt = sa.select(music_models.Artist).where(
-            sa.or_(
+        artist: music_models.Artist | None = None
+
+        # Check for existing artist by MBID or Spotify ID
+        dedup_conditions: list[sa.ColumnElement[bool]] = []
+        if mbid:
+            dedup_conditions.append(
                 music_models.Artist.service_links["musicbrainz"]["id"].as_string()
-                == mbid,
-                music_models.Artist.service_links["listenbrainz"].as_string() == mbid,
+                == mbid
             )
-        )
-        result = await db.execute(stmt)
-        artist = result.scalar_one_or_none()
+            dedup_conditions.append(
+                music_models.Artist.service_links["listenbrainz"].as_string() == mbid
+            )
+        if spotify_id:
+            dedup_conditions.append(
+                music_models.Artist.service_links["spotify"]["id"].as_string()
+                == spotify_id
+            )
+        if dedup_conditions:
+            result = await db.execute(
+                sa.select(music_models.Artist).where(sa.or_(*dedup_conditions))
+            )
+            artist = result.scalar_one_or_none()
 
         if artist is None:
+            links: dict[str, Any] = {}
+            if mbid:
+                links["musicbrainz"] = {"id": mbid}
+            if spotify_id:
+                links["spotify"] = {"id": spotify_id}
             artist = music_models.Artist(
                 name=name,
                 disambiguation=disambiguation or None,
@@ -1768,7 +1787,7 @@ async def artist_import_partial(
                 area=area or None,
                 begin_year=int(begin_year) if begin_year else None,
                 end_year=int(end_year) if end_year else None,
-                service_links={"musicbrainz": {"id": mbid}},
+                service_links=links,
             )
             db.add(artist)
             await db.flush()

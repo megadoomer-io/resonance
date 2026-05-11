@@ -67,10 +67,11 @@
         if (!input) return;
         var q = input.value.trim();
         if (!q) return;
-        var services = ['musicbrainz'];
+        var services = [];
         document.querySelectorAll('.svc-checkbox:checked').forEach(function(cb) {
             services.push(cb.value);
         });
+        if (services.length === 0) services = ['musicbrainz'];
         var modal = document.getElementById('external-search-modal');
         var eventId = modal ? modal.dataset.eventId || '' : '';
         var candidateId = modal ? modal.dataset.candidateId || '' : '';
