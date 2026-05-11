@@ -1,6 +1,7 @@
 """Spotify connector with OAuth and data fetching."""
 
 import urllib.parse
+from typing import Any
 
 import pydantic
 import structlog
@@ -362,3 +363,38 @@ class SpotifyConnector(base_module.BaseConnector):
             return None
         result: str = items[0]["id"]
         return result
+
+    async def search_artists(
+        self,
+        access_token: str,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search Spotify for artists by name.
+
+        Args:
+            access_token: OAuth access token.
+            query: Artist name search query.
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of dicts with ``spotify_id`` and ``name`` keys.
+        """
+        response = await self._request(
+            "GET",
+            f"{SPOTIFY_API_BASE}/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": query, "type": "artist", "limit": limit},
+            high_priority=True,
+        )
+        data = response.json()
+        results: list[dict[str, Any]] = []
+        for artist in data.get("artists", {}).get("items", []):
+            results.append(
+                {
+                    "spotify_id": artist["id"],
+                    "name": artist["name"],
+                }
+            )
+        return results
