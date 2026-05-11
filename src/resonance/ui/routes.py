@@ -1419,6 +1419,39 @@ async def artist_search_partial(
     )
 
 
+@router.get("/partials/artist-search-modal", response_model=None)
+async def artist_search_modal_partial(
+    request: fastapi.Request,
+    q: str = "",
+    event_id: uuid.UUID | None = None,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Serve the external search modal dialog."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    connected_services: list[str] = []
+    async with _get_db(request) as db:
+        stmt = sa.select(user_models.ServiceConnection.service_type).where(
+            user_models.ServiceConnection.user_id == uuid.UUID(user_id),
+            user_models.ServiceConnection.service_type
+            == types_module.ServiceType.SPOTIFY,
+        )
+        result = await db.execute(stmt)
+        if result.scalar_one_or_none() is not None:
+            connected_services.append("spotify")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/artist_search_modal.html",
+        {
+            "query": q,
+            "event_id": event_id,
+            "connected_services": connected_services,
+        },
+    )
+
+
 @router.get("/partials/artist-search-external", response_model=None)
 async def artist_search_external_partial(
     request: fastapi.Request,
@@ -1505,11 +1538,13 @@ async def artist_import_partial(
             db.add(artist)
             await db.flush()
 
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request,
         "partials/artist_search_results.html",
         {"artists": [artist], "event_id": event_id},
     )
+    response.headers["HX-Trigger"] = "artist-imported"
+    return response
 
 
 @router.get("/history", response_model=None)

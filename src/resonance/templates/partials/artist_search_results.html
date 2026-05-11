@@ -43,9 +43,12 @@
 </figure>
 <p>
     <small>
-        <a href="#" id="open-external-search" class="secondary"
-           data-query="{{ query|default('', true) }}"
-           onclick="return false;">Search external services&hellip;</a>
+        <a href="#"
+           hx-get="/partials/artist-search-modal?q={{ query | urlencode }}&event_id={{ event_id or '' }}"
+           hx-target="#modal-container"
+           hx-swap="innerHTML"
+           hx-on::after-swap="openExternalSearchModal()"
+           class="secondary">Search external services&hellip;</a>
     </small>
 </p>
 {% elif artists is defined and query and query|length >= 3 %}
@@ -73,9 +76,12 @@
 <p>
     <small>No artists found.</small><br>
     <small>
-        <a href="#" id="open-external-search" class="secondary"
-           data-query="{{ query|default('', true) }}"
-           onclick="return false;">Search external services&hellip;</a>
+        <a href="#"
+           hx-get="/partials/artist-search-modal?q={{ query | urlencode }}&event_id={{ event_id or '' }}"
+           hx-target="#modal-container"
+           hx-swap="innerHTML"
+           hx-on::after-swap="openExternalSearchModal()"
+           class="secondary">Search external services&hellip;</a>
     </small>
 </p>
 {% endif %}
