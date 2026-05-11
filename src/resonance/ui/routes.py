@@ -1326,27 +1326,54 @@ async def add_artist_to_event_ui(
                 '<small style="color: var(--pico-del-color);">Artist not found</small>'
             )
 
+        # Check for existing unmatched candidate to link
         existing = (
             await db.execute(
                 sa.select(concert_models.EventArtistCandidate).where(
                     concert_models.EventArtistCandidate.event_id == event_id,
                     concert_models.EventArtistCandidate.raw_name == artist.name,
+                    concert_models.EventArtistCandidate.status
+                    == types_module.CandidateStatus.PENDING,
                 )
             )
         ).scalar_one_or_none()
-        if existing is not None:
+
+        # Check if already confirmed as EventArtist
+        already_confirmed = (
+            await db.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == event_id,
+                    concert_models.EventArtist.artist_id == artist_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if already_confirmed is not None:
             return fastapi.responses.HTMLResponse(
-                '<small style="opacity: 0.6;">Already added</small>'
+                '<small style="opacity: 0.6;">Already on event</small>'
             )
 
-        candidate = concert_models.EventArtistCandidate(
+        if existing is not None:
+            existing.matched_artist_id = artist.id
+            existing.confidence_score = 100
+            existing.status = types_module.CandidateStatus.ACCEPTED
+            candidate = existing
+        else:
+            candidate = concert_models.EventArtistCandidate(
+                event_id=event_id,
+                raw_name=artist.name,
+                matched_artist_id=artist.id,
+                status=types_module.CandidateStatus.ACCEPTED,
+                confidence_score=100,
+            )
+            db.add(candidate)
+
+        event_artist = concert_models.EventArtist(
             event_id=event_id,
+            artist_id=artist.id,
+            position=candidate.position or 0,
             raw_name=artist.name,
-            matched_artist_id=artist.id,
-            status=types_module.CandidateStatus.PENDING,
-            confidence_score=100,
         )
-        db.add(candidate)
+        db.add(event_artist)
         await db.commit()
 
         # Reload event with candidates for refreshing the candidates section
@@ -1379,11 +1406,13 @@ async def add_artist_to_event_ui(
             for a in ma_result.scalars().all():
                 matched_artists[a.id] = a
 
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request,
         "partials/event_candidates.html",
         {"event": event, "matched_artists": matched_artists},
     )
+    response.headers["HX-Trigger"] = "artistsChanged"
+    return response
 
 
 @router.get("/partials/artist-search", response_model=None)
