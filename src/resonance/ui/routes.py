@@ -1651,6 +1651,28 @@ async def artist_search_external_partial(
                         spotify_conn.encrypted_access_token,
                         settings.token_encryption_key,
                     )
+                    if (
+                        spotify_conn.token_expires_at is not None
+                        and spotify_conn.token_expires_at
+                        <= datetime.datetime.now(datetime.UTC)
+                        and spotify_conn.encrypted_refresh_token is not None
+                    ):
+                        refresh = crypto_module.decrypt_token(
+                            spotify_conn.encrypted_refresh_token,
+                            settings.token_encryption_key,
+                        )
+                        tok_resp = await url_connector.refresh_access_token(refresh)
+                        token = tok_resp.access_token
+                        spotify_conn.encrypted_access_token = (
+                            crypto_module.encrypt_token(
+                                token, settings.token_encryption_key
+                            )
+                        )
+                        if tok_resp.expires_in is not None:
+                            spotify_conn.token_expires_at = datetime.datetime.now(
+                                datetime.UTC
+                            ) + datetime.timedelta(seconds=tok_resp.expires_in)
+                        await db.commit()
                     artist_data = await url_connector.get_artist_by_id(token, url_id)
                     if artist_data:
                         results.append(
