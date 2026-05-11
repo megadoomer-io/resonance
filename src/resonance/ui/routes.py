@@ -28,6 +28,7 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
+import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 import resonance.ui.filters as filters_module
 import resonance.ui.view_filters as view_filters_module
@@ -1545,6 +1546,90 @@ async def artist_import_partial(
     )
     response.headers["HX-Trigger"] = "artist-imported"
     return response
+
+
+_ENRICHMENT_STALENESS_SECONDS = 180
+
+
+@router.get("/partials/artist-enrich/{artist_id}", response_model=None)
+async def artist_enrich_partial(
+    request: fastapi.Request,
+    artist_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Lazily enrich an artist with MusicBrainz metadata."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
+        )
+        artist = result.scalar_one_or_none()
+        if artist is None:
+            return fastapi.responses.HTMLResponse("")
+
+        mbid = artist_utils.get_mbid(artist.service_links)
+
+        # Already enriched or no MBID — return as-is
+        if not mbid or artist.disambiguation is not None:
+            return templates.TemplateResponse(
+                request,
+                "partials/artist_search_results.html",
+                {"artists": [artist], "event_id": None},
+            )
+
+        # Check enrichment_requested_at timestamp
+        mb_data = (artist.service_links or {}).get("musicbrainz", {})
+        requested_at_str = (
+            mb_data.get("enrichment_requested_at")
+            if isinstance(mb_data, dict)
+            else None
+        )
+        if requested_at_str:
+            requested_at = datetime.datetime.fromisoformat(requested_at_str)
+            elapsed = (
+                datetime.datetime.now(datetime.UTC) - requested_at
+            ).total_seconds()
+            if elapsed < _ENRICHMENT_STALENESS_SECONDS:
+                # Recent request, skip
+                return templates.TemplateResponse(
+                    request,
+                    "partials/artist_search_results.html",
+                    {"artists": [artist], "event_id": None},
+                )
+
+        # Mark enrichment requested
+        links = dict(artist.service_links or {})
+        mb: dict[str, Any] = (
+            dict(links.get("musicbrainz", {}))
+            if isinstance(links.get("musicbrainz"), dict)
+            else {}
+        )
+        mb["enrichment_requested_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+        if mbid and "id" not in mb:
+            mb["id"] = mbid
+        links["musicbrainz"] = mb
+        artist.service_links = links
+        await db.flush()
+
+        # Fetch from MusicBrainz
+        registry = request.app.state.connector_registry
+        lb = registry.get_base_connector(types_module.ServiceType.LISTENBRAINZ)
+        if lb:
+            mb_artist = await lb.get_artist_by_mbid(mbid)
+            if mb_artist:
+                artist.disambiguation = mb_artist.get("disambiguation") or None
+                artist.artist_type = mb_artist.get("artist_type") or None
+                artist.area = mb_artist.get("area") or None
+                artist.begin_year = mb_artist.get("begin_year")
+                artist.end_year = mb_artist.get("end_year")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/artist_search_results.html",
+        {"artists": [artist], "event_id": None},
+    )
 
 
 @router.get("/history", response_model=None)
