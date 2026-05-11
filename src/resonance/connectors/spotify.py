@@ -63,6 +63,25 @@ class SpotifyConnector(base_module.BaseConnector):
     )
 
     @staticmethod
+    def parse_url(url: str) -> str | None:
+        """Extract a Spotify artist ID from an open.spotify.com URL.
+
+        Args:
+            url: An absolute URL to inspect.
+
+        Returns:
+            The Spotify artist ID if the URL is a recognized artist page,
+            or ``None`` otherwise.
+        """
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname != "open.spotify.com":
+            return None
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "artist":
+            return parts[1]
+        return None
+
+    @staticmethod
     def connection_config() -> base_module.ConnectionConfig:
         """Return the connection configuration for Spotify."""
         return base_module.ConnectionConfig(

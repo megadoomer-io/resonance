@@ -40,6 +40,32 @@ class LastFmConnector(base_module.BaseConnector):
     )
 
     @staticmethod
+    def parse_url(url: str) -> str | None:
+        """Extract an artist name from a last.fm/music/<artist> URL.
+
+        Handles both ``+`` and ``%20`` encoded spaces, and other
+        percent-encoded characters.
+
+        Args:
+            url: An absolute URL to inspect.
+
+        Returns:
+            The decoded artist name if the URL is a recognized artist
+            page, or ``None`` otherwise.
+        """
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or ""
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "last.fm":
+            return None
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "music":
+            # Last.fm encodes spaces as '+' in the path
+            return urllib.parse.unquote_plus(parts[1])
+        return None
+
+    @staticmethod
     def connection_config() -> base_module.ConnectionConfig:
         """Return the connection configuration for Last.fm."""
         return base_module.ConnectionConfig(

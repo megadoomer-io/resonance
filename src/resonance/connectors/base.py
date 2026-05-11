@@ -131,6 +131,23 @@ class BaseConnector(abc.ABC):
         return capability in self.capabilities
 
     @staticmethod
+    def parse_url(url: str) -> str | None:
+        """Extract an artist identifier from a service URL.
+
+        Subclasses override this to recognize URLs belonging to their
+        service and return the extracted artist identifier.  The default
+        implementation returns ``None`` (no match).
+
+        Args:
+            url: An absolute URL to inspect.
+
+        Returns:
+            The artist identifier string if the URL belongs to this
+            service, or ``None`` otherwise.
+        """
+        return None
+
+    @staticmethod
     @abc.abstractmethod
     def connection_config() -> ConnectionConfig:
         """Return the connection configuration for this connector type."""

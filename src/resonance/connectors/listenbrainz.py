@@ -40,6 +40,31 @@ class ListenBrainzConnector(base_module.BaseConnector):
     )
 
     _MUSICBRAINZ_API = "https://musicbrainz.org/ws/2"
+    _RECOGNIZED_HOSTS = frozenset({"musicbrainz.org", "listenbrainz.org"})
+
+    @staticmethod
+    def parse_url(url: str) -> str | None:
+        """Extract a MusicBrainz artist UUID from a service URL.
+
+        Recognizes musicbrainz.org and listenbrainz.org artist pages.
+
+        Args:
+            url: An absolute URL to inspect.
+
+        Returns:
+            The artist UUID if the URL is a recognized artist page,
+            or ``None`` otherwise.
+        """
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or ""
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in ListenBrainzConnector._RECOGNIZED_HOSTS:
+            return None
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "artist":
+            return parts[1]
+        return None
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig:
