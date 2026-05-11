@@ -23,7 +23,9 @@
                 </td>
                 <td style="vertical-align: top; white-space: nowrap;">
                     {% if artist.already_imported %}
-                    {% if event_id %}
+                    {% if artist.already_on_event %}
+                    <small class="secondary">Already on event</small>
+                    {% elif event_id %}
                     <form hx-post="/events/{{ event_id }}/add-artist"
                           hx-target="#event-candidates"
                           hx-swap="innerHTML"

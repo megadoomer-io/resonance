@@ -1615,6 +1615,15 @@ async def artist_search_external_partial(
                 existing = result.scalar_one_or_none()
                 r["already_imported"] = existing is not None
                 r["local_artist_id"] = str(existing.id) if existing else None
+                r["already_on_event"] = False
+                if existing is not None and event_id is not None:
+                    on_event = await db.execute(
+                        sa.select(concert_models.EventArtist.id).where(
+                            concert_models.EventArtist.event_id == event_id,
+                            concert_models.EventArtist.artist_id == existing.id,
+                        )
+                    )
+                    r["already_on_event"] = on_event.scalar_one_or_none() is not None
             results = mb_results
 
     return templates.TemplateResponse(
