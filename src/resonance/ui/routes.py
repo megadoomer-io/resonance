@@ -1326,18 +1326,6 @@ async def add_artist_to_event_ui(
                 '<small style="color: var(--pico-del-color);">Artist not found</small>'
             )
 
-        # Check for existing unmatched candidate to link
-        existing = (
-            await db.execute(
-                sa.select(concert_models.EventArtistCandidate).where(
-                    concert_models.EventArtistCandidate.event_id == event_id,
-                    concert_models.EventArtistCandidate.raw_name == artist.name,
-                    concert_models.EventArtistCandidate.status
-                    == types_module.CandidateStatus.PENDING,
-                )
-            )
-        ).scalar_one_or_none()
-
         # Check if already confirmed as EventArtist
         already_confirmed = (
             await db.execute(
@@ -1351,6 +1339,16 @@ async def add_artist_to_event_ui(
             return fastapi.responses.HTMLResponse(
                 '<small style="opacity: 0.6;">Already on event</small>'
             )
+
+        # Check for any existing candidate with this raw_name
+        existing = (
+            await db.execute(
+                sa.select(concert_models.EventArtistCandidate).where(
+                    concert_models.EventArtistCandidate.event_id == event_id,
+                    concert_models.EventArtistCandidate.raw_name == artist.name,
+                )
+            )
+        ).scalar_one_or_none()
 
         if existing is not None:
             existing.matched_artist_id = artist.id
