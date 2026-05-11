@@ -264,6 +264,30 @@ class BaseConnector(abc.ABC):
                     window_seconds=self._budget.window_seconds,
                 )
 
+            if response.status_code >= 500:
+                transient_attempt += 1
+                if transient_attempt > effective_max_retries:
+                    logger.error(
+                        "server_error_retries_exhausted",
+                        method=method,
+                        url=url,
+                        status_code=response.status_code,
+                        attempts=transient_attempt,
+                    )
+                    response.raise_for_status()
+                backoff = self._TRANSIENT_BACKOFF_BASE**transient_attempt
+                logger.warning(
+                    "server_error_retry",
+                    method=method,
+                    url=url,
+                    status_code=response.status_code,
+                    attempt=transient_attempt,
+                    max_attempts=effective_max_retries,
+                    backoff_seconds=round(backoff, 1),
+                )
+                await asyncio.sleep(backoff)
+                continue
+
             if response.status_code != 429:
                 response.raise_for_status()
                 return response

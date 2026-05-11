@@ -474,7 +474,7 @@ async def _skip_gap(
                 count=1,
                 max_retries=1,
             )
-        except httpx.RemoteProtocolError, httpx.ReadTimeout:
+        except httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.HTTPStatusError:
             logger.warning(
                 "gap_skip_probe_failed",
                 probe_max=probe_max,
