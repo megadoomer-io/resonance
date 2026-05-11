@@ -1,4 +1,7 @@
 {% if external_artists %}
+<div id="external-results-meta"
+     {% if detected_service %}data-detected-service="{{ detected_service }}"{% endif %}>
+</div>
 <hr>
 <small class="secondary" style="display: block; margin-bottom: 0.5em;">External results</small>
 <figure>

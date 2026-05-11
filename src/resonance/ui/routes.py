@@ -1618,6 +1618,7 @@ async def artist_search_external_partial(
     query = q.strip()
 
     results: list[dict[str, Any]] = []
+    detected_service: str | None = None
 
     # Check if query is a recognized service URL
     url_connector = None
@@ -1631,7 +1632,9 @@ async def artist_search_external_partial(
                 break
 
     if url_connector is not None and url_id is not None:
+        detected_service = url_connector.service_type.value
         if isinstance(url_connector, listenbrainz_module.ListenBrainzConnector):
+            detected_service = "musicbrainz"
             mb_artist = await url_connector.get_artist_by_mbid(url_id)
             if mb_artist:
                 results = [mb_artist]
@@ -1727,6 +1730,7 @@ async def artist_search_external_partial(
             "external_artists": results,
             "event_id": event_id,
             "candidate_id": candidate_id,
+            "detected_service": detected_service,
         },
     )
 
