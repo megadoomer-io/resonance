@@ -3,6 +3,7 @@
 import urllib.parse
 from typing import Any
 
+import httpx
 import pydantic
 import structlog
 
@@ -363,6 +364,24 @@ class SpotifyConnector(base_module.BaseConnector):
             return None
         result: str = items[0]["id"]
         return result
+
+    async def get_artist_by_id(
+        self,
+        access_token: str,
+        artist_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch a single artist from Spotify by ID."""
+        try:
+            response = await self._request(
+                "GET",
+                f"{SPOTIFY_API_BASE}/artists/{artist_id}",
+                headers={"Authorization": f"Bearer {access_token}"},
+                high_priority=True,
+            )
+        except httpx.HTTPStatusError:
+            return None
+        data: dict[str, Any] = response.json()
+        return {"spotify_id": data["id"], "name": data["name"]}
 
     async def search_artists(
         self,

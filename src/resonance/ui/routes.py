@@ -17,6 +17,9 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
 import resonance.concerts.sync as concert_sync
+import resonance.connectors.listenbrainz as listenbrainz_module
+import resonance.connectors.spotify as spotify_module
+import resonance.crypto as crypto_module
 import resonance.dedup as dedup_module
 import resonance.dependencies as deps_module
 import resonance.merge as merge_module
@@ -1602,6 +1605,7 @@ async def artist_search_modal_partial(
 async def artist_search_external_partial(
     request: fastapi.Request,
     q: str = "",
+    url: str = "",
     event_id: uuid.UUID | None = None,
     candidate_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
@@ -1610,15 +1614,58 @@ async def artist_search_external_partial(
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
 
-    if len(q.strip()) < 2:
-        return fastapi.responses.HTMLResponse("")
-
     registry = request.app.state.connector_registry
     lb = registry.get_base_connector(types_module.ServiceType.LISTENBRAINZ)
 
     results: list[dict[str, Any]] = []
-    if lb:
+
+    # URL-based lookup: try each connector's parse_url
+    if url.strip():
+        for connector in registry.all_base_connectors():
+            parsed_id = connector.parse_url(url.strip())
+            if parsed_id is None:
+                continue
+            if isinstance(connector, listenbrainz_module.ListenBrainzConnector):
+                mb_artist = await connector.get_artist_by_mbid(parsed_id)
+                if mb_artist:
+                    results = [mb_artist]
+            elif isinstance(connector, spotify_module.SpotifyConnector):
+                async with _get_db(request) as db:
+                    conn_result = await db.execute(
+                        sa.select(user_models.ServiceConnection).where(
+                            user_models.ServiceConnection.user_id == uuid.UUID(user_id),
+                            user_models.ServiceConnection.service_type
+                            == types_module.ServiceType.SPOTIFY,
+                        )
+                    )
+                    spotify_conn = conn_result.scalar_one_or_none()
+                    if spotify_conn and spotify_conn.encrypted_access_token:
+                        settings = request.app.state.settings
+                        token = crypto_module.decrypt_token(
+                            spotify_conn.encrypted_access_token,
+                            settings.token_encryption_key,
+                        )
+                        artist_data = await connector.get_artist_by_id(token, parsed_id)
+                        if artist_data:
+                            results.append(
+                                {
+                                    "mbid": "",
+                                    "name": artist_data["name"],
+                                    "disambiguation": "",
+                                    "artist_type": "",
+                                    "area": "",
+                                    "begin_year": None,
+                                    "end_year": None,
+                                    "source": "spotify",
+                                    "spotify_id": artist_data["spotify_id"],
+                                }
+                            )
+            break
+    elif len(q.strip()) < 2:
+        return fastapi.responses.HTMLResponse("")
+    elif lb:
         mb_results = await lb.search_artists(q.strip(), limit=10)
+        results = mb_results
         async with _get_db(request) as db:
             for r in mb_results:
                 stmt = sa.select(music_models.Artist).where(

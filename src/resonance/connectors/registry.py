@@ -80,3 +80,13 @@ class ConnectorRegistry:
     def all(self) -> list[Connectable]:
         """Return all registered connectors."""
         return list(self._connectors.values())
+
+    def all_base_connectors(self) -> list[base_module.BaseConnector]:
+        """Return all registered full BaseConnector instances."""
+        import resonance.connectors.base as base_module_rt
+
+        return [
+            c
+            for c in self._connectors.values()
+            if isinstance(c, base_module_rt.BaseConnector)
+        ]
