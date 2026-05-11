@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 import arq
 import arq.connections as arq_connections
+import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
@@ -1063,6 +1064,26 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 # Playlist export to external services
 # ---------------------------------------------------------------------------
 
+_HTTP_ERROR_MESSAGES: dict[int, str] = {
+    401: "Authorization expired — please reconnect your {service} account.",
+    403: (
+        "Access denied by {service}"
+        " — please reconnect your account or check permissions."
+    ),
+    404: "Resource not found on {service}.",
+    429: "Rate limited by {service} — please try again later.",
+}
+
+
+def _friendly_http_error(exc: httpx.HTTPStatusError, service: str) -> str:
+    status = exc.response.status_code
+    template = _HTTP_ERROR_MESSAGES.get(status)
+    if template:
+        return template.format(service=service)
+    if status >= 500:
+        return f"{service} returned a server error ({status}) — please try again later."
+    return f"{service} returned an error ({status})."
+
 
 async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
     """Export a playlist to an external service (e.g. Spotify).
@@ -1278,12 +1299,22 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 skipped=len(skipped_tracks),
             )
 
+        except httpx.HTTPStatusError as exc:
+            log.exception("export_playlist_failed")
+            user_msg = _friendly_http_error(exc, "Spotify")
+            task_reload = await _load_task(session, task_id)
+            if task_reload is not None:
+                await lifecycle_module.fail_task(session, task_reload, user_msg)
+                await session.commit()
         except Exception:
             log.exception("export_playlist_failed")
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
-                    session, task_reload, traceback.format_exc()
+                    session,
+                    task_reload,
+                    "An unexpected error occurred during export. "
+                    "Check the worker logs for details.",
                 )
                 await session.commit()
 
