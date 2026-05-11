@@ -29,6 +29,9 @@
                           hx-swap="innerHTML"
                           style="margin: 0;">
                         <input type="hidden" name="artist_id" value="{{ artist.local_artist_id }}">
+                        {% if candidate_id %}
+                        <input type="hidden" name="candidate_id" value="{{ candidate_id }}">
+                        {% endif %}
                         <button type="submit" class="outline"
                                 style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
                     </form>

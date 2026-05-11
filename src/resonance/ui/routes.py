@@ -1307,6 +1307,7 @@ async def add_artist_to_event_ui(
     request: fastapi.Request,
     event_id: uuid.UUID,
     artist_id: Annotated[uuid.UUID, fastapi.Form()],
+    candidate_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
 ) -> fastapi.responses.HTMLResponse:
     """Create a candidate from artist search and return feedback partial."""
     user_id = request.state.session.get("user_id")
@@ -1335,10 +1336,59 @@ async def add_artist_to_event_ui(
                 )
             )
         ).scalar_one_or_none()
+        # Resolve the specific candidate if provided
+        if candidate_id is not None:
+            target_candidate = (
+                await db.execute(
+                    sa.select(concert_models.EventArtistCandidate).where(
+                        concert_models.EventArtistCandidate.id == candidate_id,
+                        concert_models.EventArtistCandidate.event_id == event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target_candidate is not None:
+                target_candidate.matched_artist_id = artist.id
+                target_candidate.confidence_score = 100
+                target_candidate.status = types_module.CandidateStatus.ACCEPTED
+
         if already_confirmed is not None:
-            return fastapi.responses.HTMLResponse(
-                '<small style="opacity: 0.6;">Already on event</small>'
+            if candidate_id is not None and target_candidate is not None:
+                await db.commit()
+            # Reload and return updated candidates
+            event = (
+                (
+                    await db.execute(
+                        sa.select(concert_models.Event)
+                        .where(concert_models.Event.id == event_id)
+                        .options(
+                            sa_orm.joinedload(concert_models.Event.artist_candidates),
+                        )
+                    )
+                )
+                .unique()
+                .scalar_one()
             )
+            matched_artist_ids = [
+                c.matched_artist_id
+                for c in event.artist_candidates
+                if c.matched_artist_id is not None
+            ]
+            early_matched: dict[uuid.UUID, music_models.Artist] = {}
+            if matched_artist_ids:
+                ma_result = await db.execute(
+                    sa.select(music_models.Artist).where(
+                        music_models.Artist.id.in_(matched_artist_ids)
+                    )
+                )
+                for a in ma_result.scalars().all():
+                    early_matched[a.id] = a
+            resp = templates.TemplateResponse(
+                request,
+                "partials/event_candidates.html",
+                {"event": event, "matched_artists": early_matched},
+            )
+            resp.headers["HX-Trigger"] = "artistsChanged"
+            return resp
 
         # Check for any existing candidate with this raw_name
         existing = (
