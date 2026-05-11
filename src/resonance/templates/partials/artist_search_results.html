@@ -3,44 +3,7 @@
     <table>
         <tbody>
             {% for artist in artists %}
-            {% set _sl = artist.service_links or {} %}
-            {% set _mb = _sl.get("musicbrainz", {}) %}
-            {% set _has_mbid = (_mb is mapping and _mb.get("id")) or (_sl.get("listenbrainz") is string and _sl.get("listenbrainz")) %}
-            {% set _needs_enrich = _has_mbid and not artist.disambiguation %}
-            <tr{% if _needs_enrich %} hx-get="/partials/artist-enrich/{{ artist.id }}" hx-trigger="load" hx-swap="outerHTML"{% endif %}>
-                <td>
-                    <a href="/artists/{{ artist.id }}"><strong>{{ artist.name }}</strong></a>
-                    {% if artist.disambiguation %}
-                    <br><small class="secondary">{{ artist.disambiguation }}</small>
-                    {% endif %}
-                    {% set meta_parts = [] %}
-                    {% if artist.artist_type %}{% set _ = meta_parts.append(artist.artist_type) %}{% endif %}
-                    {% if artist.area %}{% set _ = meta_parts.append(artist.area) %}{% endif %}
-                    {% if artist.begin_year %}
-                        {% if artist.end_year %}
-                            {% set _ = meta_parts.append(artist.begin_year|string ~ "–" ~ artist.end_year|string) %}
-                        {% else %}
-                            {% set _ = meta_parts.append(artist.begin_year|string ~ "–present") %}
-                        {% endif %}
-                    {% endif %}
-                    {% if meta_parts %}
-                    <br><small class="secondary">{{ meta_parts|join(" · ") }}</small>
-                    {% endif %}
-                </td>
-                {% if event_id %}
-                <td style="vertical-align: top;">
-                    <form hx-post="/events/{{ event_id }}/add-artist"
-                          hx-target="#event-candidates"
-                          hx-swap="innerHTML"
-                          style="margin: 0;">
-                        <input type="hidden" name="artist_id" value="{{ artist.id }}">
-                        <button type="submit"
-                                class="outline"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
-                    </form>
-                </td>
-                {% endif %}
-            </tr>
+            {% include "partials/artist_row.html" %}
             {% endfor %}
         </tbody>
     </table>

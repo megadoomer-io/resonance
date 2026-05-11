@@ -1541,8 +1541,8 @@ async def artist_import_partial(
 
     response = templates.TemplateResponse(
         request,
-        "partials/artist_search_results.html",
-        {"artists": [artist], "event_id": event_id},
+        "partials/artist_row.html",
+        {"artist": artist, "event_id": event_id},
     )
     response.headers["HX-Trigger"] = "artist-imported"
     return response
@@ -1575,8 +1575,8 @@ async def artist_enrich_partial(
         if not mbid or artist.disambiguation is not None:
             return templates.TemplateResponse(
                 request,
-                "partials/artist_search_results.html",
-                {"artists": [artist], "event_id": None},
+                "partials/artist_row.html",
+                {"artist": artist, "event_id": None},
             )
 
         # Check enrichment_requested_at timestamp
@@ -1595,8 +1595,8 @@ async def artist_enrich_partial(
                 # Recent request, skip
                 return templates.TemplateResponse(
                     request,
-                    "partials/artist_search_results.html",
-                    {"artists": [artist], "event_id": None},
+                    "partials/artist_row.html",
+                    {"artist": artist, "event_id": None},
                 )
 
         # Mark enrichment requested
@@ -1628,8 +1628,8 @@ async def artist_enrich_partial(
 
     return templates.TemplateResponse(
         request,
-        "partials/artist_search_results.html",
-        {"artists": [artist], "event_id": None},
+        "partials/artist_row.html",
+        {"artist": artist, "event_id": None},
     )
 
 
