@@ -1653,12 +1653,14 @@ async def artist_enrich_partial(
         if lb:
             mb_artist = await lb.get_artist_by_mbid(mbid)
             if mb_artist:
-                artist.disambiguation = mb_artist.get("disambiguation") or None
+                artist.disambiguation = mb_artist.get("disambiguation") or ""
                 artist.artist_type = mb_artist.get("artist_type") or None
                 artist.area = mb_artist.get("area") or None
                 artist.begin_year = mb_artist.get("begin_year")
                 artist.end_year = mb_artist.get("end_year")
-                await db.commit()
+            else:
+                artist.disambiguation = ""
+            await db.commit()
 
     return templates.TemplateResponse(
         request,
