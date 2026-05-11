@@ -2338,6 +2338,7 @@ async def export_status_partial(
             elif task.status == types_module.SyncStatus.FAILED:
                 task_info["error"] = task.error_message or "Unknown error"
                 any_failed = True
+                all_completed = False
             else:
                 all_completed = False
 
