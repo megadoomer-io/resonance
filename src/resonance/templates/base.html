@@ -48,5 +48,59 @@
         {% block content %}{% endblock %}
     </main>
     <div id="modal-container"></div>
+    <script>
+    function openExternalSearchModal(prefillQuery) {
+        var modal = document.getElementById('external-search-modal');
+        if (!modal) return;
+        var input = document.getElementById('external-search-input');
+        if (prefillQuery && input) input.value = prefillQuery;
+        modal.showModal();
+        if (input) { input.focus(); input.select(); }
+    }
+
+    function doExternalSearch() {
+        var input = document.getElementById('external-search-input');
+        if (!input) return;
+        var q = input.value.trim();
+        if (!q) return;
+        var services = ['musicbrainz'];
+        document.querySelectorAll('.svc-checkbox:checked').forEach(function(cb) {
+            services.push(cb.value);
+        });
+        var modal = document.getElementById('external-search-modal');
+        var eventId = modal ? modal.dataset.eventId || '' : '';
+        var candidateId = modal ? modal.dataset.candidateId || '' : '';
+        var params = '';
+        if (q.startsWith('http://') || q.startsWith('https://')) {
+            params = 'url=' + encodeURIComponent(q);
+        } else {
+            params = 'q=' + encodeURIComponent(q) + '&services=' + services.join(',');
+        }
+        if (eventId) params += '&event_id=' + eventId;
+        if (candidateId) params += '&candidate_id=' + candidateId;
+        htmx.ajax('GET', '/partials/artist-search-external?' + params, {
+            target: '#modal-search-results',
+            swap: 'innerHTML'
+        });
+    }
+
+    document.body.addEventListener('htmx:afterSwap', function(e) {
+        if (e.detail.target && e.detail.target.id === 'modal-container') {
+            openExternalSearchModal();
+        }
+    });
+
+    document.body.addEventListener('artist-imported', function() {
+        var modal = document.getElementById('external-search-modal');
+        if (modal && modal.open) modal.close();
+    });
+
+    document.body.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && e.target && e.target.id === 'external-search-input') {
+            e.preventDefault();
+            doExternalSearch();
+        }
+    });
+    </script>
 </body>
 </html>

@@ -14,31 +14,17 @@
            hx-get="/partials/artist-search-modal?q={{ query | urlencode }}&event_id={{ event_id or '' }}"
            hx-target="#modal-container"
            hx-swap="innerHTML"
-           hx-on::after-swap="openExternalSearchModal()"
            class="secondary">Search external services&hellip;</a>
     </small>
 </p>
 {% elif artists is defined and query and query|length >= 3 %}
 <p><small>No local artists found.</small></p>
-<div id="external-search-results">
+<div id="external-search-results"
+     hx-get="/partials/artist-search-external?q={{ query | urlencode }}&event_id={{ event_id or '' }}"
+     hx-trigger="load delay:2s"
+     hx-swap="innerHTML">
     <p aria-busy="true"><small>Searching externally...</small></p>
 </div>
-<script>
-(function() {
-    var timer = setTimeout(function() {
-        htmx.ajax('GET', '/partials/artist-search-external?q={{ query | urlencode }}&event_id={{ event_id or "" }}', {
-            target: '#external-search-results',
-            swap: 'innerHTML'
-        });
-    }, 2000);
-    document.addEventListener('htmx:beforeRequest', function handler(e) {
-        if (e.detail.elt && e.detail.elt.name === 'q') {
-            clearTimeout(timer);
-            document.removeEventListener('htmx:beforeRequest', handler);
-        }
-    });
-})();
-</script>
 {% elif artists is defined %}
 <p>
     <small>No artists found.</small><br>
@@ -47,7 +33,6 @@
            hx-get="/partials/artist-search-modal?q={{ query | urlencode }}&event_id={{ event_id or '' }}"
            hx-target="#modal-container"
            hx-swap="innerHTML"
-           hx-on::after-swap="openExternalSearchModal()"
            class="secondary">Search external services&hellip;</a>
     </small>
 </p>

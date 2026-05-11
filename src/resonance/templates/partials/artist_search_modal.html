@@ -1,4 +1,6 @@
-<dialog id="external-search-modal">
+<dialog id="external-search-modal"
+        data-event-id="{{ event_id or '' }}"
+        data-candidate-id="{{ candidate_id or '' }}">
     <article>
         <header>
             <button aria-label="Close" rel="prev" onclick="document.getElementById('external-search-modal').close()"></button>
@@ -35,54 +37,3 @@
         <div id="modal-search-results"></div>
     </article>
 </dialog>
-
-<script>
-function openExternalSearchModal(prefillQuery) {
-    var modal = document.getElementById('external-search-modal');
-    var input = document.getElementById('external-search-input');
-    if (prefillQuery) input.value = prefillQuery;
-    modal.showModal();
-    input.focus();
-    input.select();
-}
-
-document.getElementById('external-search-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        doExternalSearch();
-    }
-});
-
-function doExternalSearch() {
-    var q = document.getElementById('external-search-input').value.trim();
-    if (!q) return;
-    var services = ['musicbrainz'];
-    document.querySelectorAll('.svc-checkbox:checked').forEach(function(cb) {
-        services.push(cb.value);
-    });
-    var eventId = '{{ event_id or "" }}';
-    var candidateId = '{{ candidate_id or "" }}';
-    var params = '';
-
-    // Check if input looks like a URL
-    if (q.startsWith('http://') || q.startsWith('https://')) {
-        params = 'url=' + encodeURIComponent(q);
-    } else {
-        params = 'q=' + encodeURIComponent(q) + '&services=' + services.join(',');
-    }
-    if (eventId) params += '&event_id=' + eventId;
-    if (candidateId) params += '&candidate_id=' + candidateId;
-
-    htmx.ajax('GET', '/partials/artist-search-external?' + params, {
-        target: '#modal-search-results',
-        swap: 'innerHTML'
-    });
-}
-
-document.body.addEventListener('artist-imported', function() {
-    var modal = document.getElementById('external-search-modal');
-    if (modal && modal.open) {
-        modal.close();
-    }
-});
-</script>
