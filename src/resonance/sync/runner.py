@@ -129,16 +129,19 @@ async def _upsert_artist(
 
     # 2. If this is a ListenBrainz artist with an MBID, check if any
     #    existing artist already has this MBID stored under another key
+    #    (flat musicbrainz or nested musicbrainz.id — flat listenbrainz
+    #    is already checked in step 1)
     if (
         artist_data.service == types_module.ServiceType.LISTENBRAINZ
         and artist_data.external_id
     ):
-        for check_key in ["listenbrainz", "musicbrainz"]:
-            if check_key == service_key:
-                continue  # already checked above
+        cross_checks = [
+            models_module.Artist.service_links["musicbrainz"].as_string(),
+            models_module.Artist.service_links["musicbrainz"]["id"].as_string(),
+        ]
+        for check_expr in cross_checks:
             stmt = sa.select(models_module.Artist).where(
-                models_module.Artist.service_links[check_key].as_string()
-                == artist_data.external_id
+                check_expr == artist_data.external_id
             )
             result = await session.execute(stmt)
             existing = result.scalar_one_or_none()
@@ -242,16 +245,19 @@ async def _upsert_track(
             return False
 
     # 2. MBID cross-service check for ListenBrainz
+    #    (flat musicbrainz or nested musicbrainz.id — flat listenbrainz
+    #    is already checked in step 1)
     if (
         track_data.service == types_module.ServiceType.LISTENBRAINZ
         and track_data.external_id
     ):
-        for check_key in ["listenbrainz", "musicbrainz"]:
-            if check_key == service_key:
-                continue
+        cross_checks = [
+            models_module.Track.service_links["musicbrainz"].as_string(),
+            models_module.Track.service_links["musicbrainz"]["id"].as_string(),
+        ]
+        for check_expr in cross_checks:
             stmt = sa.select(models_module.Track).where(
-                models_module.Track.service_links[check_key].as_string()
-                == track_data.external_id
+                check_expr == track_data.external_id
             )
             result = await session.execute(stmt)
             existing = result.scalar_one_or_none()

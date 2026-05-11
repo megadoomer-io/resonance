@@ -20,6 +20,7 @@ import sqlalchemy as sa
 import structlog
 
 import resonance.models as models_module
+import resonance.services.artist_utils as artist_utils
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,13 +59,9 @@ def pick_canonical(
     a_links = a.service_links or {}
     b_links = b.service_links or {}
 
-    # 1. MBID holder wins (any non-empty value in service_links)
-    a_has_mbid = any(
-        k in ("musicbrainz", "listenbrainz") and v for k, v in a_links.items()
-    )
-    b_has_mbid = any(
-        k in ("musicbrainz", "listenbrainz") and v for k, v in b_links.items()
-    )
+    # 1. MBID holder wins (canonical or legacy location)
+    a_has_mbid = artist_utils.has_mbid(a_links)
+    b_has_mbid = artist_utils.has_mbid(b_links)
     if a_has_mbid and not b_has_mbid:
         return a, b
     if b_has_mbid and not a_has_mbid:
@@ -94,12 +91,8 @@ def pick_canonical_track(
     a_links = a.service_links or {}
     b_links = b.service_links or {}
 
-    a_has_mbid = any(
-        k in ("musicbrainz", "listenbrainz") and v for k, v in a_links.items()
-    )
-    b_has_mbid = any(
-        k in ("musicbrainz", "listenbrainz") and v for k, v in b_links.items()
-    )
+    a_has_mbid = artist_utils.has_mbid(a_links)
+    b_has_mbid = artist_utils.has_mbid(b_links)
     if a_has_mbid and not b_has_mbid:
         return a, b
     if b_has_mbid and not a_has_mbid:

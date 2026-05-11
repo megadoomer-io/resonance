@@ -9,6 +9,7 @@ import structlog
 import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.connectors.ratelimit as ratelimit_module
+import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -199,7 +200,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
         Returns:
             List of discovered tracks with popularity scores.
         """
-        mbid = (service_links or {}).get("listenbrainz")
+        mbid = artist_utils.get_mbid(service_links)
 
         if not mbid:
             # Search MusicBrainz by name

@@ -51,7 +51,7 @@ class TestMBIDArtistMatching:
         existing_artist.service_links = {"musicbrainz": "mbid-123"}
 
         # 1. service_links["listenbrainz"] -> None (step 1)
-        # 2. service_links["musicbrainz"] -> existing (step 2, skips "listenbrainz")
+        # 2. service_links["musicbrainz"] -> existing (cross-check flat)
         no_result = MagicMock()
         no_result.scalar_one_or_none.return_value = None
         match_result = MagicMock()
@@ -81,14 +81,16 @@ class TestMBIDArtistMatching:
 
         # Queries:
         # 1. service_links["listenbrainz"] -> None (step 1)
-        # 2. service_links["musicbrainz"] -> None (step 2, skips LB key)
-        # 3. name match -> existing (step 3)
+        # 2. service_links["musicbrainz"] -> None (cross-check flat)
+        # 3. service_links["musicbrainz"]["id"] -> None (cross-check nested)
+        # 4. name match -> existing (step 3)
         no_result = MagicMock()
         no_result.scalar_one_or_none.return_value = None
         match_result = MagicMock()
         match_result.scalar_one_or_none.return_value = existing_artist
 
         session.execute.side_effect = [
+            no_result,
             no_result,
             no_result,
             match_result,
@@ -142,7 +144,11 @@ class TestMBIDArtistMatching:
         no_result = MagicMock()
         no_result.scalar_one_or_none.return_value = None
 
-        # All lookups return None: service_links, MBID checks, name
+        # All lookups return None:
+        # 1. service_links["listenbrainz"] (step 1)
+        # 2. service_links["musicbrainz"] (cross-check flat)
+        # 3. service_links["musicbrainz"]["id"] (cross-check nested)
+        # 4. name match (step 3)
         session.execute.side_effect = [
             no_result,
             no_result,
