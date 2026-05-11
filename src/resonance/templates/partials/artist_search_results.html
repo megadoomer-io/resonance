@@ -4,9 +4,27 @@
         <tbody>
             {% for artist in artists %}
             <tr>
-                <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
-                {% if event_id %}
                 <td>
+                    <a href="/artists/{{ artist.id }}"><strong>{{ artist.name }}</strong></a>
+                    {% if artist.disambiguation %}
+                    <br><small class="secondary">{{ artist.disambiguation }}</small>
+                    {% endif %}
+                    {% set meta_parts = [] %}
+                    {% if artist.artist_type %}{% set _ = meta_parts.append(artist.artist_type) %}{% endif %}
+                    {% if artist.area %}{% set _ = meta_parts.append(artist.area) %}{% endif %}
+                    {% if artist.begin_year %}
+                        {% if artist.end_year %}
+                            {% set _ = meta_parts.append(artist.begin_year|string ~ "–" ~ artist.end_year|string) %}
+                        {% else %}
+                            {% set _ = meta_parts.append(artist.begin_year|string ~ "–present") %}
+                        {% endif %}
+                    {% endif %}
+                    {% if meta_parts %}
+                    <br><small class="secondary">{{ meta_parts|join(" · ") }}</small>
+                    {% endif %}
+                </td>
+                {% if event_id %}
+                <td style="vertical-align: top;">
                     <form hx-post="/events/{{ event_id }}/add-artist"
                           hx-target="#event-candidates"
                           hx-swap="innerHTML"
@@ -23,6 +41,20 @@
         </tbody>
     </table>
 </figure>
+<p>
+    <small>
+        <a href="#" id="open-external-search" class="secondary"
+           data-query="{{ query|default('', true) }}"
+           onclick="return false;">Search external services&hellip;</a>
+    </small>
+</p>
 {% elif artists is defined %}
-<p><small>No artists found.</small></p>
+<p>
+    <small>No artists found.</small><br>
+    <small>
+        <a href="#" id="open-external-search" class="secondary"
+           data-query="{{ query|default('', true) }}"
+           onclick="return false;">Search external services&hellip;</a>
+    </small>
+</p>
 {% endif %}
