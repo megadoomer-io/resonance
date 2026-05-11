@@ -2,7 +2,7 @@
 {% set _mb = _sl.get("musicbrainz", {}) %}
 {% set _has_mbid = (_mb is mapping and _mb.get("id")) or (_sl.get("listenbrainz") is string and _sl.get("listenbrainz")) %}
 {% set _needs_enrich = _has_mbid and artist.disambiguation is none %}
-<tr{% if _needs_enrich %} hx-get="/partials/artist-enrich/{{ artist.id }}" hx-trigger="load" hx-swap="outerHTML"{% endif %}>
+<tr{% if _needs_enrich %} hx-get="/partials/artist-enrich/{{ artist.id }}?event_id={{ event_id or '' }}" hx-trigger="load" hx-swap="outerHTML"{% endif %}>
     <td>
         <a href="/artists/{{ artist.id }}"><strong>{{ artist.name }}</strong></a>
         {% if artist.disambiguation %}

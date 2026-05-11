@@ -1589,6 +1589,7 @@ _ENRICHMENT_STALENESS_SECONDS = 180
 async def artist_enrich_partial(
     request: fastapi.Request,
     artist_id: uuid.UUID,
+    event_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
     """Lazily enrich an artist with MusicBrainz metadata."""
     user_id = request.state.session.get("user_id")
@@ -1610,7 +1611,7 @@ async def artist_enrich_partial(
             return templates.TemplateResponse(
                 request,
                 "partials/artist_row.html",
-                {"artist": artist, "event_id": None},
+                {"artist": artist, "event_id": event_id},
             )
 
         # Check enrichment_requested_at timestamp
@@ -1630,7 +1631,7 @@ async def artist_enrich_partial(
                 return templates.TemplateResponse(
                     request,
                     "partials/artist_row.html",
-                    {"artist": artist, "event_id": None},
+                    {"artist": artist, "event_id": event_id},
                 )
 
         # Mark enrichment requested
@@ -1665,7 +1666,7 @@ async def artist_enrich_partial(
     return templates.TemplateResponse(
         request,
         "partials/artist_row.html",
-        {"artist": artist, "event_id": None},
+        {"artist": artist, "event_id": event_id},
     )
 
 
