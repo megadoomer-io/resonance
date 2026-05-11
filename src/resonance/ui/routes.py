@@ -1537,7 +1537,7 @@ async def artist_import_partial(
                 service_links={"musicbrainz": {"id": mbid}},
             )
             db.add(artist)
-            await db.flush()
+            await db.commit()
 
     response = templates.TemplateResponse(
         request,
@@ -1611,7 +1611,7 @@ async def artist_enrich_partial(
             mb["id"] = mbid
         links["musicbrainz"] = mb
         artist.service_links = links
-        await db.flush()
+        await db.commit()
 
         # Fetch from MusicBrainz
         registry = request.app.state.connector_registry
@@ -1624,6 +1624,7 @@ async def artist_enrich_partial(
                 artist.area = mb_artist.get("area") or None
                 artist.begin_year = mb_artist.get("begin_year")
                 artist.end_year = mb_artist.get("end_year")
+                await db.commit()
 
     return templates.TemplateResponse(
         request,
