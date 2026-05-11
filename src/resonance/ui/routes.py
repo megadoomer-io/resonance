@@ -1605,7 +1605,6 @@ async def artist_search_modal_partial(
 async def artist_search_external_partial(
     request: fastapi.Request,
     q: str = "",
-    url: str = "",
     event_id: uuid.UUID | None = None,
     candidate_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
@@ -1616,55 +1615,61 @@ async def artist_search_external_partial(
 
     registry = request.app.state.connector_registry
     lb = registry.get_base_connector(types_module.ServiceType.LISTENBRAINZ)
+    query = q.strip()
 
     results: list[dict[str, Any]] = []
 
-    # URL-based lookup: try each connector's parse_url
-    if url.strip():
+    # Check if query is a recognized service URL
+    url_connector = None
+    url_id: str | None = None
+    if query.startswith(("http://", "https://")):
         for connector in registry.all_base_connectors():
-            parsed_id = connector.parse_url(url.strip())
-            if parsed_id is None:
-                continue
-            if isinstance(connector, listenbrainz_module.ListenBrainzConnector):
-                mb_artist = await connector.get_artist_by_mbid(parsed_id)
-                if mb_artist:
-                    results = [mb_artist]
-            elif isinstance(connector, spotify_module.SpotifyConnector):
-                async with _get_db(request) as db:
-                    conn_result = await db.execute(
-                        sa.select(user_models.ServiceConnection).where(
-                            user_models.ServiceConnection.user_id == uuid.UUID(user_id),
-                            user_models.ServiceConnection.service_type
-                            == types_module.ServiceType.SPOTIFY,
-                        )
+            parsed = connector.parse_url(query)
+            if parsed is not None:
+                url_connector = connector
+                url_id = parsed
+                break
+
+    if url_connector is not None and url_id is not None:
+        if isinstance(url_connector, listenbrainz_module.ListenBrainzConnector):
+            mb_artist = await url_connector.get_artist_by_mbid(url_id)
+            if mb_artist:
+                results = [mb_artist]
+        elif isinstance(url_connector, spotify_module.SpotifyConnector):
+            async with _get_db(request) as db:
+                conn_result = await db.execute(
+                    sa.select(user_models.ServiceConnection).where(
+                        user_models.ServiceConnection.user_id == uuid.UUID(user_id),
+                        user_models.ServiceConnection.service_type
+                        == types_module.ServiceType.SPOTIFY,
                     )
-                    spotify_conn = conn_result.scalar_one_or_none()
-                    if spotify_conn and spotify_conn.encrypted_access_token:
-                        settings = request.app.state.settings
-                        token = crypto_module.decrypt_token(
-                            spotify_conn.encrypted_access_token,
-                            settings.token_encryption_key,
+                )
+                spotify_conn = conn_result.scalar_one_or_none()
+                if spotify_conn and spotify_conn.encrypted_access_token:
+                    settings = request.app.state.settings
+                    token = crypto_module.decrypt_token(
+                        spotify_conn.encrypted_access_token,
+                        settings.token_encryption_key,
+                    )
+                    artist_data = await url_connector.get_artist_by_id(token, url_id)
+                    if artist_data:
+                        results.append(
+                            {
+                                "mbid": "",
+                                "name": artist_data["name"],
+                                "disambiguation": "",
+                                "artist_type": "",
+                                "area": "",
+                                "begin_year": None,
+                                "end_year": None,
+                                "source": "spotify",
+                                "spotify_id": artist_data["spotify_id"],
+                            }
                         )
-                        artist_data = await connector.get_artist_by_id(token, parsed_id)
-                        if artist_data:
-                            results.append(
-                                {
-                                    "mbid": "",
-                                    "name": artist_data["name"],
-                                    "disambiguation": "",
-                                    "artist_type": "",
-                                    "area": "",
-                                    "begin_year": None,
-                                    "end_year": None,
-                                    "source": "spotify",
-                                    "spotify_id": artist_data["spotify_id"],
-                                }
-                            )
-            break
-    elif len(q.strip()) < 2:
+    elif len(query) < 2:
         return fastapi.responses.HTMLResponse("")
     elif lb:
-        mb_results = await lb.search_artists(q.strip(), limit=10)
+        mb_results = await lb.search_artists(query, limit=10)
         results = mb_results
         async with _get_db(request) as db:
             for r in mb_results:
