@@ -3,6 +3,7 @@
 import urllib.parse
 from typing import Any
 
+import httpx
 import pydantic
 import structlog
 
@@ -207,6 +208,69 @@ class ListenBrainzConnector(base_module.BaseConnector):
         logger.info("Fetched %d listens for user %s", len(items), username)
         return items
 
+    async def search_artists(
+        self, query: str, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Search MusicBrainz for artists by name.
+
+        Args:
+            query: Artist name or search query.
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of parsed artist dicts with keys: mbid, name,
+            disambiguation, artist_type, area, begin_year, end_year.
+        """
+        response = await self._request(
+            "GET",
+            f"{self._MUSICBRAINZ_API}/artist/",
+            params={"query": query, "fmt": "json", "limit": limit},
+        )
+        return [self._parse_mb_artist(a) for a in response.json().get("artists", [])]
+
+    async def get_artist_by_mbid(self, mbid: str) -> dict[str, Any] | None:
+        """Fetch a single artist from MusicBrainz by MBID.
+
+        Args:
+            mbid: MusicBrainz artist identifier.
+
+        Returns:
+            Parsed artist dict, or None if the MBID is not found.
+        """
+        try:
+            response = await self._request(
+                "GET",
+                f"{self._MUSICBRAINZ_API}/artist/{mbid}",
+                params={"fmt": "json"},
+            )
+        except httpx.HTTPStatusError:
+            return None
+        return self._parse_mb_artist(response.json())
+
+    @staticmethod
+    def _parse_mb_artist(data: dict[str, Any]) -> dict[str, Any]:
+        """Parse a MusicBrainz artist response into a structured dict.
+
+        Args:
+            data: Raw artist dict from the MusicBrainz API.
+
+        Returns:
+            Dict with keys: mbid, name, disambiguation, artist_type,
+            area, begin_year, end_year.
+        """
+        life_span = data.get("life-span", {})
+        begin = life_span.get("begin", "")
+        end = life_span.get("end", "")
+        return {
+            "mbid": data["id"],
+            "name": data["name"],
+            "disambiguation": data.get("disambiguation", ""),
+            "artist_type": data.get("type", ""),
+            "area": data.get("area", {}).get("name", ""),
+            "begin_year": int(begin[:4]) if begin and len(begin) >= 4 else None,
+            "end_year": int(end[:4]) if end and len(end) >= 4 else None,
+        }
+
     async def discover_tracks(
         self,
         artist_name: str,
@@ -228,16 +292,11 @@ class ListenBrainzConnector(base_module.BaseConnector):
         mbid = artist_utils.get_mbid(service_links)
 
         if not mbid:
-            # Search MusicBrainz by name
-            search_resp = await self._request(
-                "GET",
-                f"{self._MUSICBRAINZ_API}/artist/",
-                params={"query": artist_name, "fmt": "json", "limit": 1},
-            )
-            artists: list[dict[str, str]] = search_resp.json().get("artists", [])
-            if not artists:
+            # Search MusicBrainz by name using reusable method
+            results = await self.search_artists(artist_name, limit=1)
+            if not results:
                 return []
-            mbid = artists[0]["id"]
+            mbid = results[0]["mbid"]
 
         # Fetch recordings for artist
         rec_resp = await self._request(
