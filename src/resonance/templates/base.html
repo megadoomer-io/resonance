@@ -76,10 +76,17 @@
         var eventId = modal ? modal.dataset.eventId || '' : '';
         var candidateId = modal ? modal.dataset.candidateId || '' : '';
         var params = 'q=' + encodeURIComponent(q) + '&services=' + services.join(',');
-        var serviceNames = services.map(function(s) {
-            return s.charAt(0).toUpperCase() + s.slice(1);
-        });
-        var loadingLabel = 'Querying ' + serviceNames.join(', ') + '...';
+        var loadingLabel;
+        if (q.indexOf('spotify.com') !== -1) loadingLabel = 'Looking up on Spotify...';
+        else if (q.indexOf('musicbrainz.org') !== -1) loadingLabel = 'Looking up on MusicBrainz...';
+        else if (q.indexOf('listenbrainz.org') !== -1) loadingLabel = 'Looking up on MusicBrainz...';
+        else if (q.indexOf('last.fm') !== -1) loadingLabel = 'Looking up on Last.fm...';
+        else {
+            var serviceNames = services.map(function(s) {
+                return s.charAt(0).toUpperCase() + s.slice(1);
+            });
+            loadingLabel = 'Querying ' + serviceNames.join(', ') + '...';
+        }
         if (eventId) params += '&event_id=' + eventId;
         if (candidateId) params += '&candidate_id=' + candidateId;
         var resultsDiv = document.getElementById('modal-search-results');
