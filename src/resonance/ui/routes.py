@@ -1816,7 +1816,7 @@ async def artist_import_partial(
         await db.commit()
 
     response = fastapi.responses.HTMLResponse("")
-    response.headers["HX-Trigger"] = "artist-imported, artistsChanged"
+    response.headers["HX-Trigger"] = '{"artist-imported":"", "artistsChanged":""}'
     return response
 
 
