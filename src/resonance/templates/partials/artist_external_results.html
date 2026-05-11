@@ -50,6 +50,9 @@
                         {% if event_id %}
                         <input type="hidden" name="event_id" value="{{ event_id }}">
                         {% endif %}
+                        {% if candidate_id %}
+                        <input type="hidden" name="candidate_id" value="{{ candidate_id }}">
+                        {% endif %}
                         <button type="submit" class="outline"
                                 style="padding: 0.25em 0.5em; font-size: 0.85em;">Import</button>
                     </form>

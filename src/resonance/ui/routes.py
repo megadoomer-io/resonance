@@ -1425,6 +1425,7 @@ async def artist_search_modal_partial(
     request: fastapi.Request,
     q: str = "",
     event_id: uuid.UUID | None = None,
+    candidate_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
     """Serve the external search modal dialog."""
     user_id = request.state.session.get("user_id")
@@ -1448,6 +1449,7 @@ async def artist_search_modal_partial(
         {
             "query": q,
             "event_id": event_id,
+            "candidate_id": candidate_id,
             "connected_services": connected_services,
         },
     )
@@ -1458,6 +1460,7 @@ async def artist_search_external_partial(
     request: fastapi.Request,
     q: str = "",
     event_id: uuid.UUID | None = None,
+    candidate_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
     """Search external services and return results partial for HTMX."""
     user_id = request.state.session.get("user_id")
@@ -1494,7 +1497,11 @@ async def artist_search_external_partial(
     return templates.TemplateResponse(
         request,
         "partials/artist_external_results.html",
-        {"external_artists": results, "event_id": event_id},
+        {
+            "external_artists": results,
+            "event_id": event_id,
+            "candidate_id": candidate_id,
+        },
     )
 
 
@@ -1509,6 +1516,7 @@ async def artist_import_partial(
     begin_year: Annotated[str, fastapi.Form()] = "",
     end_year: Annotated[str, fastapi.Form()] = "",
     event_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
+    candidate_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
     """Import an artist from external search and return a local result row."""
     user_id = request.state.session.get("user_id")
@@ -1537,14 +1545,40 @@ async def artist_import_partial(
                 service_links={"musicbrainz": {"id": mbid}},
             )
             db.add(artist)
-            await db.commit()
+            await db.flush()
 
+        if candidate_id and event_id:
+            candidate = (
+                await db.execute(
+                    sa.select(concert_models.EventArtistCandidate).where(
+                        concert_models.EventArtistCandidate.id == candidate_id,
+                        concert_models.EventArtistCandidate.event_id == event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if candidate is not None:
+                candidate.matched_artist_id = artist.id
+                candidate.confidence_score = 100
+                candidate.status = types_module.CandidateStatus.ACCEPTED
+                event_artist = concert_models.EventArtist(
+                    event_id=event_id,
+                    artist_id=artist.id,
+                    position=candidate.position,
+                    raw_name=candidate.raw_name,
+                )
+                db.add(event_artist)
+
+        await db.commit()
+
+    triggers = ["artist-imported"]
+    if candidate_id and event_id:
+        triggers.append("artistsChanged")
     response = templates.TemplateResponse(
         request,
         "partials/artist_row.html",
         {"artist": artist, "event_id": event_id},
     )
-    response.headers["HX-Trigger"] = "artist-imported"
+    response.headers["HX-Trigger"] = ", ".join(triggers)
     return response
 
 

@@ -32,7 +32,7 @@
                             class="outline"
                             style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;">Accept</button>
                     {% else %}
-                    <button hx-get="/partials/artist-search-modal?q={{ candidate.raw_name | urlencode }}&event_id={{ event.id }}"
+                    <button hx-get="/partials/artist-search-modal?q={{ candidate.raw_name | urlencode }}&event_id={{ event.id }}&candidate_id={{ candidate.id }}"
                             hx-target="#modal-container"
                             hx-swap="innerHTML"
                             hx-on::after-swap="openExternalSearchModal()"
