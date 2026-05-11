@@ -56,6 +56,10 @@
         if (prefillQuery && input) input.value = prefillQuery;
         modal.showModal();
         if (input) { input.focus(); input.select(); }
+        var q = input ? input.value.trim() : '';
+        if (q && (q.startsWith('http://') || q.startsWith('https://'))) {
+            doExternalSearch();
+        }
     }
 
     function doExternalSearch() {
