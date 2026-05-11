@@ -60,12 +60,26 @@
 
 <h3>Add Artist</h3>
 <input type="search"
+       id="add-artist-search"
        name="q"
-       placeholder="Search artists by name..."
+       placeholder="Search artists by name... (Enter for external search)"
        hx-get="/partials/artist-search"
-       hx-trigger="input changed delay:300ms, search"
+       hx-trigger="input changed delay:300ms"
        hx-target="#artist-search-results"
        hx-vals='{"event_id": "{{ event.id }}"}'
        autocomplete="off">
+<script>
+document.getElementById('add-artist-search').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        var q = this.value.trim();
+        if (!q) return;
+        htmx.ajax('GET', '/partials/artist-search-modal?q=' + encodeURIComponent(q) + '&event_id={{ event.id }}', {
+            target: '#modal-container',
+            swap: 'innerHTML'
+        });
+    }
+});
+</script>
 <div id="artist-search-results"></div>
 {% endblock %}
