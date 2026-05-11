@@ -1,0 +1,65 @@
+{% if external_artists %}
+<hr>
+<small class="secondary" style="display: block; margin-bottom: 0.5em;">External results</small>
+<figure>
+    <table>
+        <tbody>
+            {% for artist in external_artists %}
+            <tr>
+                <td>
+                    <strong>{{ artist.name }}</strong>
+                    {% if artist.disambiguation %}
+                    <br><small class="secondary">{{ artist.disambiguation }}</small>
+                    {% endif %}
+                    {% set meta_parts = [] %}
+                    {% if artist.artist_type %}{% set _ = meta_parts.append(artist.artist_type) %}{% endif %}
+                    {% if artist.area %}{% set _ = meta_parts.append(artist.area) %}{% endif %}
+                    {% if artist.begin_year %}
+                        {% set _ = meta_parts.append(artist.begin_year|string ~ "–" ~ (artist.end_year|string if artist.end_year else "present")) %}
+                    {% endif %}
+                    {% if meta_parts %}
+                    <br><small class="secondary">{{ meta_parts | join(" · ") }}</small>
+                    {% endif %}
+                </td>
+                <td style="vertical-align: top; white-space: nowrap;">
+                    {% if artist.already_imported %}
+                    {% if event_id %}
+                    <form hx-post="/events/{{ event_id }}/add-artist"
+                          hx-target="#event-candidates"
+                          hx-swap="innerHTML"
+                          style="margin: 0;">
+                        <input type="hidden" name="artist_id" value="{{ artist.local_artist_id }}">
+                        <button type="submit" class="outline"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;">Add to Event</button>
+                    </form>
+                    {% else %}
+                    <small class="secondary">Already imported</small>
+                    {% endif %}
+                    {% else %}
+                    <form hx-post="/partials/artist-import"
+                          hx-target="closest tr"
+                          hx-swap="outerHTML"
+                          style="margin: 0;">
+                        <input type="hidden" name="mbid" value="{{ artist.mbid }}">
+                        <input type="hidden" name="name" value="{{ artist.name }}">
+                        <input type="hidden" name="disambiguation" value="{{ artist.disambiguation }}">
+                        <input type="hidden" name="artist_type" value="{{ artist.artist_type }}">
+                        <input type="hidden" name="area" value="{{ artist.area }}">
+                        <input type="hidden" name="begin_year" value="{{ artist.begin_year or '' }}">
+                        <input type="hidden" name="end_year" value="{{ artist.end_year or '' }}">
+                        {% if event_id %}
+                        <input type="hidden" name="event_id" value="{{ event_id }}">
+                        {% endif %}
+                        <button type="submit" class="outline"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;">Import</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% elif external_artists is defined %}
+<p><small class="secondary">No external results found.</small></p>
+{% endif %}

@@ -5,7 +5,7 @@ import pathlib
 import uuid
 import zoneinfo
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import fastapi
 import fastapi.requests
@@ -1414,7 +1414,101 @@ async def artist_search_partial(
         {
             "artists": artists,
             "event_id": event_id,
+            "query": q.strip(),
         },
+    )
+
+
+@router.get("/partials/artist-search-external", response_model=None)
+async def artist_search_external_partial(
+    request: fastapi.Request,
+    q: str = "",
+    event_id: uuid.UUID | None = None,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Search external services and return results partial for HTMX."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    if len(q.strip()) < 2:
+        return fastapi.responses.HTMLResponse("")
+
+    registry = request.app.state.connector_registry
+    lb = registry.get_base_connector(types_module.ServiceType.LISTENBRAINZ)
+
+    results: list[dict[str, Any]] = []
+    if lb:
+        mb_results = await lb.search_artists(q.strip(), limit=10)
+        async with _get_db(request) as db:
+            for r in mb_results:
+                stmt = sa.select(music_models.Artist).where(
+                    sa.or_(
+                        music_models.Artist.service_links["musicbrainz"][
+                            "id"
+                        ].as_string()
+                        == r["mbid"],
+                        music_models.Artist.service_links["listenbrainz"].as_string()
+                        == r["mbid"],
+                    )
+                )
+                result = await db.execute(stmt)
+                existing = result.scalar_one_or_none()
+                r["already_imported"] = existing is not None
+                r["local_artist_id"] = str(existing.id) if existing else None
+            results = mb_results
+
+    return templates.TemplateResponse(
+        request,
+        "partials/artist_external_results.html",
+        {"external_artists": results, "event_id": event_id},
+    )
+
+
+@router.post("/partials/artist-import", response_model=None)
+async def artist_import_partial(
+    request: fastapi.Request,
+    mbid: Annotated[str, fastapi.Form()],
+    name: Annotated[str, fastapi.Form()],
+    disambiguation: Annotated[str, fastapi.Form()] = "",
+    artist_type: Annotated[str, fastapi.Form()] = "",
+    area: Annotated[str, fastapi.Form()] = "",
+    begin_year: Annotated[str, fastapi.Form()] = "",
+    end_year: Annotated[str, fastapi.Form()] = "",
+    event_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Import an artist from external search and return a local result row."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    async with _get_db(request) as db:
+        stmt = sa.select(music_models.Artist).where(
+            sa.or_(
+                music_models.Artist.service_links["musicbrainz"]["id"].as_string()
+                == mbid,
+                music_models.Artist.service_links["listenbrainz"].as_string() == mbid,
+            )
+        )
+        result = await db.execute(stmt)
+        artist = result.scalar_one_or_none()
+
+        if artist is None:
+            artist = music_models.Artist(
+                name=name,
+                disambiguation=disambiguation or None,
+                artist_type=artist_type or None,
+                area=area or None,
+                begin_year=int(begin_year) if begin_year else None,
+                end_year=int(end_year) if end_year else None,
+                service_links={"musicbrainz": {"id": mbid}},
+            )
+            db.add(artist)
+            await db.flush()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/artist_search_results.html",
+        {"artists": [artist], "event_id": event_id},
     )
 
 
