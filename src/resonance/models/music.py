@@ -28,6 +28,21 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     origin: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(256), nullable=True, default=None
     )
+    disambiguation: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(512), nullable=True, default=None
+    )
+    artist_type: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(64), nullable=True, default=None
+    )
+    area: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
+    begin_year: orm.Mapped[int | None] = orm.mapped_column(
+        sa.Integer, nullable=True, default=None
+    )
+    end_year: orm.Mapped[int | None] = orm.mapped_column(
+        sa.Integer, nullable=True, default=None
+    )
 
     tracks: orm.Mapped[list[Track]] = orm.relationship(
         back_populates="artist", cascade="all, delete-orphan"
