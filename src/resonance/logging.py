@@ -84,6 +84,7 @@ def configure_logging(log_level: str = "INFO") -> None:
         "httpx",
         "httpcore",
         "asyncpg",
+        "python_multipart.multipart",
     ]:
         logging.getLogger(noisy_logger).setLevel(max(level, logging.WARNING))
 
