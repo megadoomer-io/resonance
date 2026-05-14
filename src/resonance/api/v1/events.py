@@ -10,11 +10,14 @@ import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
+import structlog
 
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
 import resonance.models.music as music_models
 import resonance.types as types_module
+
+logger = structlog.get_logger()
 
 _PAGE_SIZE = 50
 
@@ -222,6 +225,138 @@ async def reject_candidate(
     return {
         "id": str(candidate.id),
         "status": str(candidate.status),
+    }
+
+
+class _PatchCandidateBody(pydantic.BaseModel):
+    status: types_module.CandidateStatus | None = None
+    matched_artist_id: uuid.UUID | None = None
+    confidence_score: int | None = None
+
+
+@router.patch(
+    "/{event_id}/candidates/{candidate_id}",
+    summary="Update an event artist candidate",
+    description="Update a candidate's status, matched artist, or confidence score. "
+    "Status transitions trigger side effects: accepting creates an EventArtist, "
+    "un-accepting removes it.",
+)
+async def patch_candidate(
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    body: _PatchCandidateBody,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    candidate = await _get_candidate(db, event_id, candidate_id)
+    old_status = candidate.status
+    old_matched_artist_id = candidate.matched_artist_id
+
+    new_status = body.status if body.status is not None else old_status
+
+    if body.matched_artist_id is not None:
+        artist_check = (
+            await db.execute(
+                sa.select(music_models.Artist.id).where(
+                    music_models.Artist.id == body.matched_artist_id
+                )
+            )
+        ).scalar_one_or_none()
+        if artist_check is None:
+            raise fastapi.HTTPException(status_code=404, detail="Artist not found")
+
+    effective_artist_id = (
+        body.matched_artist_id
+        if body.matched_artist_id is not None
+        else candidate.matched_artist_id
+    )
+    if (
+        new_status == types_module.CandidateStatus.ACCEPTED
+        and effective_artist_id is None
+    ):
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="Cannot accept candidate without matched_artist_id",
+        )
+
+    if body.matched_artist_id is not None:
+        candidate.matched_artist_id = body.matched_artist_id
+    if body.confidence_score is not None:
+        candidate.confidence_score = body.confidence_score
+    if body.status is not None:
+        candidate.status = body.status
+
+    event_artist_id: str | None = None
+
+    if new_status == types_module.CandidateStatus.ACCEPTED:
+        if old_status == types_module.CandidateStatus.ACCEPTED and (
+            body.matched_artist_id is not None
+            and body.matched_artist_id != old_matched_artist_id
+        ):
+            old_ea = (
+                await db.execute(
+                    sa.select(concert_models.EventArtist).where(
+                        concert_models.EventArtist.event_id == event_id,
+                        concert_models.EventArtist.artist_id == old_matched_artist_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if old_ea is not None:
+                await db.delete(old_ea)
+
+        existing_ea = (
+            await db.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == event_id,
+                    concert_models.EventArtist.artist_id == effective_artist_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_ea is None:
+            ea = concert_models.EventArtist(
+                event_id=event_id,
+                artist_id=effective_artist_id,
+                position=candidate.position,
+                raw_name=candidate.raw_name,
+            )
+            db.add(ea)
+            event_artist_id = str(ea.id)
+        else:
+            event_artist_id = str(existing_ea.id)
+
+    elif old_status == types_module.CandidateStatus.ACCEPTED:
+        ea_to_remove = (
+            await db.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == event_id,
+                    concert_models.EventArtist.artist_id == old_matched_artist_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if ea_to_remove is not None:
+            await db.delete(ea_to_remove)
+
+    await db.commit()
+
+    logger.info(
+        "candidate_patched",
+        candidate_id=str(candidate_id),
+        event_id=str(event_id),
+        old_status=str(old_status),
+        new_status=str(new_status),
+    )
+
+    return {
+        "status": "updated",
+        "id": str(candidate.id),
+        "event_id": str(candidate.event_id),
+        "raw_name": candidate.raw_name,
+        "matched_artist_id": str(candidate.matched_artist_id)
+        if candidate.matched_artist_id
+        else None,
+        "candidate_status": str(candidate.status),
+        "confidence_score": candidate.confidence_score,
+        "event_artist_id": event_artist_id,
     }
 
 

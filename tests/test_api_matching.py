@@ -92,6 +92,7 @@ class FakeAsyncSession:
         self._results: list[Any] = []
         self._call_count = 0
         self._added: list[Any] = []
+        self._deleted: list[Any] = []
 
     def set_results(self, results: list[Any]) -> None:
         self._results = results
@@ -105,6 +106,9 @@ class FakeAsyncSession:
 
     def add(self, obj: Any) -> None:
         self._added.append(obj)
+
+    async def delete(self, obj: Any) -> None:
+        self._deleted.append(obj)
 
     async def commit(self) -> None:
         pass
@@ -345,6 +349,266 @@ class TestCandidateReject:
             f"/api/v1/events/{event_id}/candidates/{candidate_id}/reject"
         )
         assert resp.status_code == 404
+
+
+def _make_event_artist(**overrides: Any) -> SimpleNamespace:
+    defaults: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "event_id": uuid.uuid4(),
+        "artist_id": uuid.uuid4(),
+        "position": 0,
+        "raw_name": "Some Artist",
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestPatchCandidate:
+    async def test_patch_confidence_score(self, user_id: uuid.UUID) -> None:
+        event_id = uuid.uuid4()
+        candidate = _make_candidate(
+            event_id=event_id,
+            confidence_score=90,
+            status="pending",
+        )
+
+        db = FakeAsyncSession()
+        db.set_results([FakeResult([candidate])])
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"confidence_score": 100},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "updated"
+        assert candidate.confidence_score == 100
+
+    async def test_patch_status_to_accepted_creates_event_artist(
+        self, user_id: uuid.UUID
+    ) -> None:
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        candidate = _make_candidate(
+            event_id=event_id,
+            matched_artist_id=artist_id,
+            status="pending",
+            raw_name="Together PANGEA",
+        )
+
+        db = FakeAsyncSession()
+        db.set_results(
+            [
+                FakeResult([candidate]),  # _get_candidate
+                FakeResult(),  # EventArtist lookup (none exists)
+            ]
+        )
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"status": "accepted"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "updated"
+        assert data["event_artist_id"] is not None
+        assert len(db._added) == 1
+
+        import resonance.models.concert as concert_models
+
+        assert isinstance(db._added[0], concert_models.EventArtist)
+
+    async def test_patch_status_to_accepted_without_artist_returns_400(
+        self, user_id: uuid.UUID
+    ) -> None:
+        event_id = uuid.uuid4()
+        candidate = _make_candidate(
+            event_id=event_id,
+            matched_artist_id=None,
+            status="pending",
+        )
+
+        db = FakeAsyncSession()
+        db.set_results([FakeResult([candidate])])
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"status": "accepted"},
+            )
+
+        assert resp.status_code == 400
+
+    async def test_patch_status_from_accepted_removes_event_artist(
+        self, user_id: uuid.UUID
+    ) -> None:
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        candidate = _make_candidate(
+            event_id=event_id,
+            matched_artist_id=artist_id,
+            status="accepted",
+        )
+        ea = _make_event_artist(event_id=event_id, artist_id=artist_id)
+
+        db = FakeAsyncSession()
+        db.set_results(
+            [
+                FakeResult([candidate]),  # _get_candidate
+                FakeResult([ea]),  # EventArtist lookup for removal
+            ]
+        )
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"status": "rejected"},
+            )
+
+        assert resp.status_code == 200
+        assert len(db._deleted) == 1
+        assert db._deleted[0] is ea
+
+    async def test_patch_accept_idempotent(self, user_id: uuid.UUID) -> None:
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        ea = _make_event_artist(event_id=event_id, artist_id=artist_id)
+        candidate = _make_candidate(
+            event_id=event_id,
+            matched_artist_id=artist_id,
+            status="accepted",
+        )
+
+        db = FakeAsyncSession()
+        db.set_results(
+            [
+                FakeResult([candidate]),  # _get_candidate
+                FakeResult([ea]),  # EventArtist lookup (already exists)
+            ]
+        )
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"status": "accepted"},
+            )
+
+        assert resp.status_code == 200
+        assert len(db._added) == 0
+        assert len(db._deleted) == 0
+
+    async def test_patch_validates_artist_exists(self, user_id: uuid.UUID) -> None:
+        event_id = uuid.uuid4()
+        candidate = _make_candidate(event_id=event_id, status="pending")
+
+        db = FakeAsyncSession()
+        db.set_results(
+            [
+                FakeResult([candidate]),  # _get_candidate
+                FakeResult(),  # Artist lookup (not found)
+            ]
+        )
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={"matched_artist_id": str(uuid.uuid4())},
+            )
+
+        assert resp.status_code == 404
+        assert "Artist not found" in resp.json()["detail"]
+
+    async def test_patch_returns_404_for_missing_candidate(
+        self, authed_client: httpx.AsyncClient
+    ) -> None:
+        event_id = uuid.uuid4()
+        candidate_id = uuid.uuid4()
+        resp = await authed_client.patch(
+            f"/api/v1/events/{event_id}/candidates/{candidate_id}",
+            json={"confidence_score": 50},
+        )
+        assert resp.status_code == 404
+
+    async def test_patch_empty_body_is_noop(self, user_id: uuid.UUID) -> None:
+        event_id = uuid.uuid4()
+        candidate = _make_candidate(
+            event_id=event_id,
+            status="pending",
+            confidence_score=90,
+        )
+
+        db = FakeAsyncSession()
+        db.set_results([FakeResult([candidate])])
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.patch(
+                f"/api/v1/events/{event_id}/candidates/{candidate.id}",
+                json={},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "updated"
+        assert candidate.confidence_score == 90
 
 
 class TestCreateCandidate:
