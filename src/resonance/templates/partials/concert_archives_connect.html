@@ -1,0 +1,49 @@
+{% if state == "button" %}
+<button
+    hx-get="/partials/concert-archives-upload"
+    hx-target="#concert-archives-connect"
+    hx-swap="innerHTML"
+    class="outline"
+>Connect Concert Archives</button>
+
+{% elif state == "form" %}
+<form
+    hx-post="/api/v1/connections/concert-archives/upload"
+    hx-target="#concert-archives-connect"
+    hx-swap="innerHTML"
+    hx-encoding="multipart/form-data"
+    hx-on::after-request="if(event.detail.successful) location.reload()"
+>
+    <label>
+        CSV Export File
+        <input type="file" name="file" accept=".csv" required>
+    </label>
+    <fieldset>
+        <label>
+            <input type="checkbox" id="ca-use-today" checked
+                   onchange="document.getElementById('ca-export-date').disabled = this.checked">
+            Use today's date as export date
+        </label>
+        <input type="date" name="export_date" id="ca-export-date" disabled>
+    </fieldset>
+    <div class="grid">
+        <button type="submit">Upload</button>
+        <button
+            hx-get="/partials/concert-archives-connect"
+            hx-target="#concert-archives-connect"
+            hx-swap="innerHTML"
+            class="secondary outline"
+            type="button"
+        >Cancel</button>
+    </div>
+</form>
+
+{% elif state == "error" %}
+<p><mark>{{ error_message | default("Failed to upload Concert Archives CSV.") }}</mark></p>
+<button
+    hx-get="/partials/concert-archives-upload"
+    hx-target="#concert-archives-connect"
+    hx-swap="innerHTML"
+    class="outline"
+>Try Again</button>
+{% endif %}

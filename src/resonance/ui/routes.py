@@ -2859,6 +2859,38 @@ async def songkick_sync_trigger(
     return fastapi.responses.HTMLResponse("")
 
 
+@router.get("/partials/concert-archives-connect", response_model=None)
+async def concert_archives_connect_button(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Return the Concert Archives connect button partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/concert_archives_connect.html",
+        {"state": "button"},
+    )
+
+
+@router.get("/partials/concert-archives-upload", response_model=None)
+async def concert_archives_upload_form(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Return the Concert Archives CSV upload form partial."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.HTMLResponse("")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/concert_archives_connect.html",
+        {"state": "form"},
+    )
+
+
 @router.get("/partials/sync-status", response_model=None)
 async def sync_status_partial(
     request: fastapi.Request,
