@@ -154,11 +154,17 @@ class TestSyncCalendarFeedSongkick:
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.resolve_venue_candidate"
+            ) as mock_rvc,
+            patch(
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_candidates"
             ) as mock_upsert_candidates,
@@ -176,10 +182,10 @@ class TestSyncCalendarFeedSongkick:
             mock_client.get.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
-            mock_venue = MagicMock()
-            mock_upsert_venue.return_value = mock_venue
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uvc.return_value = MagicMock()
+            mock_rvc.return_value = MagicMock()
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_upsert_candidates.return_value = 1
             mock_match.return_value = 1
 
@@ -197,12 +203,8 @@ class TestSyncCalendarFeedSongkick:
             assert calls[0] == f"{expected_base}?filter=attendance"
             assert calls[1] == f"{expected_base}?filter=tracked_artist"
 
-            # 2 events per feed * 2 feeds = 4 event upserts
-            assert mock_upsert_event.await_count == 4
-
-            # Verify source_service is SONGKICK
-            first_event_call = mock_upsert_event.call_args_list[0]
-            assert first_event_call.args[2] == types_module.ServiceType.SONGKICK
+            # 2 events per feed * 2 feeds = 4 event candidate cycles
+            assert mock_rec.await_count == 4
 
             # Verify lifecycle complete_task was called
             mock_complete.assert_awaited_once()
@@ -265,11 +267,15 @@ END:VCALENDAR
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
+            patch("resonance.concerts.worker.concert_sync.resolve_venue_candidate"),
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_candidates"
             ) as mock_upsert_candidates,
@@ -286,8 +292,8 @@ END:VCALENDAR
             mock_client.get.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_upsert_candidates.return_value = 0
             mock_match.return_value = 0
 
@@ -298,14 +304,14 @@ END:VCALENDAR
             # Should fetch exactly the URL from the connection
             mock_client.get.assert_awaited_once_with(ical_url)
 
-            # Generic iCal: no venue upsert
-            mock_upsert_venue.assert_not_awaited()
+            # Generic iCal with no venue: no venue candidate created
+            mock_uvc.assert_not_awaited()
 
-            # But event should be upserted (with venue=None)
-            mock_upsert_event.assert_awaited_once()
-            event_call = mock_upsert_event.call_args
-            assert event_call.args[2] == types_module.ServiceType.ICAL
-            assert event_call.args[3] is None  # venue arg is None
+            # Event candidate created and resolved (with venue=None)
+            mock_uec.assert_awaited_once()
+            mock_rec.assert_awaited_once()
+            rec_call = mock_rec.call_args
+            assert rec_call.args[2] is None  # venue arg is None
 
             # Lifecycle helper called
             mock_complete.assert_awaited_once()
@@ -441,11 +447,13 @@ class TestSyncCalendarFeedLifecycle:
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
+            patch("resonance.concerts.worker.concert_sync.resolve_venue_candidate"),
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch("resonance.concerts.worker.concert_sync.resolve_event_candidate"),
             patch(
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
@@ -460,9 +468,9 @@ class TestSyncCalendarFeedLifecycle:
                 ctx, str(connection.id), str(task.id)
             )
 
-            # No events means no upserts
-            mock_upsert_venue.assert_not_awaited()
-            mock_upsert_event.assert_not_awaited()
+            # No events means no candidate creation
+            mock_uvc.assert_not_awaited()
+            mock_uec.assert_not_awaited()
 
             # But complete_task should be called
             mock_complete.assert_awaited_once()

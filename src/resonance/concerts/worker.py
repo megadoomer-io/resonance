@@ -17,6 +17,7 @@ import resonance.concerts.sync as concert_sync
 import resonance.connectors.songkick as songkick_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.normalize as normalize_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
@@ -31,6 +32,13 @@ _SONGKICK_FEED_TYPES: list[types_module.FeedType] = [
     types_module.FeedType.SONGKICK_ATTENDANCE,
     types_module.FeedType.SONGKICK_TRACKED_ARTIST,
 ]
+
+
+def _venue_external_id(venue_data: ical_module.VenueData) -> str:
+    """Generate a deterministic external ID for a venue candidate."""
+    name = normalize_module.normalize_name(venue_data.name)
+    city = normalize_module.normalize_name(venue_data.city or "")
+    return f"{name}_{city}" if city else name
 
 
 async def sync_calendar_feed(
@@ -145,16 +153,30 @@ async def sync_calendar_feed(
                     total_events += len(parsed_events)
 
                     for parsed in parsed_events:
-                        # Venue
+                        # Venue candidate → resolved Venue
                         venue = None
+                        venue_candidate = None
                         if parsed.venue is not None:
-                            venue = await concert_sync.upsert_venue(
-                                session, parsed.venue
+                            venue_ext_id = _venue_external_id(parsed.venue)
+                            venue_candidate = await concert_sync.upsert_venue_candidate(
+                                session,
+                                parsed.venue,
+                                source_service,
+                                venue_ext_id,
+                            )
+                            venue = await concert_sync.resolve_venue_candidate(
+                                session, venue_candidate
                             )
 
-                        # Event
-                        event, created = await concert_sync.upsert_event(
-                            session, parsed, source_service, venue
+                        # Event candidate → resolved Event
+                        event_candidate = await concert_sync.upsert_event_candidate(
+                            session,
+                            parsed,
+                            source_service,
+                            venue_candidate,
+                        )
+                        event, created = await concert_sync.resolve_event_candidate(
+                            session, event_candidate, venue
                         )
                         if created:
                             events_created += 1
@@ -300,14 +322,24 @@ async def sync_concert_archives(
             total_events = len(parse_result.events)
 
             for parsed in parse_result.events:
-                # Venue
+                # Venue candidate → resolved Venue
                 venue = None
+                venue_candidate = None
                 if parsed.venue is not None:
-                    venue = await concert_sync.upsert_venue(session, parsed.venue)
+                    venue_ext_id = _venue_external_id(parsed.venue)
+                    venue_candidate = await concert_sync.upsert_venue_candidate(
+                        session, parsed.venue, source_service, venue_ext_id
+                    )
+                    venue = await concert_sync.resolve_venue_candidate(
+                        session, venue_candidate
+                    )
 
-                # Event
-                event, created = await concert_sync.upsert_event(
-                    session, parsed, source_service, venue
+                # Event candidate → resolved Event
+                event_candidate = await concert_sync.upsert_event_candidate(
+                    session, parsed, source_service, venue_candidate
+                )
+                event, created = await concert_sync.resolve_event_candidate(
+                    session, event_candidate, venue
                 )
                 if created:
                     events_created += 1

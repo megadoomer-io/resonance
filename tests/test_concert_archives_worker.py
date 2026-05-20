@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ import resonance.types as types_module
 
 if TYPE_CHECKING:
     import datetime
+    from collections.abc import Iterator
 
 # ---------------------------------------------------------------------------
 # Sample CSV data for testing
@@ -106,6 +108,71 @@ def _setup_session_queries(
     session.execute.side_effect = [task_result, conn_result]
 
 
+@contextmanager
+def _patch_candidate_sync(
+    *,
+    event_results: list[tuple[MagicMock, bool]] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Patch the candidate-based sync functions used by the worker.
+
+    Returns a dict of mock objects keyed by function name.
+    """
+    mock_venue_candidate = MagicMock()
+    mock_venue = MagicMock()
+    mock_event_candidate = MagicMock()
+    mock_event = MagicMock()
+
+    default_event_result = (mock_event, True)
+    event_side_effect = event_results if event_results else None
+
+    with (
+        patch(
+            "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+        ) as mock_uvc,
+        patch(
+            "resonance.concerts.worker.concert_sync.resolve_venue_candidate"
+        ) as mock_rvc,
+        patch(
+            "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+        ) as mock_uec,
+        patch(
+            "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+        ) as mock_rec,
+        patch(
+            "resonance.concerts.worker.concert_sync.upsert_candidates"
+        ) as mock_candidates,
+        patch(
+            "resonance.concerts.worker.concert_sync.upsert_attendance"
+        ) as mock_attendance,
+        patch(
+            "resonance.concerts.worker.concert_sync.match_candidates_to_artists"
+        ) as mock_match,
+        patch(
+            "resonance.concerts.worker.lifecycle_module.complete_task"
+        ) as mock_complete,
+    ):
+        mock_uvc.return_value = mock_venue_candidate
+        mock_rvc.return_value = mock_venue
+        mock_uec.return_value = mock_event_candidate
+        if event_side_effect:
+            mock_rec.side_effect = event_side_effect
+        else:
+            mock_rec.return_value = default_event_result
+        mock_candidates.return_value = 2
+        mock_match.return_value = 1
+
+        yield {
+            "upsert_venue_candidate": mock_uvc,
+            "resolve_venue_candidate": mock_rvc,
+            "upsert_event_candidate": mock_uec,
+            "resolve_event_candidate": mock_rec,
+            "upsert_candidates": mock_candidates,
+            "upsert_attendance": mock_attendance,
+            "match_candidates": mock_match,
+            "complete_task": mock_complete,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -191,7 +258,7 @@ class TestSyncConcertArchivesImport:
 
     @pytest.mark.anyio()
     async def test_successful_import(self) -> None:
-        """Parses CSV, upserts events/venues/candidates, completes task."""
+        """Parses CSV, creates candidates, resolves entities, completes task."""
         connection = _make_connection()
         task = _make_task(
             user_id=connection.user_id,
@@ -201,55 +268,29 @@ class TestSyncConcertArchivesImport:
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with (
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_candidates"
-            ) as mock_upsert_candidates,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_attendance"
-            ) as mock_upsert_attendance,
-            patch(
-                "resonance.concerts.worker.concert_sync.match_candidates_to_artists"
-            ) as mock_match,
-            patch(
-                "resonance.concerts.worker.lifecycle_module.complete_task"
-            ) as mock_complete,
-        ):
-            mock_venue = MagicMock()
-            mock_upsert_venue.return_value = mock_venue
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
-            mock_upsert_candidates.return_value = 2
-            mock_match.return_value = 1
-
+        with _patch_candidate_sync() as mocks:
             await concert_worker.sync_concert_archives(ctx, str(task.id), _SAMPLE_CSV)
 
-            # 2 events in CSV → 2 venue upserts, 2 event upserts
-            assert mock_upsert_venue.await_count == 2
-            assert mock_upsert_event.await_count == 2
+            # 2 events in CSV → 2 venue candidate + resolve cycles
+            assert mocks["upsert_venue_candidate"].await_count == 2
+            assert mocks["resolve_venue_candidate"].await_count == 2
 
-            # Verify source_service is CONCERT_ARCHIVES
-            first_event_call = mock_upsert_event.call_args_list[0]
-            assert first_event_call.args[2] == types_module.ServiceType.CONCERT_ARCHIVES
+            # 2 event candidate + resolve cycles
+            assert mocks["upsert_event_candidate"].await_count == 2
+            assert mocks["resolve_event_candidate"].await_count == 2
 
             # Both events have "Past" status → attendance "going"
-            assert mock_upsert_attendance.await_count == 2
+            assert mocks["upsert_attendance"].await_count == 2
 
-            # Candidates: first event has 2 artists, second has 1
-            assert mock_upsert_candidates.await_count == 2
+            # Artist candidates created for each event
+            assert mocks["upsert_candidates"].await_count == 2
 
             # match_candidates called for each event
-            assert mock_match.await_count == 2
+            assert mocks["match_candidates"].await_count == 2
 
             # Verify task completed
-            mock_complete.assert_awaited_once()
-            result_arg = mock_complete.call_args.args[2]
+            mocks["complete_task"].assert_awaited_once()
+            result_arg = mocks["complete_task"].call_args.args[2]
             assert result_arg["total_events"] == 2
             assert result_arg["events_created"] == 2
             assert result_arg["candidates_created"] == 4  # 2 per event call
@@ -270,42 +311,22 @@ class TestSyncConcertArchivesImport:
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with (
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
-            patch("resonance.concerts.worker.concert_sync.upsert_candidates"),
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_attendance"
-            ) as mock_upsert_attendance,
-            patch(
-                "resonance.concerts.worker.concert_sync.match_candidates_to_artists"
-            ) as mock_match,
-            patch(
-                "resonance.concerts.worker.lifecycle_module.complete_task"
-            ) as mock_complete,
-        ):
-            mock_venue = MagicMock()
-            mock_upsert_venue.return_value = mock_venue
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
-            mock_match.return_value = 0
+        with _patch_candidate_sync() as mocks:
+            mocks["match_candidates"].return_value = 0
 
             await concert_worker.sync_concert_archives(
                 ctx, str(task.id), _CANCELLED_CSV
             )
 
-            # Event should still be created
-            mock_upsert_event.assert_awaited_once()
+            # Event candidate should still be created and resolved
+            mocks["upsert_event_candidate"].assert_awaited_once()
+            mocks["resolve_event_candidate"].assert_awaited_once()
 
             # But no attendance for "Cancelled" status
-            mock_upsert_attendance.assert_not_awaited()
+            mocks["upsert_attendance"].assert_not_awaited()
 
             # Task should still complete successfully
-            mock_complete.assert_awaited_once()
+            mocks["complete_task"].assert_awaited_once()
 
     @pytest.mark.anyio()
     async def test_csv_parse_error_fails_task(self) -> None:
@@ -327,7 +348,6 @@ class TestSyncConcertArchivesImport:
     @pytest.mark.anyio()
     async def test_warnings_included_in_result(self) -> None:
         """Warnings from CSV parsing are included in the task result."""
-        # CSV with a missing date to trigger a warning
         csv_with_warning = """\
 Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location,URL
 ,,Past,Some Show,Band A,,Venue,"City, Country",https://example.com
@@ -341,38 +361,21 @@ Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with (
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
-            patch("resonance.concerts.worker.concert_sync.upsert_candidates"),
-            patch("resonance.concerts.worker.concert_sync.upsert_attendance"),
-            patch(
-                "resonance.concerts.worker.concert_sync.match_candidates_to_artists"
-            ) as mock_match,
-            patch(
-                "resonance.concerts.worker.lifecycle_module.complete_task"
-            ) as mock_complete,
-        ):
-            mock_upsert_venue.return_value = MagicMock()
-            mock_upsert_event.return_value = (MagicMock(), True)
-            mock_match.return_value = 0
+        with _patch_candidate_sync() as mocks:
+            mocks["match_candidates"].return_value = 0
 
             await concert_worker.sync_concert_archives(
                 ctx, str(task.id), csv_with_warning
             )
 
-            mock_complete.assert_awaited_once()
-            result_arg = mock_complete.call_args.args[2]
+            mocks["complete_task"].assert_awaited_once()
+            result_arg = mocks["complete_task"].call_args.args[2]
             assert "warnings" in result_arg
             assert len(result_arg["warnings"]) > 0
 
     @pytest.mark.anyio()
     async def test_event_update_counts_correctly(self) -> None:
-        """Tracks events_updated when upsert_event returns created=False."""
+        """Tracks events_updated when resolve_event_candidate returns created=False."""
         connection = _make_connection()
         task = _make_task(
             user_id=connection.user_id,
@@ -382,37 +385,19 @@ Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with (
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
-            patch(
-                "resonance.concerts.worker.concert_sync.upsert_candidates"
-            ) as mock_upsert_candidates,
-            patch("resonance.concerts.worker.concert_sync.upsert_attendance"),
-            patch(
-                "resonance.concerts.worker.concert_sync.match_candidates_to_artists"
-            ) as mock_match,
-            patch(
-                "resonance.concerts.worker.lifecycle_module.complete_task"
-            ) as mock_complete,
-        ):
-            mock_upsert_venue.return_value = MagicMock()
-            # First event is new, second is existing
-            mock_event = MagicMock()
-            mock_upsert_event.side_effect = [
+        mock_event = MagicMock()
+        with _patch_candidate_sync(
+            event_results=[
                 (mock_event, True),
                 (mock_event, False),
-            ]
-            mock_upsert_candidates.return_value = 0
-            mock_match.return_value = 0
+            ],
+        ) as mocks:
+            mocks["upsert_candidates"].return_value = 0
+            mocks["match_candidates"].return_value = 0
 
             await concert_worker.sync_concert_archives(ctx, str(task.id), _SAMPLE_CSV)
 
-            mock_complete.assert_awaited_once()
-            result_arg = mock_complete.call_args.args[2]
+            mocks["complete_task"].assert_awaited_once()
+            result_arg = mocks["complete_task"].call_args.args[2]
             assert result_arg["events_created"] == 1
             assert result_arg["events_updated"] == 1

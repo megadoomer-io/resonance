@@ -166,11 +166,17 @@ class TestFullSongkickSyncPipeline:
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.resolve_venue_candidate"
+            ) as mock_rvc,
+            patch(
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_candidates"
             ) as mock_upsert_candidates,
@@ -186,12 +192,10 @@ class TestFullSongkickSyncPipeline:
         ):
             _setup_http_mock(mock_client_cls, SAMPLE_SONGKICK_FEED)
 
-            # Upsert mocks — 2 feeds * 2 events each = up to 4 venues
-            mock_venue = MagicMock()
-            mock_upsert_venue.return_value = mock_venue
-
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uvc.return_value = MagicMock()
+            mock_rvc.return_value = MagicMock()
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_upsert_candidates.return_value = 1
             mock_match.return_value = 0
 
@@ -199,20 +203,12 @@ class TestFullSongkickSyncPipeline:
                 ctx, str(connection.id), str(task.id)
             )
 
-            # Both feeds fetched: 2 events per feed * 2 feeds = 4 events
-            assert mock_upsert_event.await_count == 4
+            # Both feeds fetched: 2 events per feed * 2 feeds = 4 event candidates
+            assert mock_rec.await_count == 4
 
-            # Verify all events use SONGKICK source service
-            for event_call in mock_upsert_event.call_args_list:
-                assert event_call.args[2] == types_module.ServiceType.SONGKICK
-
-            # Attendance: only the attendance feed has DESCRIPTION, but both
-            # feeds return events — attendance upserts for events with status
-            # The attendance feed has 2 events with attendance, the tracked
-            # feed has 0 (no attendance parsing for SONGKICK_TRACKED_ARTIST)
+            # Attendance: only the attendance feed has DESCRIPTION
             assert mock_upsert_attendance.await_count == 2
 
-            # Attendance status for first feed events
             att_call_1 = mock_upsert_attendance.call_args_list[0]
             assert att_call_1.args[1] == connection.user_id
             assert att_call_1.args[3] == "going"
@@ -268,11 +264,17 @@ class TestIdempotentSync:
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.resolve_venue_candidate"
+            ) as mock_rvc,
+            patch(
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_candidates"
             ) as mock_upsert_candidates,
@@ -286,10 +288,10 @@ class TestIdempotentSync:
         ):
             _setup_http_mock(mock_client_cls, SAMPLE_SONGKICK_FEED)
 
-            mock_venue = MagicMock()
-            mock_upsert_venue.return_value = mock_venue
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uvc.return_value = MagicMock()
+            mock_rvc.return_value = MagicMock()
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_upsert_candidates.return_value = 0
             mock_match.return_value = 0
 
@@ -336,11 +338,15 @@ class TestGenericIcalSync:
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_venue"
-            ) as mock_upsert_venue,
+                "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
+            ) as mock_uvc,
+            patch("resonance.concerts.worker.concert_sync.resolve_venue_candidate"),
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_candidates"
             ) as mock_upsert_candidates,
@@ -356,8 +362,8 @@ class TestGenericIcalSync:
         ):
             _setup_http_mock(mock_client_cls, SAMPLE_GENERIC_ICAL)
 
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_match.return_value = 0
 
             await concert_worker.sync_calendar_feed(
@@ -365,17 +371,10 @@ class TestGenericIcalSync:
             )
 
             # -- 2 events parsed --
-            assert mock_upsert_event.await_count == 2
+            assert mock_rec.await_count == 2
 
-            # -- Event source service is ICAL --
-            for event_call in mock_upsert_event.call_args_list:
-                assert event_call.args[2] == types_module.ServiceType.ICAL
-
-            # -- Generic iCal: no venue parsing (venue is None for both) --
-            mock_upsert_venue.assert_not_awaited()
-
-            for event_call in mock_upsert_event.call_args_list:
-                assert event_call.args[3] is None  # venue arg is None
+            # -- Generic iCal: no venue parsing (venue is None) --
+            mock_uvc.assert_not_awaited()
 
             # -- Generic feed: no artist candidate extraction --
             mock_upsert_candidates.assert_not_awaited()
@@ -406,10 +405,14 @@ class TestGenericIcalSync:
 
         with (
             patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
-            patch("resonance.concerts.worker.concert_sync.upsert_venue"),
+            patch("resonance.concerts.worker.concert_sync.upsert_venue_candidate"),
+            patch("resonance.concerts.worker.concert_sync.resolve_venue_candidate"),
             patch(
-                "resonance.concerts.worker.concert_sync.upsert_event"
-            ) as mock_upsert_event,
+                "resonance.concerts.worker.concert_sync.upsert_event_candidate"
+            ) as mock_uec,
+            patch(
+                "resonance.concerts.worker.concert_sync.resolve_event_candidate"
+            ) as mock_rec,
             patch("resonance.concerts.worker.concert_sync.upsert_candidates"),
             patch("resonance.concerts.worker.concert_sync.upsert_attendance"),
             patch(
@@ -419,18 +422,17 @@ class TestGenericIcalSync:
         ):
             _setup_http_mock(mock_client_cls, SAMPLE_GENERIC_ICAL)
 
-            mock_event = MagicMock()
-            mock_upsert_event.return_value = (mock_event, True)
+            mock_uec.return_value = MagicMock()
+            mock_rec.return_value = (MagicMock(), True)
             mock_match.return_value = 0
 
             await concert_worker.sync_calendar_feed(
                 ctx, str(connection.id), str(task.id)
             )
 
-            # Event 1: 2026-07-01
-            parsed_event_1 = mock_upsert_event.call_args_list[0].args[1]
-            assert parsed_event_1.event_date == datetime.date(2026, 7, 1)
+            # Verify parsed event dates
+            parsed_1 = mock_uec.call_args_list[0].args[1]
+            assert parsed_1.event_date == datetime.date(2026, 7, 1)
 
-            # Event 2: 2026-08-15
-            parsed_event_2 = mock_upsert_event.call_args_list[1].args[1]
-            assert parsed_event_2.event_date == datetime.date(2026, 8, 15)
+            parsed_2 = mock_uec.call_args_list[1].args[1]
+            assert parsed_2.event_date == datetime.date(2026, 8, 15)

@@ -255,6 +255,263 @@ async def match_candidates_to_artists(
     return matched_count
 
 
+_VENUE_CONFIDENCE = 100
+_EVENT_CONFIDENCE = 100
+
+
+async def upsert_venue_candidate(
+    session: AsyncSession,
+    venue_data: ical_module.VenueData,
+    source_service: types_module.ServiceType,
+    external_id: str,
+) -> concert_models.VenueCandidate:
+    """Create or update a VenueCandidate from parsed venue data.
+
+    Args:
+        session: The async database session.
+        venue_data: Parsed venue data from the source.
+        source_service: The source service.
+        external_id: External ID for this venue in the source.
+
+    Returns:
+        The existing or newly created VenueCandidate.
+    """
+    stmt = sa.select(concert_models.VenueCandidate).where(
+        concert_models.VenueCandidate.source_service == source_service,
+        concert_models.VenueCandidate.external_id == external_id,
+    )
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    if existing is not None:
+        existing.name = venue_data.name
+        existing.city = venue_data.city
+        existing.state = venue_data.state
+        existing.country = venue_data.country
+        return existing
+
+    candidate = concert_models.VenueCandidate(
+        id=uuid.uuid4(),
+        source_service=source_service,
+        external_id=external_id,
+        name=venue_data.name,
+        city=venue_data.city,
+        state=venue_data.state,
+        country=venue_data.country,
+    )
+    session.add(candidate)
+    return candidate
+
+
+async def resolve_venue_candidate(
+    session: AsyncSession,
+    candidate: concert_models.VenueCandidate,
+) -> concert_models.Venue:
+    """Auto-resolve a VenueCandidate to an existing or new Venue.
+
+    Uses normalized name comparison. If a matching Venue exists (and is not
+    excluded), links the candidate to it. Otherwise creates a new Venue.
+
+    Args:
+        session: The async database session.
+        candidate: The VenueCandidate to resolve.
+
+    Returns:
+        The resolved Venue.
+    """
+    if candidate.resolved_venue_id is not None:
+        result = await session.execute(
+            sa.select(concert_models.Venue).where(
+                concert_models.Venue.id == candidate.resolved_venue_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            return existing
+
+    norm_name = normalize_module.normalize_name(candidate.name)
+    norm_city = normalize_module.normalize_name(candidate.city or "")
+    norm_state = normalize_module.normalize_name(candidate.state or "")
+    norm_country = normalize_module.normalize_name(candidate.country or "")
+
+    venues_result = await session.execute(
+        sa.select(concert_models.Venue).where(
+            sa.func.lower(concert_models.Venue.name) == norm_name,
+            sa.func.lower(concert_models.Venue.city) == norm_city,
+        )
+    )
+    potential_matches = venues_result.scalars().all()
+
+    for venue in potential_matches:
+        if (
+            normalize_module.normalize_name(venue.state or "") == norm_state
+            and normalize_module.normalize_name(venue.country or "") == norm_country
+        ):
+            if await _is_excluded(session, "venue", venue.id, candidate):
+                continue
+            candidate.resolved_venue_id = venue.id
+            candidate.confidence_score = _VENUE_CONFIDENCE
+            candidate.status = types_module.CandidateStatus.AUTO_ACCEPTED
+            return venue
+
+    venue = concert_models.Venue(
+        id=uuid.uuid4(),
+        name=candidate.name,
+        city=candidate.city,
+        state=candidate.state,
+        country=candidate.country,
+    )
+    session.add(venue)
+    candidate.resolved_venue_id = venue.id
+    candidate.confidence_score = _VENUE_CONFIDENCE
+    candidate.status = types_module.CandidateStatus.AUTO_ACCEPTED
+    logger.info("created_venue", name=candidate.name, city=candidate.city)
+    return venue
+
+
+async def upsert_event_candidate(
+    session: AsyncSession,
+    parsed: ical_module.ParsedEvent,
+    source_service: types_module.ServiceType,
+    venue_candidate: concert_models.VenueCandidate | None,
+) -> concert_models.EventCandidate:
+    """Create or update an EventCandidate from parsed event data.
+
+    Args:
+        session: The async database session.
+        parsed: Parsed event data from the source.
+        source_service: The source service.
+        venue_candidate: The VenueCandidate for this event's venue, or None.
+
+    Returns:
+        The existing or newly created EventCandidate.
+    """
+    stmt = sa.select(concert_models.EventCandidate).where(
+        concert_models.EventCandidate.source_service == source_service,
+        concert_models.EventCandidate.external_id == parsed.external_id,
+    )
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    if existing is not None:
+        existing.title = parsed.title
+        existing.event_date = parsed.event_date
+        existing.external_url = parsed.external_url
+        existing.venue_candidate_id = venue_candidate.id if venue_candidate else None
+        existing.attendance_status = parsed.attendance_status
+        return existing
+
+    candidate = concert_models.EventCandidate(
+        id=uuid.uuid4(),
+        source_service=source_service,
+        external_id=parsed.external_id,
+        external_url=parsed.external_url,
+        title=parsed.title,
+        event_date=parsed.event_date,
+        venue_candidate_id=venue_candidate.id if venue_candidate else None,
+        attendance_status=parsed.attendance_status,
+    )
+    session.add(candidate)
+    return candidate
+
+
+async def resolve_event_candidate(
+    session: AsyncSession,
+    candidate: concert_models.EventCandidate,
+    venue: concert_models.Venue | None,
+) -> tuple[concert_models.Event, bool]:
+    """Auto-resolve an EventCandidate to an existing or new Event.
+
+    Matches by (event_date, venue_id) across sources. Also updates
+    the resolved Event on the events table for backward compatibility.
+
+    Args:
+        session: The async database session.
+        candidate: The EventCandidate to resolve.
+        venue: The resolved Venue, or None.
+
+    Returns:
+        A tuple of (event, created) where created is True for new events.
+    """
+    venue_id = venue.id if venue is not None else None
+
+    if candidate.resolved_event_id is not None:
+        result = await session.execute(
+            sa.select(concert_models.Event).where(
+                concert_models.Event.id == candidate.resolved_event_id
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            existing.title = candidate.title
+            existing.event_date = candidate.event_date
+            existing.external_url = candidate.external_url
+            existing.venue_id = venue_id
+            return existing, False
+
+    if venue_id is not None:
+        match_stmt = sa.select(concert_models.Event).where(
+            concert_models.Event.event_date == candidate.event_date,
+            concert_models.Event.venue_id == venue_id,
+        )
+        match_result = await session.execute(match_stmt)
+        potential_match = match_result.scalar_one_or_none()
+
+        if potential_match is not None and not await _is_excluded(
+            session, "event", potential_match.id, candidate
+        ):
+            candidate.resolved_event_id = potential_match.id
+            candidate.confidence_score = _EVENT_CONFIDENCE
+            candidate.status = types_module.CandidateStatus.AUTO_ACCEPTED
+            return potential_match, False
+
+    event = concert_models.Event(
+        id=uuid.uuid4(),
+        title=candidate.title,
+        event_date=candidate.event_date,
+        venue_id=venue_id,
+        source_service=candidate.source_service,
+        external_id=candidate.external_id,
+        external_url=candidate.external_url,
+    )
+    session.add(event)
+    candidate.resolved_event_id = event.id
+    candidate.confidence_score = _EVENT_CONFIDENCE
+    candidate.status = types_module.CandidateStatus.AUTO_ACCEPTED
+    logger.info(
+        "created_event",
+        title=candidate.title,
+        external_id=candidate.external_id,
+    )
+    return event, True
+
+
+async def _is_excluded(
+    session: AsyncSession,
+    entity_type: str,
+    entity_id: uuid.UUID,
+    candidate: concert_models.VenueCandidate | concert_models.EventCandidate,
+) -> bool:
+    """Check if resolving a candidate to an entity would violate an exclusion."""
+    resolved_id = getattr(candidate, "resolved_venue_id", None) or getattr(
+        candidate, "resolved_event_id", None
+    )
+    if resolved_id is None:
+        return False
+
+    a_id = min(entity_id, resolved_id)
+    b_id = max(entity_id, resolved_id)
+
+    result = await session.execute(
+        sa.select(concert_models.EntityExclusion.id).where(
+            concert_models.EntityExclusion.entity_type == entity_type,
+            concert_models.EntityExclusion.entity_a_id == a_id,
+            concert_models.EntityExclusion.entity_b_id == b_id,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def reconcile_unmatched_candidates(
     session: AsyncSession,
 ) -> int:
