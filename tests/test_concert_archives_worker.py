@@ -164,6 +164,27 @@ class TestSyncConcertArchivesLifecycle:
             result_arg = mock_complete.call_args.args[2]
             assert result_arg == {"skipped": "connection disabled"}
 
+    @pytest.mark.anyio()
+    async def test_orphan_recovery_missing_csv_fails_gracefully(self) -> None:
+        """Fails task gracefully when csv_content is None (orphan recovery)."""
+        task = _make_task()
+        session = AsyncMock()
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+        session.execute.return_value = task_result
+        ctx = _make_ctx(session)
+
+        with patch("resonance.concerts.worker.lifecycle_module.fail_task") as mock_fail:
+            await concert_worker.sync_concert_archives(ctx, str(task.id))
+
+            mock_fail.assert_awaited_once()
+            error_msg = mock_fail.call_args.args[2]
+            assert "CSV content unavailable" in error_msg
+            assert "re-upload" in error_msg
+
+        # Only one execute call (task lookup) — no connection lookup
+        assert session.execute.await_count == 1
+
 
 class TestSyncConcertArchivesImport:
     """Tests for successful CSV import processing."""

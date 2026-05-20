@@ -212,7 +212,7 @@ async def sync_calendar_feed(
 
 
 async def sync_concert_archives(
-    ctx: dict[str, Any], task_id: str, csv_content: str
+    ctx: dict[str, Any], task_id: str, csv_content: str | None = None
 ) -> None:
     """Parse a Concert Archives CSV export and sync into the database.
 
@@ -220,10 +220,15 @@ async def sync_concert_archives(
     the CSV content, upserts venues/events/candidates/attendance, and
     tracks counts.
 
+    When ``csv_content`` is ``None`` (e.g. orphan recovery re-enqueued the
+    task without the original upload data), the task is failed gracefully
+    with a message asking the user to re-upload.
+
     Args:
         ctx: arq worker context dict (contains session_factory).
         task_id: UUID string of the Task tracking this import.
-        csv_content: Raw CSV file content as a string.
+        csv_content: Raw CSV file content as a string, or None when
+            the content is unavailable (orphan recovery).
     """
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
         "session_factory"
@@ -237,6 +242,18 @@ async def sync_concert_archives(
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("concert_archives_import_task_not_found")
+                return
+
+            # Orphan recovery cannot reconstruct the uploaded CSV content.
+            # Fail the task gracefully so the user knows to re-upload.
+            if csv_content is None:
+                log.warning("concert_archives_csv_unavailable", task_id=task_id)
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    "CSV content unavailable — please re-upload the file",
+                )
+                await session.commit()
                 return
 
             task.status = types_module.SyncStatus.RUNNING
