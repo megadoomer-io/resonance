@@ -80,7 +80,7 @@ async def upload_csv(
 
     # 3. Validate CSV by parsing
     try:
-        concert_archives_module.parse_csv(csv_text)
+        parse_result = concert_archives_module.parse_csv(csv_text)
     except ValueError as exc:
         raise fastapi.HTTPException(
             status_code=422,
@@ -120,7 +120,7 @@ async def upload_csv(
                 )
     else:
         # 7. Create new ServiceConnection
-        urls = _extract_urls(csv_text)
+        urls = [e.external_url for e in parse_result.events if e.external_url]
         username = concert_archives_module.parse_username(file.filename or "", urls)
         connection = user_models.ServiceConnection(
             user_id=user_id,
@@ -208,24 +208,3 @@ def _resolve_export_date(form_value: str | None, filename: str | None) -> dateti
             return detected
 
     return datetime.date.today()
-
-
-def _extract_urls(csv_text: str) -> list[str]:
-    """Extract URL column values from parsed CSV for username detection.
-
-    Args:
-        csv_text: The raw CSV content.
-
-    Returns:
-        A list of URL strings from the CSV rows.
-    """
-    import csv
-    import io
-
-    urls: list[str] = []
-    reader = csv.DictReader(io.StringIO(csv_text))
-    for row in reader:
-        url = (row.get("URL") or "").strip()
-        if url:
-            urls.append(url)
-    return urls

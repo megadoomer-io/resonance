@@ -444,6 +444,25 @@ class TestUploadValidation:
 
         assert resp.status_code == 422
 
+    async def test_non_utf8_file_returns_422(self, user_id: uuid.UUID) -> None:
+        db = FakeAsyncSession()
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.post(
+                _UPLOAD_URL,
+                files={"file": ("test.csv", b"\xff\xfe not utf8", "text/csv")},
+            )
+
+        assert resp.status_code == 422
+        assert "utf-8" in resp.json()["detail"].lower()
+
     async def test_file_too_large_returns_413(self, user_id: uuid.UUID) -> None:
         # Create content just over 5MB
         large_content = "x" * (5 * 1024 * 1024 + 1)
