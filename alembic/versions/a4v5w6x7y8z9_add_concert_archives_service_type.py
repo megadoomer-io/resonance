@@ -80,7 +80,12 @@ def _replace_constraints(
             {"table_name": table, "column_name": column},
         )
         for (constraint_name,) in result:
-            op.drop_constraint(constraint_name, table, type_="check")
+            conn.execute(
+                sa.text(
+                    f'ALTER TABLE "{table}" DROP CONSTRAINT'
+                    f' IF EXISTS "{constraint_name}"'
+                )
+            )
 
         op.create_check_constraint(
             f"ck_{table}_{column}_{constraint_suffix}",
