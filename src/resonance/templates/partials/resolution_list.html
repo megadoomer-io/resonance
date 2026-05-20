@@ -1,0 +1,217 @@
+<div id="resolution-result"></div>
+
+{% if view == "pending" %}
+    {% if pending_venue_candidates %}
+    <h3>Venue Candidates ({{ pending_venue_candidates | length }})</h3>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Name</th><th>City</th><th>Source</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {% for vc in pending_venue_candidates %}
+                <tr>
+                    <td>{{ vc.name }}</td>
+                    <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
+                    <td>{{ vc.source_service.value }}</td>
+                    <td>{{ vc.status.value }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% endif %}
+
+    {% if pending_event_candidates %}
+    <h3>Event Candidates ({{ pending_event_candidates | length }})</h3>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Title</th><th>Date</th><th>Source</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {% for ec in pending_event_candidates %}
+                <tr>
+                    <td>{{ ec.title }}</td>
+                    <td>{{ ec.event_date }}</td>
+                    <td>{{ ec.source_service.value }}</td>
+                    <td>{{ ec.status.value }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% endif %}
+
+    {% if not pending_venue_candidates and not pending_event_candidates %}
+    <p>No pending candidates.</p>
+    {% endif %}
+
+{% elif view == "multi_source" %}
+    {% if multi_cand_venues %}
+    <h3>Venues ({{ multi_cand_venues | length }})</h3>
+    {% for venue, candidates in multi_cand_venues %}
+    <details>
+        <summary>
+            {{ venue.name }} — {{ venue.city or '?' }} ({{ candidates | length }} sources)
+            <button
+                hx-post="/admin/resolution/confirm-venue/{{ venue.id }}"
+                hx-target="#resolution-result"
+                hx-swap="innerHTML"
+                class="outline"
+                style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+                onclick="event.stopPropagation()"
+            >Confirm All</button>
+        </summary>
+        <figure>
+            <table>
+                <thead>
+                    <tr><th>Source</th><th>Name (as imported)</th><th>City</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                    {% for vc in candidates %}
+                    <tr>
+                        <td>{{ vc.source_service.value }}</td>
+                        <td>{{ vc.name }}</td>
+                        <td>{{ vc.city or '' }}</td>
+                        <td>{{ vc.status.value }}</td>
+                        <td>
+                            <button
+                                hx-post="/admin/resolution/unlink-venue-candidate/{{ vc.id }}"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Unlink this candidate? It will return to the pending queue."
+                                class="outline secondary"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Unlink</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </figure>
+    </details>
+    {% endfor %}
+    {% endif %}
+
+    {% if multi_cand_events %}
+    <h3>Events ({{ multi_cand_events | length }})</h3>
+    {% for event, candidates in multi_cand_events %}
+    <details>
+        <summary>
+            {{ event.title }} — {{ event.event_date }} ({{ candidates | length }} sources)
+            <button
+                hx-post="/admin/resolution/confirm-event/{{ event.id }}"
+                hx-target="#resolution-result"
+                hx-swap="innerHTML"
+                class="outline"
+                style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+                onclick="event.stopPropagation()"
+            >Confirm All</button>
+        </summary>
+        <figure>
+            <table>
+                <thead>
+                    <tr><th>Source</th><th>Title (as imported)</th><th>Date</th><th>Status</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                    {% for ec in candidates %}
+                    <tr>
+                        <td>{{ ec.source_service.value }}</td>
+                        <td>{{ ec.title }}</td>
+                        <td>{{ ec.event_date }}</td>
+                        <td>{{ ec.status.value }}</td>
+                        <td>
+                            <button
+                                hx-post="/admin/resolution/unlink-event-candidate/{{ ec.id }}"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Unlink this candidate? It will return to the pending queue."
+                                class="outline secondary"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Unlink</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </figure>
+    </details>
+    {% endfor %}
+    {% endif %}
+
+    {% if not multi_cand_venues and not multi_cand_events %}
+    <p>No multi-source entities found.</p>
+    {% endif %}
+
+{% elif view == "merge_suggestions" %}
+    {% if venue_merge_suggestions %}
+    <h3>Venue Merge Suggestions ({{ venue_merge_suggestions | length }})</h3>
+    <p>Venues with similar normalized names. Merging moves candidates and events to the venue with the most events.</p>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Venues</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for group in venue_merge_suggestions %}
+                <tr id="merge-group-{{ loop.index }}">
+                    <td>
+                        {% for v in group %}
+                        <strong>{{ v.name }}</strong> ({{ v.city or '?' }}, {{ v.events | length }} events){% if not loop.last %}<br>{% endif %}
+                        {% endfor %}
+                    </td>
+                    <td>
+                        <button
+                            hx-post="/admin/resolution/merge-venues"
+                            hx-ext="json-enc"
+                            hx-vals='{"venue_ids": [{% for v in group %}"{{ v.id }}"{% if not loop.last %}, {% endif %}{% endfor %}]}'
+                            hx-target="#resolution-result"
+                            hx-swap="innerHTML"
+                            hx-confirm="Merge these {{ group | length }} venues?"
+                            class="outline"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                        >Merge</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% else %}
+    <p>No merge suggestions found.</p>
+    {% endif %}
+
+{% elif view == "orphaned" %}
+    {% if orphaned_venues %}
+    <h3>Orphaned Venues ({{ orphaned_venues | length }})</h3>
+    <p>Venues with no source candidates and no events.</p>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Name</th><th>City</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for v in orphaned_venues %}
+                <tr id="orphan-venue-{{ v.id }}">
+                    <td>{{ v.name }}</td>
+                    <td>{{ v.city or '' }}</td>
+                    <td>
+                        <button
+                            hx-post="/admin/resolution/delete-orphan-venue/{{ v.id }}"
+                            hx-target="#orphan-venue-{{ v.id }}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Delete orphaned venue {{ v.name }}?"
+                            class="outline secondary"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                        >Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% else %}
+    <p>No orphaned entities found.</p>
+    {% endif %}
+{% endif %}

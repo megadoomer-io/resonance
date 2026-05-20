@@ -3293,11 +3293,28 @@ async def dedup_tracks(
     return await _enqueue_bulk_job(request, "dedup_tracks")
 
 
+_RESOLUTION_PRESETS: list[dict[str, str]] = [
+    {"name": "pending", "label": "Pending", "params": "view=pending"},
+    {"name": "multi_source", "label": "Multi-Source", "params": "view=multi_source"},
+    {
+        "name": "merge_suggestions",
+        "label": "Merge Suggestions",
+        "params": "view=merge_suggestions",
+    },
+    {"name": "orphaned", "label": "Orphaned", "params": "view=orphaned"},
+]
+
+_RESOLUTION_VIEWS = frozenset(p["name"] for p in _RESOLUTION_PRESETS)
+
+
 @router.get("/admin/resolution", response_model=None)
 async def admin_resolution(
     request: fastapi.Request,
+    view: str = "pending",
+    entity: str = "all",
+    q: str = "",
 ) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
-    """Admin page for entity resolution: candidates, duplicates, orphans."""
+    """Admin page for entity resolution with preset views and search."""
     user_id = request.state.session.get("user_id")
     if not user_id:
         return fastapi.responses.RedirectResponse(url="/login", status_code=307)
@@ -3306,108 +3323,166 @@ async def admin_resolution(
     if user_role not in ("admin", "owner"):
         return fastapi.responses.RedirectResponse(url="/", status_code=307)
 
+    if view not in _RESOLUTION_VIEWS:
+        view = "pending"
+
+    import resonance.normalize as normalize_module
+
+    search_norm = normalize_module.normalize_name(q) if q else ""
+
+    pending_venue_candidates: list[concert_models.VenueCandidate] = []
+    pending_event_candidates: list[concert_models.EventCandidate] = []
+    multi_cand_venues: list[
+        tuple[concert_models.Venue, list[concert_models.VenueCandidate]]
+    ] = []
+    multi_cand_events: list[
+        tuple[concert_models.Event, list[concert_models.EventCandidate]]
+    ] = []
+    venue_merge_suggestions: list[list[concert_models.Venue]] = []
+    orphaned_venues: list[concert_models.Venue] = []
+
     async with _get_db(request) as db:
-        import resonance.normalize as normalize_module
+        if view == "pending":
+            if entity in ("all", "venues"):
+                vc_stmt = sa.select(concert_models.VenueCandidate).where(
+                    concert_models.VenueCandidate.status
+                    == types_module.CandidateStatus.PENDING
+                )
+                if search_norm:
+                    vc_stmt = vc_stmt.where(
+                        sa.func.lower(concert_models.VenueCandidate.name).contains(
+                            search_norm
+                        )
+                    )
+                vc_stmt = vc_stmt.order_by(
+                    concert_models.VenueCandidate.created_at.desc()
+                ).limit(50)
+                pending_venue_candidates = list(
+                    (await db.execute(vc_stmt)).scalars().all()
+                )
 
-        # Pending venue candidates
-        pending_vc_result = await db.execute(
-            sa.select(concert_models.VenueCandidate)
-            .where(
-                concert_models.VenueCandidate.status
-                == types_module.CandidateStatus.PENDING
+            if entity in ("all", "events"):
+                ec_stmt = sa.select(concert_models.EventCandidate).where(
+                    concert_models.EventCandidate.status
+                    == types_module.CandidateStatus.PENDING
+                )
+                if search_norm:
+                    ec_stmt = ec_stmt.where(
+                        sa.func.lower(concert_models.EventCandidate.title).contains(
+                            search_norm
+                        )
+                    )
+                ec_stmt = ec_stmt.order_by(
+                    concert_models.EventCandidate.created_at.desc()
+                ).limit(50)
+                pending_event_candidates = list(
+                    (await db.execute(ec_stmt)).scalars().all()
+                )
+
+        elif view == "multi_source":
+            if entity in ("all", "venues"):
+                venues_result = await db.execute(
+                    sa.select(concert_models.Venue).options(
+                        sa_orm.selectinload(concert_models.Venue.candidates)
+                    )
+                )
+                for venue in venues_result.scalars().all():
+                    if len(venue.candidates) > 1:
+                        if search_norm and search_norm not in venue.name.lower():
+                            continue
+                        multi_cand_venues.append((venue, list(venue.candidates)))
+
+            if entity in ("all", "events"):
+                events_result = await db.execute(
+                    sa.select(concert_models.Event).options(
+                        sa_orm.selectinload(concert_models.Event.event_candidates)
+                    )
+                )
+                for event in events_result.scalars().all():
+                    if len(event.event_candidates) > 1:
+                        if search_norm and search_norm not in event.title.lower():
+                            continue
+                        multi_cand_events.append((event, list(event.event_candidates)))
+
+        elif view == "merge_suggestions":
+            all_venues_result = await db.execute(
+                sa.select(concert_models.Venue).options(
+                    sa_orm.selectinload(concert_models.Venue.events),
+                )
             )
-            .order_by(concert_models.VenueCandidate.created_at.desc())
-            .limit(50)
+            all_venues = list(all_venues_result.scalars().all())
+            seen_ids: set[uuid.UUID] = set()
+            groups: dict[tuple[str, ...], list[concert_models.Venue]] = {}
+            for v in all_venues:
+                key = (
+                    normalize_module.normalize_name(v.name),
+                    normalize_module.normalize_name(v.city or ""),
+                )
+                groups.setdefault(key, []).append(v)
+            for group in groups.values():
+                if len(group) > 1 and group[0].id not in seen_ids:
+                    if search_norm:
+                        names = " ".join(v.name.lower() for v in group)
+                        if search_norm not in names:
+                            continue
+                    venue_merge_suggestions.append(group)
+                    for v in group:
+                        seen_ids.add(v.id)
+
+        elif view == "orphaned":
+            venues_with_rels = await db.execute(
+                sa.select(concert_models.Venue).options(
+                    sa_orm.selectinload(concert_models.Venue.candidates),
+                    sa_orm.selectinload(concert_models.Venue.events),
+                )
+            )
+            for v in venues_with_rels.scalars().all():
+                if not v.candidates and not v.events:
+                    if search_norm and search_norm not in v.name.lower():
+                        continue
+                    orphaned_venues.append(v)
+
+    active_filters: dict[str, object] = {}
+    if q:
+        active_filters["q"] = q
+    if entity != "all":
+        active_filters["entity"] = [entity]
+
+    context: dict[str, object] = {
+        "user_id": user_id,
+        "user_tz": _user_tz(request),
+        "user_role": user_role,
+        "view": view,
+        "entity": entity,
+        "pending_venue_candidates": pending_venue_candidates,
+        "pending_event_candidates": pending_event_candidates,
+        "multi_cand_venues": multi_cand_venues,
+        "multi_cand_events": multi_cand_events,
+        "venue_merge_suggestions": venue_merge_suggestions,
+        "orphaned_venues": orphaned_venues,
+        "presets": _RESOLUTION_PRESETS,
+        "active_preset": view,
+        "active_filters": active_filters,
+        "list_url": "/admin/resolution",
+        "list_target": "#resolution-list",
+        "filters": [
+            {
+                "name": "entity",
+                "label": "Entity Type",
+                "type": "multiselect",
+                "options": [
+                    {"value": "venues", "label": "Venues"},
+                    {"value": "events", "label": "Events"},
+                ],
+            },
+        ],
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/resolution_list.html", context
         )
-        pending_venue_candidates = list(pending_vc_result.scalars().all())
-
-        # Pending event candidates
-        pending_ec_result = await db.execute(
-            sa.select(concert_models.EventCandidate)
-            .where(
-                concert_models.EventCandidate.status
-                == types_module.CandidateStatus.PENDING
-            )
-            .order_by(concert_models.EventCandidate.created_at.desc())
-            .limit(50)
-        )
-        pending_event_candidates = list(pending_ec_result.scalars().all())
-
-        # Venues with multiple candidates (potential duplicates)
-        multi_cand_venues: list[
-            tuple[concert_models.Venue, list[concert_models.VenueCandidate]]
-        ] = []
-        venues_result = await db.execute(
-            sa.select(concert_models.Venue).options(
-                sa_orm.selectinload(concert_models.Venue.candidates)
-            )
-        )
-        for venue in venues_result.scalars().all():
-            if len(venue.candidates) > 1:
-                multi_cand_venues.append((venue, list(venue.candidates)))
-
-        # Events with multiple candidates (cross-source)
-        multi_cand_events: list[
-            tuple[concert_models.Event, list[concert_models.EventCandidate]]
-        ] = []
-        events_result = await db.execute(
-            sa.select(concert_models.Event).options(
-                sa_orm.selectinload(concert_models.Event.event_candidates)
-            )
-        )
-        for event in events_result.scalars().all():
-            if len(event.event_candidates) > 1:
-                multi_cand_events.append((event, list(event.event_candidates)))
-
-        # Suggest venue merges via normalized name matching
-        all_venues_result = await db.execute(
-            sa.select(concert_models.Venue).options(
-                sa_orm.selectinload(concert_models.Venue.events),
-            )
-        )
-        all_venues = list(all_venues_result.scalars().all())
-        venue_merge_suggestions: list[list[concert_models.Venue]] = []
-        seen_ids: set[uuid.UUID] = set()
-        groups: dict[tuple[str, ...], list[concert_models.Venue]] = {}
-        for v in all_venues:
-            key = (
-                normalize_module.normalize_name(v.name),
-                normalize_module.normalize_name(v.city or ""),
-            )
-            groups.setdefault(key, []).append(v)
-        for group in groups.values():
-            if len(group) > 1 and group[0].id not in seen_ids:
-                venue_merge_suggestions.append(group)
-                for v in group:
-                    seen_ids.add(v.id)
-
-        # Orphaned venues (no candidates, no events)
-        orphaned_venues: list[concert_models.Venue] = []
-        venues_with_events = await db.execute(
-            sa.select(concert_models.Venue).options(
-                sa_orm.selectinload(concert_models.Venue.candidates),
-                sa_orm.selectinload(concert_models.Venue.events),
-            )
-        )
-        for v in venues_with_events.scalars().all():
-            if not v.candidates and not v.events:
-                orphaned_venues.append(v)
-
-    return templates.TemplateResponse(
-        request,
-        "admin_resolution.html",
-        {
-            "user_id": user_id,
-            "user_tz": _user_tz(request),
-            "user_role": user_role,
-            "pending_venue_candidates": pending_venue_candidates,
-            "pending_event_candidates": pending_event_candidates,
-            "multi_cand_venues": multi_cand_venues,
-            "multi_cand_events": multi_cand_events,
-            "venue_merge_suggestions": venue_merge_suggestions,
-            "orphaned_venues": orphaned_venues,
-        },
-    )
+    return templates.TemplateResponse(request, "admin_resolution.html", context)
 
 
 @router.post("/admin/resolution/unlink-venue-candidate/{candidate_id}")
