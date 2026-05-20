@@ -145,7 +145,13 @@ async def dashboard(
             sa.select(task_models.Task)
             .where(
                 task_models.Task.user_id == user_uuid,
-                task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
+                task_models.Task.task_type.in_(
+                    [
+                        types_module.TaskType.SYNC_JOB,
+                        types_module.TaskType.CALENDAR_SYNC,
+                        types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
+                    ]
+                ),
             )
             .order_by(task_models.Task.created_at.desc())
             .limit(1)
@@ -2913,6 +2919,7 @@ async def sync_status_partial(
                     [
                         types_module.TaskType.SYNC_JOB,
                         types_module.TaskType.CALENDAR_SYNC,
+                        types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
                     ]
                 ),
             )
