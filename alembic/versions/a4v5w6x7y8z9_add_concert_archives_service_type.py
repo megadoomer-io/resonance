@@ -102,6 +102,10 @@ def upgrade() -> None:
         op.alter_column(table, column, type_=sa.String(17))
     op.alter_column("sync_tasks", "task_type", type_=sa.String(24))
 
+    # Widen venues.country from varchar(2) (country codes) to varchar(256)
+    # (full country names, needed for Concert Archives location format).
+    op.alter_column("venues", "country", type_=sa.String(256))
+
     _replace_constraints(
         _SERVICE_TABLES_AND_COLUMNS, _NEW_SERVICE_VALUES, "servicetype"
     )

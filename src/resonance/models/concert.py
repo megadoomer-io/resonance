@@ -44,7 +44,7 @@ class Venue(base_module.TimestampMixin, base_module.Base):
         sa.String(32), nullable=True, default=None
     )
     country: orm.Mapped[str | None] = orm.mapped_column(
-        sa.String(2), nullable=True, default=None
+        sa.String(256), nullable=True, default=None
     )
     service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
         sa.JSON, nullable=True, default=None
