@@ -32,7 +32,7 @@ class Artist(base_module.TimestampMixin, base_module.Base):
         sa.String(512), nullable=True, default=None
     )
     artist_type: orm.Mapped[str | None] = orm.mapped_column(
-        sa.String(64), nullable=True, default=None
+        sa.String(255), nullable=True, default=None
     )
     area: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(256), nullable=True, default=None

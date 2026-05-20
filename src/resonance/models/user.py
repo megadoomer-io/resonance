@@ -25,7 +25,7 @@ class User(base_module.TimestampMixin, base_module.Base):
         sa.String(255), nullable=True, default=None
     )
     timezone: orm.Mapped[str | None] = orm.mapped_column(
-        sa.String(63), nullable=True, default=None
+        sa.String(255), nullable=True, default=None
     )
     role: orm.Mapped[types_module.UserRole] = orm.mapped_column(
         sa.Enum(types_module.UserRole, native_enum=False),

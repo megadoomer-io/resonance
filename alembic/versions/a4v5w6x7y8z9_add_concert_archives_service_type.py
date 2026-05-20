@@ -95,12 +95,20 @@ def _replace_constraints(
 
 
 def upgrade() -> None:
-    # Widen varchar columns to fit CONCERT_ARCHIVES (17 chars) and
-    # CONCERT_ARCHIVES_IMPORT (24 chars). Increasing varchar length
-    # is a metadata-only change in PostgreSQL — no table rewrite.
-    for table, column in _SERVICE_TABLES_AND_COLUMNS:
-        op.alter_column(table, column, type_=sa.String(17))
-    op.alter_column("sync_tasks", "task_type", type_=sa.String(24))
+    # Widen all enum-like varchar columns to 255. PostgreSQL stores
+    # varchars efficiently regardless of declared max length, so tight
+    # limits just cause pain when new enum values are added. Increasing
+    # varchar length is a metadata-only change — no table rewrite.
+    _all_enum_columns = (
+        _SERVICE_TABLES_AND_COLUMNS
+        + _TASK_TABLES_AND_COLUMNS
+        + [
+            ("users", "timezone"),
+            ("artists", "artist_type"),
+        ]
+    )
+    for table, column in _all_enum_columns:
+        op.alter_column(table, column, type_=sa.String(255))
 
     # Widen venues.country from varchar(2) (country codes) to varchar(256)
     # (full country names, needed for Concert Archives location format).
