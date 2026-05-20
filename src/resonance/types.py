@@ -14,6 +14,7 @@ class ServiceType(enum.StrEnum):
     BANDCAMP = "bandcamp"
     SOUNDCLOUD = "soundcloud"
     ICAL = "ical"
+    CONCERT_ARCHIVES = "concert_archives"
     MANUAL = "manual"
     TEST = "test"
 
@@ -58,6 +59,7 @@ class TaskType(enum.StrEnum):
     PLAYLIST_GENERATION = "playlist_generation"
     TRACK_DISCOVERY = "track_discovery"
     TRACK_SCORING = "track_scoring"
+    CONCERT_ARCHIVES_IMPORT = "concert_archives_import"
     PLAYLIST_EXPORT = "playlist_export"
 
 
