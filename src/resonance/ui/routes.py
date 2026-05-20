@@ -3360,7 +3360,11 @@ async def admin_resolution(
                 multi_cand_events.append((event, list(event.event_candidates)))
 
         # Suggest venue merges via normalized name matching
-        all_venues_result = await db.execute(sa.select(concert_models.Venue))
+        all_venues_result = await db.execute(
+            sa.select(concert_models.Venue).options(
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+        )
         all_venues = list(all_venues_result.scalars().all())
         venue_merge_suggestions: list[list[concert_models.Venue]] = []
         seen_ids: set[uuid.UUID] = set()
@@ -3478,6 +3482,103 @@ async def delete_orphan_venue(
         await db.delete(venue)
         await db.commit()
     return {"status": "deleted", "venue_id": str(venue_id)}
+
+
+@router.post("/admin/resolution/merge-venues")
+async def merge_venue_group(
+    request: fastapi.Request,
+) -> dict[str, object]:
+    """Non-destructively merge a group of venues by moving candidates.
+
+    Picks the venue with the most events as canonical, re-points all
+    candidates from the other venues to it, and re-points their events.
+    The now-empty duplicate venues become orphans (deletable separately).
+    """
+    deps_module.verify_admin_access(request)
+    body = await request.json()
+    venue_ids = [uuid.UUID(v) for v in body.get("venue_ids", [])]
+    if len(venue_ids) < 2:
+        raise fastapi.HTTPException(status_code=400, detail="Need at least 2 venue IDs")
+
+    async with _get_db(request) as db:
+        venues_result = await db.execute(
+            sa.select(concert_models.Venue)
+            .options(
+                sa_orm.selectinload(concert_models.Venue.candidates),
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+            .where(concert_models.Venue.id.in_(venue_ids))
+        )
+        venues = list(venues_result.scalars().all())
+        if len(venues) < 2:
+            raise fastapi.HTTPException(status_code=404)
+
+        venues.sort(key=lambda v: len(v.events), reverse=True)
+        canonical = venues[0]
+        merged_count = 0
+
+        for dup in venues[1:]:
+            for vc in dup.candidates:
+                vc.resolved_venue_id = canonical.id
+            await db.execute(
+                sa.update(concert_models.Event)
+                .where(concert_models.Event.venue_id == dup.id)
+                .values(venue_id=canonical.id)
+            )
+            merged_count += 1
+
+        await db.commit()
+
+    return {
+        "status": "merged",
+        "canonical": str(canonical.id),
+        "canonical_name": canonical.name,
+        "merged": merged_count,
+    }
+
+
+@router.post(
+    "/admin/resolution/confirm-venue/{venue_id}",
+)
+async def confirm_venue_resolution(
+    venue_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Mark all candidates for a venue as human-accepted."""
+    deps_module.verify_admin_access(request)
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(concert_models.VenueCandidate).where(
+                concert_models.VenueCandidate.resolved_venue_id == venue_id,
+            )
+        )
+        candidates = result.scalars().all()
+        for c in candidates:
+            c.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+    return {"status": "confirmed", "venue_id": str(venue_id)}
+
+
+@router.post(
+    "/admin/resolution/confirm-event/{event_id}",
+)
+async def confirm_event_resolution(
+    event_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Mark all candidates for an event as human-accepted."""
+    deps_module.verify_admin_access(request)
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(concert_models.EventCandidate).where(
+                concert_models.EventCandidate.resolved_event_id == event_id,
+            )
+        )
+        candidates = result.scalars().all()
+        for c in candidates:
+            c.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+    return {"status": "confirmed", "event_id": str(event_id)}
 
 
 @router.get("/admin/tasks/{task_id}", response_model=None)

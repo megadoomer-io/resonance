@@ -62,10 +62,20 @@
 
 {% if multi_cand_venues %}
 <h2>Venues with Multiple Sources ({{ multi_cand_venues | length }})</h2>
-<p>These venues have candidates from multiple imports. Review to confirm they are the same venue, or split if they represent different venues.</p>
+<p>These venues have candidates from multiple imports. Confirm to mark all candidates as human-verified, or unlink to split a candidate into a separate venue.</p>
 {% for venue, candidates in multi_cand_venues %}
 <details>
-    <summary>{{ venue.name }} — {{ venue.city or '?' }} ({{ candidates | length }} candidates)</summary>
+    <summary>
+        {{ venue.name }} — {{ venue.city or '?' }} ({{ candidates | length }} candidates)
+        <button
+            hx-post="/admin/resolution/confirm-venue/{{ venue.id }}"
+            hx-target="#resolution-result"
+            hx-swap="innerHTML"
+            class="outline"
+            style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+            onclick="event.stopPropagation()"
+        >Confirm All</button>
+    </summary>
     <figure>
         <table>
             <thead>
@@ -89,7 +99,7 @@
                             hx-post="/admin/resolution/unlink-venue-candidate/{{ vc.id }}"
                             hx-target="#resolution-result"
                             hx-swap="innerHTML"
-                            hx-confirm="Unlink this candidate from {{ venue.name }}?"
+                            hx-confirm="Unlink this candidate from {{ venue.name }}? It will return to the pending queue."
                             class="outline secondary"
                             style="padding: 0.25em 0.5em; font-size: 0.85em;"
                         >Unlink</button>
@@ -105,10 +115,20 @@
 
 {% if multi_cand_events %}
 <h2>Events with Multiple Sources ({{ multi_cand_events | length }})</h2>
-<p>These events were matched across different sources. Review to confirm they are the same concert, or split if they are different events.</p>
+<p>These events were matched across different sources. Confirm to mark as human-verified, or unlink to split a candidate into a separate event.</p>
 {% for event, candidates in multi_cand_events %}
 <details>
-    <summary>{{ event.title }} — {{ event.event_date }} ({{ candidates | length }} candidates)</summary>
+    <summary>
+        {{ event.title }} — {{ event.event_date }} ({{ candidates | length }} candidates)
+        <button
+            hx-post="/admin/resolution/confirm-event/{{ event.id }}"
+            hx-target="#resolution-result"
+            hx-swap="innerHTML"
+            class="outline"
+            style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+            onclick="event.stopPropagation()"
+        >Confirm All</button>
+    </summary>
     <figure>
         <table>
             <thead>
@@ -132,7 +152,7 @@
                             hx-post="/admin/resolution/unlink-event-candidate/{{ ec.id }}"
                             hx-target="#resolution-result"
                             hx-swap="innerHTML"
-                            hx-confirm="Unlink this candidate from {{ event.title }}?"
+                            hx-confirm="Unlink this candidate from {{ event.title }}? It will return to the pending queue."
                             class="outline secondary"
                             style="padding: 0.25em 0.5em; font-size: 0.85em;"
                         >Unlink</button>
@@ -148,23 +168,34 @@
 
 {% if venue_merge_suggestions %}
 <h2>Suggested Venue Merges ({{ venue_merge_suggestions | length }})</h2>
-<p>These venues have similar names and may be duplicates. Use the candidate resolution system to merge them by resolving their candidates to the same venue.</p>
+<p>These venues have similar normalized names and may be duplicates. Merging moves all candidates and events to the venue with the most events; the empty duplicates become orphans you can delete below.</p>
 <figure>
     <table>
         <thead>
             <tr>
-                <th>Group</th>
                 <th>Venues</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody>
             {% for group in venue_merge_suggestions %}
-            <tr>
-                <td>{{ loop.index }}</td>
+            <tr id="merge-group-{{ loop.index }}">
                 <td>
                     {% for v in group %}
-                    {{ v.name }} ({{ v.city or '?' }}){% if not loop.last %}, {% endif %}
+                    <strong>{{ v.name }}</strong> ({{ v.city or '?' }}, {{ (v.events | length) if v.events is defined else '?' }} events){% if not loop.last %}<br>{% endif %}
                     {% endfor %}
+                </td>
+                <td>
+                    <button
+                        hx-post="/admin/resolution/merge-venues"
+                        hx-ext="json-enc"
+                        hx-vals='{"venue_ids": [{% for v in group %}"{{ v.id }}"{% if not loop.last %}, {% endif %}{% endfor %}]}'
+                        hx-target="#resolution-result"
+                        hx-swap="innerHTML"
+                        hx-confirm="Merge these {{ group | length }} venues? Candidates and events will be moved to the venue with the most events."
+                        class="outline"
+                        style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                    >Merge</button>
                 </td>
             </tr>
             {% endfor %}
