@@ -1,4 +1,4 @@
-"""Entity deduplication — find and merge duplicate artists and tracks.
+"""Entity deduplication — find and merge duplicate artists, tracks, venues, events.
 
 The core merge functions are reusable by:
 - Batch dedup jobs (admin endpoint)
@@ -13,6 +13,7 @@ Merge priority for picking the canonical record:
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -20,12 +21,15 @@ import sqlalchemy as sa
 import structlog
 
 import resonance.models as models_module
+import resonance.normalize as normalize_module
 import resonance.services.artist_utils as artist_utils
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
+
+_ATTENDANCE_PRIORITY = {"GOING": 3, "INTERESTED": 2, "NOT_GOING": 1}
 
 
 @dataclass
@@ -43,6 +47,15 @@ class MergeStats:
     event_artists_repointed: int = 0
     event_artists_deleted: int = 0
     candidates_repointed: int = 0
+    venues_merged: int = 0
+    events_venue_repointed: int = 0
+    concerts_merged: int = 0
+    concert_candidates_repointed: int = 0
+    concert_candidates_deleted: int = 0
+    concert_artists_repointed: int = 0
+    concert_artists_deleted: int = 0
+    attendance_repointed: int = 0
+    attendance_deleted: int = 0
 
 
 def pick_canonical(
@@ -503,22 +516,37 @@ async def delete_cross_service_duplicate_events(
 
 
 async def dedup_all(session: AsyncSession) -> dict[str, int]:
-    """Run artist, track, and event dedup in sequence.
+    """Run all dedup operations in sequence.
 
-    Order matters: artist merges affect track grouping (title + artist_id),
-    and track merges affect event dedup (same track + same user).
+    Order matters:
+    1. Venues first — so event grouping by venue_id works after merge.
+    2. Concert events — cross-source event dedup relies on deduped venues.
+    3. Artists — artist merges affect track grouping (title + artist_id).
+    4. Tracks — track merges affect listening event dedup.
+    5. Listening events — cross-service listening event dedup.
 
     Args:
         session: Active database session.
 
     Returns:
-        Combined stats from all three operations.
+        Combined stats from all operations.
     """
+    venue_stats = await find_and_merge_duplicate_venues(session)
+    concert_stats = await find_and_merge_duplicate_concerts(session)
     artist_stats = await find_and_merge_duplicate_artists(session)
     track_stats = await find_and_merge_duplicate_tracks(session)
     events_deleted = await delete_cross_service_duplicate_events(session)
 
     result: dict[str, int] = {
+        "venues_merged": venue_stats.venues_merged,
+        "events_venue_repointed": venue_stats.events_venue_repointed,
+        "concerts_merged": concert_stats.concerts_merged,
+        "concert_candidates_repointed": concert_stats.concert_candidates_repointed,
+        "concert_candidates_deleted": concert_stats.concert_candidates_deleted,
+        "concert_artists_repointed": concert_stats.concert_artists_repointed,
+        "concert_artists_deleted": concert_stats.concert_artists_deleted,
+        "attendance_repointed": concert_stats.attendance_repointed,
+        "attendance_deleted": concert_stats.attendance_deleted,
         "artists_merged": artist_stats.artists_merged,
         "tracks_repointed": artist_stats.tracks_repointed,
         "artist_relations_repointed": artist_stats.artist_relations_repointed,
@@ -532,3 +560,439 @@ async def dedup_all(session: AsyncSession) -> dict[str, int]:
 
     logger.info("dedup_all_complete", **result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Venue dedup
+# ---------------------------------------------------------------------------
+
+
+def pick_canonical_venue(
+    a: models_module.Venue,
+    b: models_module.Venue,
+) -> tuple[models_module.Venue, models_module.Venue]:
+    """Pick the canonical venue from two duplicates.
+
+    Priority: more non-null location fields > more service_links > oldest.
+    """
+
+    def _location_field_count(v: models_module.Venue) -> int:
+        count = 0
+        for attr in ("address", "postal_code"):
+            if getattr(v, attr, None):
+                count += 1
+        return count
+
+    a_fields = _location_field_count(a)
+    b_fields = _location_field_count(b)
+    if a_fields > b_fields:
+        return a, b
+    if b_fields > a_fields:
+        return b, a
+
+    a_links = a.service_links or {}
+    b_links = b.service_links or {}
+    if len(a_links) > len(b_links):
+        return a, b
+    if len(b_links) > len(a_links):
+        return b, a
+
+    if a.created_at <= b.created_at:
+        return a, b
+    return b, a
+
+
+async def merge_venues(
+    session: AsyncSession,
+    canonical: models_module.Venue,
+    duplicate: models_module.Venue,
+) -> MergeStats:
+    """Merge a duplicate venue into a canonical one.
+
+    Caller must commit.
+    """
+    stats = MergeStats()
+    log = logger.bind(
+        canonical_id=str(canonical.id),
+        duplicate_id=str(duplicate.id),
+        venue_name=canonical.name,
+    )
+
+    # Merge service_links
+    canonical_links = dict(canonical.service_links or {})
+    for k, v in (duplicate.service_links or {}).items():
+        if v and k not in canonical_links:
+            canonical_links[k] = v
+    canonical.service_links = canonical_links
+
+    # Fill null fields from duplicate
+    for attr in ("address", "postal_code"):
+        if not getattr(canonical, attr) and getattr(duplicate, attr):
+            setattr(canonical, attr, getattr(duplicate, attr))
+
+    # Re-point events
+    result = await session.execute(
+        sa.update(models_module.Event)
+        .where(models_module.Event.venue_id == duplicate.id)
+        .values(venue_id=canonical.id)
+    )
+    stats.events_venue_repointed = result.rowcount if hasattr(result, "rowcount") else 0
+
+    # Delete the duplicate
+    await session.execute(
+        sa.delete(models_module.Venue).where(models_module.Venue.id == duplicate.id)
+    )
+    stats.venues_merged = 1
+
+    log.info(
+        "venue_merged",
+        events_repointed=stats.events_venue_repointed,
+    )
+    return stats
+
+
+async def find_and_merge_duplicate_venues(
+    session: AsyncSession,
+) -> MergeStats:
+    """Find all duplicate venues (by normalized name+location) and merge them."""
+    total = MergeStats()
+
+    result = await session.execute(sa.select(models_module.Venue))
+    all_venues = list(result.scalars().all())
+
+    # Group by normalized key
+    groups: dict[tuple[str, ...], list[models_module.Venue]] = collections.defaultdict(
+        list
+    )
+    for venue in all_venues:
+        key = (
+            normalize_module.normalize_name(venue.name),
+            normalize_module.normalize_name(venue.city or ""),
+            normalize_module.normalize_name(venue.state or ""),
+            normalize_module.normalize_name(venue.country or ""),
+        )
+        groups[key].append(venue)
+
+    dup_groups = {k: v for k, v in groups.items() if len(v) > 1}
+    logger.info("venue_dedup_candidates", groups=len(dup_groups))
+
+    for venues in dup_groups.values():
+        venues.sort(key=lambda v: v.created_at)
+        canonical = venues[0]
+        for other in venues[1:]:
+            canonical, dup = pick_canonical_venue(canonical, other)
+            stats = await merge_venues(session, canonical, dup)
+            total.venues_merged += stats.venues_merged
+            total.events_venue_repointed += stats.events_venue_repointed
+
+        await session.flush()
+
+    await session.commit()
+    logger.info("venue_dedup_completed", stats=total)
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Cross-source concert event dedup
+# ---------------------------------------------------------------------------
+
+
+def pick_canonical_event(
+    a: models_module.Event,
+    b: models_module.Event,
+) -> tuple[models_module.Event, models_module.Event]:
+    """Pick the canonical event from two cross-source duplicates.
+
+    Priority: more confirmed EventArtists > more candidates >
+    more service_links > has external_url > oldest.
+    """
+    a_artists = len(getattr(a, "artists", []) or [])
+    b_artists = len(getattr(b, "artists", []) or [])
+    if a_artists > b_artists:
+        return a, b
+    if b_artists > a_artists:
+        return b, a
+
+    a_cands = len(getattr(a, "artist_candidates", []) or [])
+    b_cands = len(getattr(b, "artist_candidates", []) or [])
+    if a_cands > b_cands:
+        return a, b
+    if b_cands > a_cands:
+        return b, a
+
+    a_links = a.service_links or {}
+    b_links = b.service_links or {}
+    if len(a_links) > len(b_links):
+        return a, b
+    if len(b_links) > len(a_links):
+        return b, a
+
+    a_url = 1 if a.external_url else 0
+    b_url = 1 if b.external_url else 0
+    if a_url > b_url:
+        return a, b
+    if b_url > a_url:
+        return b, a
+
+    if a.created_at <= b.created_at:
+        return a, b
+    return b, a
+
+
+async def merge_events(
+    session: AsyncSession,
+    canonical: models_module.Event,
+    duplicate: models_module.Event,
+) -> MergeStats:
+    """Merge a duplicate concert event into a canonical one.
+
+    Handles cascading unique constraints on EventArtist, EventArtistCandidate,
+    and UserEventAttendance. Caller must commit.
+    """
+    stats = MergeStats()
+    log = logger.bind(
+        canonical_id=str(canonical.id),
+        duplicate_id=str(duplicate.id),
+        event_title=canonical.title,
+    )
+
+    # Merge service_links
+    canonical_links = dict(canonical.service_links or {})
+    for k, v in (duplicate.service_links or {}).items():
+        if v and k not in canonical_links:
+            canonical_links[k] = v
+    canonical.service_links = canonical_links
+
+    # Re-point EventArtist records
+    dup_artists = (
+        (
+            await session.execute(
+                sa.select(models_module.EventArtist).where(
+                    models_module.EventArtist.event_id == duplicate.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    for ea in dup_artists:
+        ea_conflict = (
+            await session.execute(
+                sa.select(models_module.EventArtist).where(
+                    models_module.EventArtist.event_id == canonical.id,
+                    models_module.EventArtist.artist_id == ea.artist_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if ea_conflict:
+            await session.delete(ea)
+            stats.concert_artists_deleted += 1
+        else:
+            ea.event_id = canonical.id
+            stats.concert_artists_repointed += 1
+
+    # Re-point EventArtistCandidate records
+    dup_candidates = (
+        (
+            await session.execute(
+                sa.select(models_module.EventArtistCandidate).where(
+                    models_module.EventArtistCandidate.event_id == duplicate.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    for cand in dup_candidates:
+        cand_conflict = (
+            await session.execute(
+                sa.select(models_module.EventArtistCandidate).where(
+                    models_module.EventArtistCandidate.event_id == canonical.id,
+                    models_module.EventArtistCandidate.raw_name == cand.raw_name,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if cand_conflict:
+            if cand.matched_artist_id and not cand_conflict.matched_artist_id:
+                cand_conflict.matched_artist_id = cand.matched_artist_id
+            if cand.confidence_score > cand_conflict.confidence_score:
+                cand_conflict.confidence_score = cand.confidence_score
+            if _candidate_status_rank(cand.status) > _candidate_status_rank(
+                cand_conflict.status
+            ):
+                cand_conflict.status = cand.status
+            await session.delete(cand)
+            stats.concert_candidates_deleted += 1
+        else:
+            cand.event_id = canonical.id
+            stats.concert_candidates_repointed += 1
+
+    # Re-point UserEventAttendance
+    dup_attendance = (
+        (
+            await session.execute(
+                sa.select(models_module.UserEventAttendance).where(
+                    models_module.UserEventAttendance.event_id == duplicate.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    for att in dup_attendance:
+        att_conflict = (
+            await session.execute(
+                sa.select(models_module.UserEventAttendance).where(
+                    models_module.UserEventAttendance.user_id == att.user_id,
+                    models_module.UserEventAttendance.event_id == canonical.id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if att_conflict:
+            att_prio = _ATTENDANCE_PRIORITY.get(str(att.status), 0)
+            conflict_prio = _ATTENDANCE_PRIORITY.get(str(att_conflict.status), 0)
+            if att_prio > conflict_prio:
+                att_conflict.status = att.status
+            await session.delete(att)
+            stats.attendance_deleted += 1
+        else:
+            att.event_id = canonical.id
+            stats.attendance_repointed += 1
+
+    # Keep richer title
+    auto_generated = canonical.title.startswith(
+        "Concert on "
+    ) and not duplicate.title.startswith("Concert on ")
+    if auto_generated or len(duplicate.title) > len(canonical.title):
+        canonical.title = duplicate.title
+
+    # Delete the duplicate
+    await session.execute(
+        sa.delete(models_module.Event).where(models_module.Event.id == duplicate.id)
+    )
+    stats.concerts_merged = 1
+
+    log.info(
+        "concert_merged",
+        artists_repointed=stats.concert_artists_repointed,
+        artists_deleted=stats.concert_artists_deleted,
+        candidates_repointed=stats.concert_candidates_repointed,
+        candidates_deleted=stats.concert_candidates_deleted,
+        attendance_repointed=stats.attendance_repointed,
+        attendance_deleted=stats.attendance_deleted,
+    )
+    return stats
+
+
+def _candidate_status_rank(status: object) -> int:
+    """Rank candidate status for conflict resolution (higher = better)."""
+    name = status.name if hasattr(status, "name") else str(status)
+    return {"ACCEPTED": 3, "PENDING": 2, "REJECTED": 1}.get(name, 0)
+
+
+async def find_and_merge_duplicate_concerts(
+    session: AsyncSession,
+) -> MergeStats:
+    """Find cross-source duplicate concert events and merge them.
+
+    Groups events by (event_date, venue_id) and merges groups where
+    multiple source services are present. For groups with 3+ events,
+    uses artist name overlap to confirm matches.
+    """
+    total = MergeStats()
+
+    result = await session.execute(
+        sa.text(
+            "SELECT event_date, venue_id, COUNT(*) as cnt "
+            "FROM events "
+            "WHERE venue_id IS NOT NULL "
+            "GROUP BY event_date, venue_id "
+            "HAVING COUNT(DISTINCT source_service) > 1 "
+            "ORDER BY cnt DESC"
+        )
+    )
+    groups = result.all()
+    logger.info("concert_dedup_candidates", groups=len(groups))
+
+    for row in groups:
+        event_date = row[0]
+        venue_id = row[1]
+
+        events_result = await session.execute(
+            sa.select(models_module.Event)
+            .options(
+                sa.orm.selectinload(models_module.Event.artists),
+                sa.orm.selectinload(models_module.Event.artist_candidates),
+            )
+            .where(
+                models_module.Event.event_date == event_date,
+                models_module.Event.venue_id == venue_id,
+            )
+            .order_by(models_module.Event.created_at)
+        )
+        events = list(events_result.scalars().all())
+
+        if len(events) < 2:
+            continue
+
+        # For groups of exactly 2, merge directly.
+        # For 3+, verify artist overlap before merging.
+        if len(events) == 2:
+            canonical, dup = pick_canonical_event(events[0], events[1])
+            stats = await merge_events(session, canonical, dup)
+            _accumulate_concert_stats(total, stats)
+        else:
+            merged_ids: set[object] = set()
+            for i, ev_a in enumerate(events):
+                if ev_a.id in merged_ids:
+                    continue
+                for ev_b in events[i + 1 :]:
+                    if ev_b.id in merged_ids:
+                        continue
+                    if _artist_overlap_sufficient(ev_a, ev_b):
+                        canonical, dup = pick_canonical_event(ev_a, ev_b)
+                        stats = await merge_events(session, canonical, dup)
+                        _accumulate_concert_stats(total, stats)
+                        merged_ids.add(dup.id)
+
+        await session.flush()
+
+    await session.commit()
+    logger.info("concert_dedup_completed", stats=total)
+    return total
+
+
+def _artist_overlap_sufficient(
+    a: models_module.Event,
+    b: models_module.Event,
+) -> bool:
+    """Check if two events have enough artist name overlap to be duplicates."""
+    a_names = {
+        normalize_module.normalize_name(c.raw_name) for c in (a.artist_candidates or [])
+    }
+    b_names = {
+        normalize_module.normalize_name(c.raw_name) for c in (b.artist_candidates or [])
+    }
+
+    if not a_names or not b_names:
+        return True
+
+    overlap = len(a_names & b_names)
+    total = len(a_names | b_names)
+    return overlap / total >= 0.5 if total > 0 else True
+
+
+def _accumulate_concert_stats(total: MergeStats, stats: MergeStats) -> None:
+    total.concerts_merged += stats.concerts_merged
+    total.concert_candidates_repointed += stats.concert_candidates_repointed
+    total.concert_candidates_deleted += stats.concert_candidates_deleted
+    total.concert_artists_repointed += stats.concert_artists_repointed
+    total.concert_artists_deleted += stats.concert_artists_deleted
+    total.attendance_repointed += stats.attendance_repointed
+    total.attendance_deleted += stats.attendance_deleted

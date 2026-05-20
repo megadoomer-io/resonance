@@ -3293,6 +3293,24 @@ async def dedup_tracks(
     return await _enqueue_bulk_job(request, "dedup_tracks")
 
 
+@router.post("/admin/dedup-venues", response_model=None)
+async def dedup_venues(
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Admin-only: enqueue venue dedup as a bulk job."""
+    deps_module.verify_admin_access(request)
+    return await _enqueue_bulk_job(request, "dedup_venues")
+
+
+@router.post("/admin/dedup-concerts", response_model=None)
+async def dedup_concerts(
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Admin-only: enqueue cross-source concert event dedup as a bulk job."""
+    deps_module.verify_admin_access(request)
+    return await _enqueue_bulk_job(request, "dedup_concerts")
+
+
 @router.get("/admin/tasks/{task_id}", response_model=None)
 async def admin_task_status(
     task_id: uuid.UUID,

@@ -71,6 +71,9 @@ select = [
 # FastAPI resolves Annotated[] type hints at runtime for dependency injection,
 # so stdlib types like uuid must remain as runtime imports.
 "src/resonance/api/v1/*.py" = ["TC003"]
+# normalize uses ambiguous unicode characters intentionally as map keys.
+"src/resonance/normalize.py" = ["RUF001"]
+"tests/test_normalize.py" = ["RUF001"]
 
 [tool.mypy]
 strict = true

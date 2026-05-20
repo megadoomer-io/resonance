@@ -12,6 +12,7 @@ import resonance.concerts.ical as ical_module
 import resonance.concerts.parser as parser_module
 import resonance.models.concert as concert_models
 import resonance.models.music as music_models
+import resonance.normalize as normalize_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -34,10 +35,11 @@ async def upsert_venue(
         The existing or newly created Venue.
     """
     stmt = sa.select(concert_models.Venue).where(
-        concert_models.Venue.name == venue_data.name,
-        concert_models.Venue.city == venue_data.city,
-        concert_models.Venue.state == venue_data.state,
-        concert_models.Venue.country == venue_data.country,
+        sa.func.lower(concert_models.Venue.name) == (venue_data.name or "").lower(),
+        sa.func.lower(concert_models.Venue.city) == (venue_data.city or "").lower(),
+        sa.func.lower(concert_models.Venue.state) == (venue_data.state or "").lower(),
+        sa.func.lower(concert_models.Venue.country)
+        == (venue_data.country or "").lower(),
     )
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
@@ -221,9 +223,9 @@ async def match_candidates_to_artists(
 
     matched_count = 0
     for candidate in candidates:
+        normalized_raw = normalize_module.normalize_name(candidate.raw_name)
         artist_stmt = sa.select(music_models.Artist).where(
-            sa.func.lower(music_models.Artist.name)
-            == sa.func.lower(candidate.raw_name),
+            sa.func.lower(music_models.Artist.name) == normalized_raw,
         )
         artist_result = await session.execute(artist_stmt)
         artist = artist_result.scalar_one_or_none()
