@@ -54,6 +54,13 @@
                             class="outline secondary"
                             style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
                         >Cancel</button>
+                    {% elif conn.service_type.value == 'concert_archives' %}
+                    <button
+                        hx-get="/partials/concert-archives-upload"
+                        hx-target="#ca-upload-{{ conn.id }}"
+                        hx-swap="innerHTML"
+                    >Upload CSV</button>
+                    <div id="ca-upload-{{ conn.id }}"></div>
                     {% else %}
                     <button
                         hx-post="/api/v1/sync/connection/{{ conn.id }}"

@@ -247,6 +247,12 @@ async def trigger_sync_by_connection(
             status_code=400, detail="No sync config for this service"
         )
 
+    if config.auth_type == "file_upload":
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="This service requires a file upload — use the upload endpoint",
+        )
+
     # 3. Check for running sync
     existing = await db.execute(
         sa.select(task_models.Task).where(
