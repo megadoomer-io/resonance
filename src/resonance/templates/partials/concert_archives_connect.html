@@ -9,8 +9,7 @@
 {% elif state == "form" %}
 <form
     hx-post="/api/v1/connections/concert-archives/upload"
-    hx-target="#concert-archives-connect"
-    hx-swap="innerHTML"
+    hx-swap="none"
     hx-encoding="multipart/form-data"
     hx-on::after-request="if(event.detail.successful) location.reload()"
 >
