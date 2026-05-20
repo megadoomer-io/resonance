@@ -199,21 +199,29 @@
     sessionStorage.removeItem(key);
   }
 
+  function syncInputsFromUrl() {
+    var params = new URLSearchParams(window.location.search);
+    document.querySelectorAll('[data-filter-input]').forEach(function(el) {
+      if (el.type === 'checkbox') {
+        el.checked = params.getAll(el.name).indexOf(el.value) !== -1;
+      } else {
+        el.value = params.get(el.name) || '';
+      }
+    });
+    var searchInput = document.querySelector('.filter-search input');
+    if (searchInput) {
+      searchInput.value = params.get('q') || '';
+    }
+  }
+
   document.body.addEventListener('htmx:pushedIntoHistory', function() {
     saveFilters();
+    syncInputsFromUrl();
   });
 
   var clearBtn = document.querySelector('.preset-clear');
   if (clearBtn) {
-    clearBtn.addEventListener('click', function() {
-      clearSavedFilters();
-      document.querySelectorAll('[data-filter-input]').forEach(function(el) {
-        if (el.type === 'checkbox') { el.checked = false; }
-        else { el.value = ''; }
-      });
-      var searchInput = document.querySelector('.filter-search input');
-      if (searchInput) { searchInput.value = ''; }
-    });
+    clearBtn.addEventListener('click', clearSavedFilters);
   }
 
   if (!window.location.search) {
