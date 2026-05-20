@@ -1,7 +1,7 @@
 """add CONCERT_ARCHIVES to ServiceType and CONCERT_ARCHIVES_IMPORT to TaskType
 
 Revision ID: a4v5w6x7y8z9
-Revises: z3u4v5w6x7y8
+Revises: a4u5v6w7x8y9
 Create Date: 2026-05-19
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a4v5w6x7y8z9"
-down_revision: str = "z3u4v5w6x7y8"
+down_revision: str = "a4u5v6w7x8y9"
 branch_labels: str | None = None
 depends_on: str | None = None
 
