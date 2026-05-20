@@ -1,4 +1,10 @@
 <div id="resolution-result"></div>
+<div id="resolution-list-inner"
+     hx-get="{{ list_url }}?view={{ view }}&entity={{ entity }}{% if active_filters.get('q') %}&q={{ active_filters['q'] }}{% endif %}"
+     hx-trigger="resolution-updated from:body"
+     hx-target="#resolution-list"
+     hx-swap="innerHTML"
+></div>
 
 {% if view == "pending" %}
     {% if pending_venue_candidates %}
@@ -204,8 +210,8 @@
                     <td>
                         <button
                             hx-post="/admin/resolution/delete-orphan-venue/{{ v.id }}"
-                            hx-target="#orphan-venue-{{ v.id }}"
-                            hx-swap="outerHTML"
+                            hx-target="#resolution-result"
+                            hx-swap="innerHTML"
                             hx-confirm="Delete orphaned venue {{ v.name }}?"
                             class="outline secondary"
                             style="padding: 0.25em 0.5em; font-size: 0.85em;"

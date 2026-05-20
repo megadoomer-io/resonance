@@ -3293,6 +3293,13 @@ async def dedup_tracks(
     return await _enqueue_bulk_job(request, "dedup_tracks")
 
 
+def _resolution_response(message: str) -> fastapi.responses.HTMLResponse:
+    """Return an HTML response with a trigger to refresh the resolution list."""
+    resp = fastapi.responses.HTMLResponse(f"<p><small>{message}</small></p>")
+    resp.headers["HX-Trigger"] = "resolution-updated"
+    return resp
+
+
 _RESOLUTION_PRESETS: list[dict[str, str]] = [
     {"name": "pending", "label": "Pending", "params": "view=pending"},
     {"name": "multi_source", "label": "Multi-Source", "params": "view=multi_source"},
@@ -3489,7 +3496,7 @@ async def admin_resolution(
 async def unlink_venue_candidate(
     candidate_id: uuid.UUID,
     request: fastapi.Request,
-) -> dict[str, str]:
+) -> fastapi.responses.HTMLResponse:
     """Unlink a VenueCandidate from its resolved Venue."""
     deps_module.verify_admin_access(request)
     async with _get_db(request) as db:
@@ -3505,14 +3512,14 @@ async def unlink_venue_candidate(
         candidate.status = types_module.CandidateStatus.PENDING
         candidate.confidence_score = 0
         await db.commit()
-    return {"status": "unlinked", "candidate_id": str(candidate_id)}
+    return _resolution_response("Candidate unlinked.")
 
 
 @router.post("/admin/resolution/unlink-event-candidate/{candidate_id}")
 async def unlink_event_candidate(
     candidate_id: uuid.UUID,
     request: fastapi.Request,
-) -> dict[str, str]:
+) -> fastapi.responses.HTMLResponse:
     """Unlink an EventCandidate from its resolved Event."""
     deps_module.verify_admin_access(request)
     async with _get_db(request) as db:
@@ -3528,14 +3535,14 @@ async def unlink_event_candidate(
         candidate.status = types_module.CandidateStatus.PENDING
         candidate.confidence_score = 0
         await db.commit()
-    return {"status": "unlinked", "candidate_id": str(candidate_id)}
+    return _resolution_response("Candidate unlinked.")
 
 
 @router.post("/admin/resolution/delete-orphan-venue/{venue_id}")
 async def delete_orphan_venue(
     venue_id: uuid.UUID,
     request: fastapi.Request,
-) -> dict[str, str]:
+) -> fastapi.responses.HTMLResponse:
     """Delete a venue with no candidates and no events."""
     deps_module.verify_admin_access(request)
     async with _get_db(request) as db:
@@ -3556,13 +3563,13 @@ async def delete_orphan_venue(
             )
         await db.delete(venue)
         await db.commit()
-    return {"status": "deleted", "venue_id": str(venue_id)}
+    return _resolution_response("Venue deleted.")
 
 
 @router.post("/admin/resolution/merge-venues")
 async def merge_venue_group(
     request: fastapi.Request,
-) -> dict[str, object]:
+) -> fastapi.responses.HTMLResponse:
     """Non-destructively merge a group of venues by moving candidates.
 
     Picks the venue with the most events as canonical, re-points all
@@ -3610,12 +3617,9 @@ async def merge_venue_group(
 
         await db.commit()
 
-    return {
-        "status": "merged",
-        "canonical": str(canonical.id),
-        "canonical_name": canonical.name,
-        "merged": merged_count,
-    }
+    return _resolution_response(
+        f"Merged {merged_count} venue(s) into {canonical.name}."
+    )
 
 
 @router.post(
@@ -3624,7 +3628,7 @@ async def merge_venue_group(
 async def confirm_venue_resolution(
     venue_id: uuid.UUID,
     request: fastapi.Request,
-) -> dict[str, str]:
+) -> fastapi.responses.HTMLResponse:
     """Mark all candidates for a venue as human-accepted."""
     deps_module.verify_admin_access(request)
     async with _get_db(request) as db:
@@ -3637,7 +3641,7 @@ async def confirm_venue_resolution(
         for c in candidates:
             c.status = types_module.CandidateStatus.ACCEPTED
         await db.commit()
-    return {"status": "confirmed", "venue_id": str(venue_id)}
+    return _resolution_response("All candidates confirmed.")
 
 
 @router.post(
@@ -3646,7 +3650,7 @@ async def confirm_venue_resolution(
 async def confirm_event_resolution(
     event_id: uuid.UUID,
     request: fastapi.Request,
-) -> dict[str, str]:
+) -> fastapi.responses.HTMLResponse:
     """Mark all candidates for an event as human-accepted."""
     deps_module.verify_admin_access(request)
     async with _get_db(request) as db:
@@ -3659,7 +3663,7 @@ async def confirm_event_resolution(
         for c in candidates:
             c.status = types_module.CandidateStatus.ACCEPTED
         await db.commit()
-    return {"status": "confirmed", "event_id": str(event_id)}
+    return _resolution_response("All candidates confirmed.")
 
 
 @router.get("/admin/tasks/{task_id}", response_model=None)
