@@ -15,6 +15,7 @@ import structlog
 
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
+import resonance.connectors.concert_archives as concert_archives_module
 import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -118,6 +119,7 @@ def create_app() -> fastapi.FastAPI:
     connector_registry.register(test_connector_module.TestConnector())
     connector_registry.register(songkick_module.SongkickConnector())
     connector_registry.register(ical_module.ICalConnector())
+    connector_registry.register(concert_archives_module.ConcertArchivesConnector())
     application.state.connector_registry = connector_registry
 
     @application.get("/healthz")

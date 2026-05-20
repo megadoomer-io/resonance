@@ -25,6 +25,7 @@ import resonance.concerts.sync as concert_sync
 import resonance.concerts.worker as concert_worker
 import resonance.config as config_module
 import resonance.connectors.base as base_module
+import resonance.connectors.concert_archives as concert_archives_module
 import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -1777,6 +1778,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     connector_registry.register(test_connector_module.TestConnector())
     connector_registry.register(songkick_module.SongkickConnector())
     connector_registry.register(ical_module.ICalConnector())
+    connector_registry.register(concert_archives_module.ConcertArchivesConnector())
 
     wctx["settings"] = settings
     wctx["engine"] = engine
