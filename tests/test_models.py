@@ -39,7 +39,7 @@ class TestServiceType:
         assert types_module.ServiceType.TEST == "test"
 
     def test_service_type_count(self) -> None:
-        assert len(types_module.ServiceType) == 10
+        assert len(types_module.ServiceType) == 11
 
 
 class TestArtistRelationType:
@@ -99,7 +99,7 @@ class TestTaskType:
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
     def test_task_type_count(self) -> None:
-        assert len(types_module.TaskType) == 9
+        assert len(types_module.TaskType) == 10
 
 
 class TestAttendanceStatus:
