@@ -16,7 +16,7 @@
 >
     <label>
         CSV Export File
-        <input type="file" name="file" accept=".csv" required>
+        <input type="file" name="file" accept=".csv" required id="ca-file-input">
     </label>
     <fieldset>
         <label>
@@ -26,6 +26,21 @@
         </label>
         <input type="date" name="export_date" id="ca-export-date" disabled>
     </fieldset>
+    <script>
+    document.getElementById('ca-file-input').addEventListener('change', function() {
+        var name = this.files && this.files[0] && this.files[0].name;
+        if (!name) return;
+        var m = name.match(/(\d{2})-(\d{2})-(\d{4})/);
+        if (m) {
+            var dateStr = m[3] + '-' + m[1] + '-' + m[2];
+            var dateInput = document.getElementById('ca-export-date');
+            var checkbox = document.getElementById('ca-use-today');
+            checkbox.checked = false;
+            dateInput.disabled = false;
+            dateInput.value = dateStr;
+        }
+    });
+    </script>
     <div class="grid">
         <button type="submit">Upload</button>
         <button
