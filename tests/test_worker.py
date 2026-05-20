@@ -44,13 +44,14 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 8
+        assert len(funcs) == 9
         names = {f.name for f in funcs}
         assert names == {
             "plan_sync",
             "sync_range",
             "run_bulk_job",
             "sync_calendar_feed",
+            "sync_concert_archives",
             "generate_playlist",
             "discover_tracks_for_artist",
             "score_and_build_playlist",

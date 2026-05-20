@@ -85,6 +85,10 @@ _TASK_DISPATCH: dict[
         "score_and_build_playlist",
         lambda t: (str(t.id),),
     ),
+    types_module.TaskType.CONCERT_ARCHIVES_IMPORT: (
+        "sync_concert_archives",
+        lambda t: (str(t.id),),
+    ),
     types_module.TaskType.PLAYLIST_EXPORT: (
         "export_playlist",
         lambda t: (str(t.id),),
@@ -1854,6 +1858,10 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(run_bulk_job), timeout=3600),
         arq.func(
             heartbeat_module.with_heartbeat(concert_worker.sync_calendar_feed),
+            timeout=3600,
+        ),
+        arq.func(
+            heartbeat_module.with_heartbeat(concert_worker.sync_concert_archives),
             timeout=3600,
         ),
         arq.func(heartbeat_module.with_heartbeat(generate_playlist), timeout=3600),

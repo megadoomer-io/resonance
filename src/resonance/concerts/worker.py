@@ -11,6 +11,7 @@ import httpx
 import sqlalchemy as sa
 import structlog
 
+import resonance.concerts.concert_archives as concert_archives_module
 import resonance.concerts.ical as ical_module
 import resonance.concerts.sync as concert_sync
 import resonance.connectors.songkick as songkick_module
@@ -203,6 +204,144 @@ async def sync_calendar_feed(
 
         except Exception:
             log.exception("calendar_feed_sync_failed")
+            if task is not None:
+                import traceback
+
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
+                await session.commit()
+
+
+async def sync_concert_archives(
+    ctx: dict[str, Any], task_id: str, csv_content: str
+) -> None:
+    """Parse a Concert Archives CSV export and sync into the database.
+
+    This is the main arq task for Concert Archives CSV imports. It parses
+    the CSV content, upserts venues/events/candidates/attendance, and
+    tracks counts.
+
+    Args:
+        ctx: arq worker context dict (contains session_factory).
+        task_id: UUID string of the Task tracking this import.
+        csv_content: Raw CSV file content as a string.
+    """
+    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession] = ctx[
+        "session_factory"
+    ]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_models.Task | None = None
+        try:
+            # Load tracking task
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("concert_archives_import_task_not_found")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            # Load the service connection
+            connection = await _load_connection(
+                session, str(task.service_connection_id)
+            )
+            if connection is None:
+                log.error("service_connection_not_found")
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    f"ServiceConnection {task.service_connection_id} not found",
+                )
+                await session.commit()
+                return
+
+            log = log.bind(
+                user_id=str(connection.user_id),
+                service_type=connection.service_type.value,
+            )
+
+            # Check enabled
+            if not connection.enabled:
+                log.info("connection_disabled_skip")
+                await lifecycle_module.complete_task(
+                    session, task, {"skipped": "connection disabled"}
+                )
+                await session.commit()
+                return
+
+            # Parse CSV
+            log.info("concert_archives_import_started")
+            parse_result = concert_archives_module.parse_csv(csv_content)
+
+            source_service = types_module.ServiceType.CONCERT_ARCHIVES
+            events_created = 0
+            events_updated = 0
+            candidates_created = 0
+            candidates_matched = 0
+            total_events = len(parse_result.events)
+
+            for parsed in parse_result.events:
+                # Venue
+                venue = None
+                if parsed.venue is not None:
+                    venue = await concert_sync.upsert_venue(session, parsed.venue)
+
+                # Event
+                event, created = await concert_sync.upsert_event(
+                    session, parsed, source_service, venue
+                )
+                if created:
+                    events_created += 1
+                else:
+                    events_updated += 1
+
+                # Artist candidates
+                if parsed.artist_candidates:
+                    new_candidates = await concert_sync.upsert_candidates(
+                        session, event, parsed.artist_candidates
+                    )
+                    candidates_created += new_candidates
+
+                # Attendance
+                if parsed.attendance_status is not None:
+                    await concert_sync.upsert_attendance(
+                        session,
+                        connection.user_id,
+                        event,
+                        parsed.attendance_status,
+                        source_service,
+                    )
+
+                # Match candidates to existing artists
+                matched = await concert_sync.match_candidates_to_artists(session, event)
+                candidates_matched += matched
+
+            # Update connection last_synced_at
+            connection.last_synced_at = datetime.datetime.now(datetime.UTC)
+
+            # Build result summary
+            result: dict[str, object] = {
+                "events_created": events_created,
+                "events_updated": events_updated,
+                "candidates_created": candidates_created,
+                "candidates_matched": candidates_matched,
+                "total_events": total_events,
+                "warnings": parse_result.warnings,
+            }
+
+            # Mark task completed via lifecycle helper
+            await lifecycle_module.complete_task(session, task, result)
+            await session.commit()
+
+            log.info(
+                "concert_archives_import_completed",
+                **{k: v for k, v in result.items() if k != "warnings"},
+            )
+
+        except Exception:
+            log.exception("concert_archives_import_failed")
             if task is not None:
                 import traceback
 
