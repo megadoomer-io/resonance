@@ -3570,8 +3570,14 @@ async def merge_venue_group(
     The now-empty duplicate venues become orphans (deletable separately).
     """
     deps_module.verify_admin_access(request)
-    body = await request.json()
-    venue_ids = [uuid.UUID(v) for v in body.get("venue_ids", [])]
+    content_type = request.headers.get("content-type", "")
+    if "json" in content_type:
+        body = await request.json()
+        raw_ids = body.get("venue_ids", [])
+    else:
+        form = await request.form()
+        raw_ids = form.getlist("venue_ids")
+    venue_ids = [uuid.UUID(v) for v in raw_ids]
     if len(venue_ids) < 2:
         raise fastapi.HTTPException(status_code=400, detail="Need at least 2 venue IDs")
 

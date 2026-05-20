@@ -162,16 +162,21 @@
                         {% endfor %}
                     </td>
                     <td>
-                        <button
-                            hx-post="/admin/resolution/merge-venues"
-                            hx-ext="json-enc"
-                            hx-vals='{"venue_ids": [{% for v in group %}"{{ v.id }}"{% if not loop.last %}, {% endif %}{% endfor %}]}'
-                            hx-target="#resolution-result"
-                            hx-swap="innerHTML"
-                            hx-confirm="Merge these {{ group | length }} venues?"
-                            class="outline"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
-                        >Merge</button>
+                        <form style="display:inline">
+                            {% for v in group %}
+                            <input type="hidden" name="venue_ids" value="{{ v.id }}">
+                            {% endfor %}
+                            <button
+                                type="button"
+                                hx-post="/admin/resolution/merge-venues"
+                                hx-include="closest form"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Merge these {{ group | length }} venues?"
+                                class="outline"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Merge</button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}
