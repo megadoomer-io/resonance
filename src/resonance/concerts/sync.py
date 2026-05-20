@@ -189,6 +189,9 @@ async def upsert_attendance(
     session.add(attendance)
 
 
+_AUTO_ACCEPT_THRESHOLD = 80
+
+
 async def match_candidates_to_artists(
     session: AsyncSession,
     event: concert_models.Event,
@@ -196,8 +199,9 @@ async def match_candidates_to_artists(
     """Match pending EventArtistCandidates to existing Artists by name.
 
     Performs a case-insensitive name lookup against the artists table. Matched
-    candidates have their ``matched_artist_id`` set but status remains PENDING
-    so the user can still accept or reject the match.
+    candidates with confidence >= 80 are auto-accepted and an EventArtist
+    record is created. Lower-confidence matches are left PENDING for manual
+    review.
 
     Args:
         session: The async database session.
@@ -206,7 +210,6 @@ async def match_candidates_to_artists(
     Returns:
         The number of candidates that were matched to an artist.
     """
-    # Load all PENDING candidates for this event
     candidates_stmt = sa.select(concert_models.EventArtistCandidate).where(
         concert_models.EventArtistCandidate.event_id == event.id,
         concert_models.EventArtistCandidate.status
@@ -228,6 +231,24 @@ async def match_candidates_to_artists(
         if artist is not None:
             candidate.matched_artist_id = artist.id
             matched_count += 1
+
+            if candidate.confidence_score >= _AUTO_ACCEPT_THRESHOLD:
+                existing_ea = await session.execute(
+                    sa.select(concert_models.EventArtist.id).where(
+                        concert_models.EventArtist.event_id == event.id,
+                        concert_models.EventArtist.artist_id == artist.id,
+                    )
+                )
+                if existing_ea.scalar_one_or_none() is None:
+                    session.add(
+                        concert_models.EventArtist(
+                            event_id=event.id,
+                            artist_id=artist.id,
+                            position=candidate.position,
+                            raw_name=candidate.raw_name,
+                        )
+                    )
+                    candidate.status = types_module.CandidateStatus.ACCEPTED
 
     return matched_count
 

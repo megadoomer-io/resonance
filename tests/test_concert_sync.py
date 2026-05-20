@@ -374,6 +374,9 @@ class TestMatchCandidatesToArtists:
         candidate.raw_name = "the national"
         candidate.matched_artist_id = None
         candidate.status = types_module.CandidateStatus.PENDING
+        candidate.confidence_score = 90
+        candidate.position = 0
+        candidate.event_id = event.id
 
         artist = MagicMock()
         artist.id = uuid.uuid4()
@@ -388,12 +391,22 @@ class TestMatchCandidatesToArtists:
         artist_result = MagicMock()
         artist_result.scalar_one_or_none.return_value = artist
 
-        session.execute.side_effect = [candidates_result, artist_result]
+        # Third query: check existing EventArtist (dedup) -> none
+        existing_ea_result = MagicMock()
+        existing_ea_result.scalar_one_or_none.return_value = None
+
+        session.execute.side_effect = [
+            candidates_result,
+            artist_result,
+            existing_ea_result,
+        ]
 
         count = await sync_module.match_candidates_to_artists(session, event)
 
         assert count == 1
         assert candidate.matched_artist_id == artist.id
+        assert candidate.status == types_module.CandidateStatus.ACCEPTED
+        session.add.assert_called_once()
 
     @pytest.mark.anyio()
     async def test_leaves_unmatched_candidates(self) -> None:
@@ -406,6 +419,7 @@ class TestMatchCandidatesToArtists:
         candidate.raw_name = "Unknown Band"
         candidate.matched_artist_id = None
         candidate.status = types_module.CandidateStatus.PENDING
+        candidate.confidence_score = 90
 
         # First query: get pending candidates
         candidates_result = MagicMock()
@@ -454,11 +468,15 @@ class TestMatchCandidatesToArtists:
         candidate_a.raw_name = "Known Artist"
         candidate_a.matched_artist_id = None
         candidate_a.status = types_module.CandidateStatus.PENDING
+        candidate_a.confidence_score = 90
+        candidate_a.position = 0
+        candidate_a.event_id = event.id
 
         candidate_b = MagicMock()
         candidate_b.raw_name = "Unknown Artist"
         candidate_b.matched_artist_id = None
         candidate_b.status = types_module.CandidateStatus.PENDING
+        candidate_b.confidence_score = 90
 
         artist = MagicMock()
         artist.id = uuid.uuid4()
@@ -472,11 +490,19 @@ class TestMatchCandidatesToArtists:
         # Second query: artist lookup for "Known Artist" -> found
         found_result = MagicMock()
         found_result.scalar_one_or_none.return_value = artist
-        # Third query: artist lookup for "Unknown Artist" -> not found
+        # Third query: check existing EventArtist -> none
+        existing_ea_result = MagicMock()
+        existing_ea_result.scalar_one_or_none.return_value = None
+        # Fourth query: artist lookup for "Unknown Artist" -> not found
         no_result = MagicMock()
         no_result.scalar_one_or_none.return_value = None
 
-        session.execute.side_effect = [candidates_result, found_result, no_result]
+        session.execute.side_effect = [
+            candidates_result,
+            found_result,
+            existing_ea_result,
+            no_result,
+        ]
 
         count = await sync_module.match_candidates_to_artists(session, event)
 
