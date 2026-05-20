@@ -189,6 +189,20 @@ Connects directly to the database (not via API) to set a user's role. This is th
 
 Valid roles: `user`, `admin`, `owner`.
 
+### Import Concert Archives CSV
+
+```bash
+uv run resonance-api import concert_archives --file <path> [--export-date YYYY-MM-DD] [--wait]
+```
+
+Uploads a Concert Archives CSV export via the API. The export date is
+auto-detected from the filename (e.g., `mike.dougherty - Concert Archives
+Export - 05-19-2026.csv`). Use `--export-date` to override. Use `--wait`
+to poll until the background import completes and print the summary.
+
+Re-uploading a file with the same or older export date as the last import is
+rejected (409). Use a newer export or a later `--export-date` to re-import.
+
 
 ## Deduplication
 

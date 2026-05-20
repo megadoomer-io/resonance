@@ -11,9 +11,11 @@ For Spotify-specific API constraints, see [spotify-api-constraints.md](spotify-a
 ## Overview
 
 Resonance is a personal media discovery platform that aggregates music data from
-external services (Spotify, Last.fm, ListenBrainz) into a unified data model.
-It normalizes listening history, artist follows, and track ratings across
-services, enabling cross-service analytics and curated playlist generation.
+external services (Spotify, Last.fm, ListenBrainz), concert data from calendar
+feeds (Songkick, iCal) and file uploads (Concert Archives CSV), into a unified
+data model. It normalizes listening history, artist follows, track ratings, and
+concert attendance across services, enabling cross-service analytics and curated
+playlist generation.
 
 The data model is multi-user-ready -- each entity is scoped to a user via
 foreign keys -- but the current deployment is single-user. The application lives
@@ -64,6 +66,13 @@ Jinja2 + HTMX, structlog.
                                                           | Last.fm       |
                                                           | ListenBrainz  |
                                                           | Songkick      |
+                                                          +---------------+
+
+                                                          +---------------+
+                                                          | File Uploads  |
+                                                          |               |
+                                                          | Concert       |
+                                                          |  Archives CSV |
                                                           +---------------+
 ```
 
@@ -199,7 +208,7 @@ operations, and other async work. Tasks form a hierarchy via `parent_id`.
 | user_id | UUID FK | Nullable (bulk jobs may have no user) |
 | service_connection_id | UUID FK | Nullable |
 | parent_id | UUID FK | Self-referential, nullable |
-| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync` |
+| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync`, `concert_archives_import`, `playlist_generation`, `track_discovery`, `track_scoring`, `playlist_export` |
 | status | SyncStatus enum | `pending`, `running`, `completed`, `failed`, `deferred` |
 | params | JSON | Task-specific parameters |
 | result | JSON | Task output on completion |
@@ -334,6 +343,7 @@ Ten capabilities that connectors can declare:
 | `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_DISCOVERY` |
 | `SongkickConnector` | Songkick | Username | Lightweight — calendar feed sync only |
 | `ICalConnector` | iCal | URL | Lightweight — calendar feed sync only |
+| `ConcertArchivesConnector` | Concert Archives | File upload | Lightweight — CSV import only |
 | `TestConnector` | Test (mock) | OAuth | `LISTENING_HISTORY` |
 
 ### ConnectorRegistry
@@ -350,7 +360,7 @@ system how to authenticate and sync:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `auth_type` | str | `"oauth"`, `"username"`, or `"url"` |
+| `auth_type` | str | `"oauth"`, `"username"`, `"url"`, or `"file_upload"` |
 | `sync_function` | str | arq job name to enqueue (e.g., `"plan_sync"`, `"sync_calendar_feed"`) |
 | `sync_style` | str | `"incremental"` (watermark-based) or `"full"` (re-fetch everything) |
 | `derive_urls` | Callable or None | For username-based connectors: generates feed URLs from a username |
@@ -464,6 +474,10 @@ full sync ignores the watermark and fetches everything from the beginning.
   histories).
 - **CALENDAR_SYNC** -- standalone task for calendar feed sync (Songkick, iCal).
   No children — fetches and parses iCal feeds in a single operation.
+- **CONCERT_ARCHIVES_IMPORT** -- standalone task for Concert Archives CSV import.
+  No children — parses CSV and upserts events in a single operation. CSV content
+  is passed as an arq job argument (stored in Redis). If the worker restarts
+  mid-import, the task fails gracefully with a re-upload prompt.
 - **PAGE_FETCH** -- (defined in TaskType but not currently used as a separate
   task; page fetching happens within sync_range execution).
 - **BULK_JOB** -- standalone task for bulk operations (dedup, etc.).

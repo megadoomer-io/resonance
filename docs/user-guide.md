@@ -62,14 +62,35 @@ back any time to check progress.
 You can connect multiple services to Resonance. Each service provides
 different types of data:
 
-| Service       | What it provides                                      |
-|---------------|-------------------------------------------------------|
-| Spotify       | Listening history, followed artists, saved/liked tracks |
-| Last.fm       | Listening history (scrobbles), loved tracks           |
-| ListenBrainz  | Listening history                                     |
+| Service           | What it provides                                      |
+|-------------------|-------------------------------------------------------|
+| Spotify           | Listening history, followed artists, saved/liked tracks |
+| Last.fm           | Listening history (scrobbles), loved tracks           |
+| ListenBrainz      | Listening history                                     |
+| Songkick          | Upcoming concerts (via calendar feed)                 |
+| iCal              | Concert events (any iCal calendar URL)                |
+| Concert Archives  | Past and upcoming concert attendance (via CSV export) |
 
-To connect an additional service, go to the **Account** page and use the
-"Connect Another Service" buttons at the bottom.
+To connect an OAuth service (Spotify, Last.fm, ListenBrainz), go to the
+**Account** page and use the "Connect Another Service" buttons.
+
+To connect Songkick, enter your Songkick username. For iCal, provide a
+calendar feed URL.
+
+### Importing from Concert Archives
+
+Concert Archives uses file upload instead of an API connection:
+
+1. Export your concert history from [concertarchives.org](https://concertarchives.org)
+   (your profile → export)
+2. On the **Account** page, click **Connect Concert Archives**
+3. Select the exported CSV file — the export date is auto-detected from the
+   filename
+4. Click **Upload** — the import runs in the background
+
+After the initial import, use the **Upload CSV** button on the **Dashboard** to
+re-import with a newer export. Events are matched by date and venue, so
+re-importing won't create duplicates.
 
 When you connect a new service, Resonance checks whether that service account
 is already linked to a different Resonance account (for example, if you

@@ -106,6 +106,7 @@ uv run resonance-api profile create ...         # Create a generator profile
 uv run resonance-api generate <profile-id>      # Generate playlist from profile
 uv run resonance-api playlists                  # List playlists
 uv run resonance-api playlist <playlist-id>     # Show playlist details
+uv run resonance-api import concert_archives --file <path> [--export-date YYYY-MM-DD] [--wait]
 uv run resonance-api api [METHOD] PATH [-d DATA] [-H HDR]  # Raw API request
 uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 ```
@@ -130,7 +131,8 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 - API versioned under `/api/v1/`
 - Connector classes live in `connectors/` and declare capabilities via `ConnectorCapability` enum
 - Connectors also declare a `ConnectionConfig` (auth type, sync function, sync style) — used for generic sync dispatch, orphan recovery, and UI rendering
-- Lightweight connectors (Songkick, iCal) implement the `Connectable` Protocol without extending `BaseConnector`
+- Lightweight connectors (Songkick, iCal, Concert Archives) implement the `Connectable` Protocol without extending `BaseConnector`
+- Concert Archives uses `file_upload` auth type — CSV uploaded via the web UI or CLI, parsed and imported as a background task
 - Generator classes live in `generators/` and declare required/optional capabilities
 - Generator parameter registry lives in `generators/parameters.py`
 - Generator types declared in `generators/parameters.py` via `GENERATOR_TYPE_CONFIG`
@@ -138,7 +140,7 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 - Generator-specific logic in `generators/<type>.py` (e.g., `concert_prep.py`)
 - SQLAlchemy models use UUID primary keys
 - OAuth tokens encrypted at rest via Fernet
-- All connections (OAuth, username-based, URL-based) use the unified `ServiceConnection` model — there is no separate calendar feed model
+- All connections (OAuth, username-based, URL-based, file-upload) use the unified `ServiceConnection` model — there is no separate calendar feed or import model
 - Task lifecycle helpers (`sync/lifecycle.py`) provide `complete_task`/`fail_task` — use these instead of setting task status inline
 - Orphan recovery in the worker is type-agnostic — new task types are handled by adding an entry to `_TASK_DISPATCH`
 - Playlist export uses `PLAYLIST_WRITE` capability — connectors declare it to enable export. Export creates a background `PLAYLIST_EXPORT` task per connection, tracked via `playlist.service_links`
