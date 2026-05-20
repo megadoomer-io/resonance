@@ -95,6 +95,13 @@ def _replace_constraints(
 
 
 def upgrade() -> None:
+    # Widen varchar columns to fit CONCERT_ARCHIVES (17 chars) and
+    # CONCERT_ARCHIVES_IMPORT (24 chars). Increasing varchar length
+    # is a metadata-only change in PostgreSQL — no table rewrite.
+    for table, column in _SERVICE_TABLES_AND_COLUMNS:
+        op.alter_column(table, column, type_=sa.String(17))
+    op.alter_column("sync_tasks", "task_type", type_=sa.String(24))
+
     _replace_constraints(
         _SERVICE_TABLES_AND_COLUMNS, _NEW_SERVICE_VALUES, "servicetype"
     )
