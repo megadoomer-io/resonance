@@ -93,23 +93,14 @@
     </table>
 </figure>
 
+<h2>Entity Resolution</h2>
+<p>
+    <a href="/admin/resolution" role="button" class="outline">Review Candidates &amp; Duplicates</a>
+</p>
+
 <h2>Maintenance</h2>
 <div id="dedup-result"></div>
 <p>
-<button
-    hx-post="/admin/dedup-venues"
-    hx-target="#dedup-result"
-    hx-swap="innerHTML"
-    hx-confirm="Merge duplicate venue records? This cannot be undone."
-    class="outline"
->Dedup Venues</button>
-<button
-    hx-post="/admin/dedup-concerts"
-    hx-target="#dedup-result"
-    hx-swap="innerHTML"
-    hx-confirm="Merge duplicate cross-source concert events? This cannot be undone."
-    class="outline"
->Dedup Concerts</button>
 <button
     hx-post="/admin/dedup-events"
     hx-target="#dedup-result"

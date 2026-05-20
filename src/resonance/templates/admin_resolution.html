@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}Entity Resolution — resonance{% endblock %}
+
+{% block content %}
+<h1>Entity Resolution</h1>
+<p><a href="/admin">&larr; Back to Admin</a></p>
+
+<div id="resolution-result"></div>
+
+{% if pending_venue_candidates %}
+<h2>Pending Venue Candidates ({{ pending_venue_candidates | length }})</h2>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>City</th>
+                <th>Source</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vc in pending_venue_candidates %}
+            <tr>
+                <td>{{ vc.name }}</td>
+                <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
+                <td>{{ vc.source_service.value }}</td>
+                <td>{{ vc.status.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+
+{% if pending_event_candidates %}
+<h2>Pending Event Candidates ({{ pending_event_candidates | length }})</h2>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Date</th>
+                <th>Source</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ec in pending_event_candidates %}
+            <tr>
+                <td>{{ ec.title }}</td>
+                <td>{{ ec.event_date }}</td>
+                <td>{{ ec.source_service.value }}</td>
+                <td>{{ ec.status.value }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+
+{% if multi_cand_venues %}
+<h2>Venues with Multiple Sources ({{ multi_cand_venues | length }})</h2>
+<p>These venues have candidates from multiple imports. Review to confirm they are the same venue, or split if they represent different venues.</p>
+{% for venue, candidates in multi_cand_venues %}
+<details>
+    <summary>{{ venue.name }} — {{ venue.city or '?' }} ({{ candidates | length }} candidates)</summary>
+    <figure>
+        <table>
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th>Name (as imported)</th>
+                    <th>City</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for vc in candidates %}
+                <tr id="vc-{{ vc.id }}">
+                    <td>{{ vc.source_service.value }}</td>
+                    <td>{{ vc.name }}</td>
+                    <td>{{ vc.city or '' }}</td>
+                    <td>{{ vc.status.value }}</td>
+                    <td>
+                        <button
+                            hx-post="/admin/resolution/unlink-venue-candidate/{{ vc.id }}"
+                            hx-target="#resolution-result"
+                            hx-swap="innerHTML"
+                            hx-confirm="Unlink this candidate from {{ venue.name }}?"
+                            class="outline secondary"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                        >Unlink</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+</details>
+{% endfor %}
+{% endif %}
+
+{% if multi_cand_events %}
+<h2>Events with Multiple Sources ({{ multi_cand_events | length }})</h2>
+<p>These events were matched across different sources. Review to confirm they are the same concert, or split if they are different events.</p>
+{% for event, candidates in multi_cand_events %}
+<details>
+    <summary>{{ event.title }} — {{ event.event_date }} ({{ candidates | length }} candidates)</summary>
+    <figure>
+        <table>
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th>Title (as imported)</th>
+                    <th>Date</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ec in candidates %}
+                <tr id="ec-{{ ec.id }}">
+                    <td>{{ ec.source_service.value }}</td>
+                    <td>{{ ec.title }}</td>
+                    <td>{{ ec.event_date }}</td>
+                    <td>{{ ec.status.value }}</td>
+                    <td>
+                        <button
+                            hx-post="/admin/resolution/unlink-event-candidate/{{ ec.id }}"
+                            hx-target="#resolution-result"
+                            hx-swap="innerHTML"
+                            hx-confirm="Unlink this candidate from {{ event.title }}?"
+                            class="outline secondary"
+                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                        >Unlink</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+</details>
+{% endfor %}
+{% endif %}
+
+{% if venue_merge_suggestions %}
+<h2>Suggested Venue Merges ({{ venue_merge_suggestions | length }})</h2>
+<p>These venues have similar names and may be duplicates. Use the candidate resolution system to merge them by resolving their candidates to the same venue.</p>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Group</th>
+                <th>Venues</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for group in venue_merge_suggestions %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>
+                    {% for v in group %}
+                    {{ v.name }} ({{ v.city or '?' }}){% if not loop.last %}, {% endif %}
+                    {% endfor %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+
+{% if orphaned_venues %}
+<h2>Orphaned Venues ({{ orphaned_venues | length }})</h2>
+<p>These venues have no source candidates and no events. They can be safely deleted.</p>
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>City</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for v in orphaned_venues %}
+            <tr id="orphan-venue-{{ v.id }}">
+                <td>{{ v.name }}</td>
+                <td>{{ v.city or '' }}</td>
+                <td>
+                    <button
+                        hx-post="/admin/resolution/delete-orphan-venue/{{ v.id }}"
+                        hx-target="#orphan-venue-{{ v.id }}"
+                        hx-swap="outerHTML"
+                        hx-confirm="Delete orphaned venue {{ v.name }}?"
+                        class="outline secondary"
+                        style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                    >Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+
+{% if not pending_venue_candidates and not pending_event_candidates and not multi_cand_venues and not multi_cand_events and not venue_merge_suggestions and not orphaned_venues %}
+<p>No resolution actions needed. All entities are resolved and clean.</p>
+{% endif %}
+
+{% endblock %}

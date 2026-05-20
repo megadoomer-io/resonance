@@ -445,23 +445,6 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                     session
                 )
                 result = {"events_deleted": deleted}
-            elif operation == "dedup_venues":
-                stats = await dedup_module.find_and_merge_duplicate_venues(session)
-                result = {
-                    "venues_merged": stats.venues_merged,
-                    "events_venue_repointed": stats.events_venue_repointed,
-                }
-            elif operation == "dedup_concerts":
-                stats = await dedup_module.find_and_merge_duplicate_concerts(session)
-                result = {
-                    "concerts_merged": stats.concerts_merged,
-                    "candidates_repointed": stats.concert_candidates_repointed,
-                    "candidates_deleted": stats.concert_candidates_deleted,
-                    "artists_repointed": stats.concert_artists_repointed,
-                    "artists_deleted": stats.concert_artists_deleted,
-                    "attendance_repointed": stats.attendance_repointed,
-                    "attendance_deleted": stats.attendance_deleted,
-                }
             elif operation == "dedup_all":
                 result = {**await dedup_module.dedup_all(session)}
             elif operation == "reconcile_event_artists":

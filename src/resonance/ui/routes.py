@@ -3293,22 +3293,191 @@ async def dedup_tracks(
     return await _enqueue_bulk_job(request, "dedup_tracks")
 
 
-@router.post("/admin/dedup-venues", response_model=None)
-async def dedup_venues(
+@router.get("/admin/resolution", response_model=None)
+async def admin_resolution(
     request: fastapi.Request,
-) -> dict[str, str]:
-    """Admin-only: enqueue venue dedup as a bulk job."""
-    deps_module.verify_admin_access(request)
-    return await _enqueue_bulk_job(request, "dedup_venues")
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Admin page for entity resolution: candidates, duplicates, orphans."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        import resonance.normalize as normalize_module
+
+        # Pending venue candidates
+        pending_vc_result = await db.execute(
+            sa.select(concert_models.VenueCandidate)
+            .where(
+                concert_models.VenueCandidate.status
+                == types_module.CandidateStatus.PENDING
+            )
+            .order_by(concert_models.VenueCandidate.created_at.desc())
+            .limit(50)
+        )
+        pending_venue_candidates = list(pending_vc_result.scalars().all())
+
+        # Pending event candidates
+        pending_ec_result = await db.execute(
+            sa.select(concert_models.EventCandidate)
+            .where(
+                concert_models.EventCandidate.status
+                == types_module.CandidateStatus.PENDING
+            )
+            .order_by(concert_models.EventCandidate.created_at.desc())
+            .limit(50)
+        )
+        pending_event_candidates = list(pending_ec_result.scalars().all())
+
+        # Venues with multiple candidates (potential duplicates)
+        multi_cand_venues: list[
+            tuple[concert_models.Venue, list[concert_models.VenueCandidate]]
+        ] = []
+        venues_result = await db.execute(
+            sa.select(concert_models.Venue).options(
+                sa_orm.selectinload(concert_models.Venue.candidates)
+            )
+        )
+        for venue in venues_result.scalars().all():
+            if len(venue.candidates) > 1:
+                multi_cand_venues.append((venue, list(venue.candidates)))
+
+        # Events with multiple candidates (cross-source)
+        multi_cand_events: list[
+            tuple[concert_models.Event, list[concert_models.EventCandidate]]
+        ] = []
+        events_result = await db.execute(
+            sa.select(concert_models.Event).options(
+                sa_orm.selectinload(concert_models.Event.event_candidates)
+            )
+        )
+        for event in events_result.scalars().all():
+            if len(event.event_candidates) > 1:
+                multi_cand_events.append((event, list(event.event_candidates)))
+
+        # Suggest venue merges via normalized name matching
+        all_venues_result = await db.execute(sa.select(concert_models.Venue))
+        all_venues = list(all_venues_result.scalars().all())
+        venue_merge_suggestions: list[list[concert_models.Venue]] = []
+        seen_ids: set[uuid.UUID] = set()
+        groups: dict[tuple[str, ...], list[concert_models.Venue]] = {}
+        for v in all_venues:
+            key = (
+                normalize_module.normalize_name(v.name),
+                normalize_module.normalize_name(v.city or ""),
+            )
+            groups.setdefault(key, []).append(v)
+        for group in groups.values():
+            if len(group) > 1 and group[0].id not in seen_ids:
+                venue_merge_suggestions.append(group)
+                for v in group:
+                    seen_ids.add(v.id)
+
+        # Orphaned venues (no candidates, no events)
+        orphaned_venues: list[concert_models.Venue] = []
+        venues_with_events = await db.execute(
+            sa.select(concert_models.Venue).options(
+                sa_orm.selectinload(concert_models.Venue.candidates),
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+        )
+        for v in venues_with_events.scalars().all():
+            if not v.candidates and not v.events:
+                orphaned_venues.append(v)
+
+    return templates.TemplateResponse(
+        request,
+        "admin_resolution.html",
+        {
+            "user_id": user_id,
+            "user_tz": _user_tz(request),
+            "user_role": user_role,
+            "pending_venue_candidates": pending_venue_candidates,
+            "pending_event_candidates": pending_event_candidates,
+            "multi_cand_venues": multi_cand_venues,
+            "multi_cand_events": multi_cand_events,
+            "venue_merge_suggestions": venue_merge_suggestions,
+            "orphaned_venues": orphaned_venues,
+        },
+    )
 
 
-@router.post("/admin/dedup-concerts", response_model=None)
-async def dedup_concerts(
+@router.post("/admin/resolution/unlink-venue-candidate/{candidate_id}")
+async def unlink_venue_candidate(
+    candidate_id: uuid.UUID,
     request: fastapi.Request,
 ) -> dict[str, str]:
-    """Admin-only: enqueue cross-source concert event dedup as a bulk job."""
+    """Unlink a VenueCandidate from its resolved Venue."""
     deps_module.verify_admin_access(request)
-    return await _enqueue_bulk_job(request, "dedup_concerts")
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(concert_models.VenueCandidate).where(
+                concert_models.VenueCandidate.id == candidate_id
+            )
+        )
+        candidate = result.scalar_one_or_none()
+        if candidate is None:
+            raise fastapi.HTTPException(status_code=404)
+        candidate.resolved_venue_id = None
+        candidate.status = types_module.CandidateStatus.PENDING
+        candidate.confidence_score = 0
+        await db.commit()
+    return {"status": "unlinked", "candidate_id": str(candidate_id)}
+
+
+@router.post("/admin/resolution/unlink-event-candidate/{candidate_id}")
+async def unlink_event_candidate(
+    candidate_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Unlink an EventCandidate from its resolved Event."""
+    deps_module.verify_admin_access(request)
+    async with _get_db(request) as db:
+        result = await db.execute(
+            sa.select(concert_models.EventCandidate).where(
+                concert_models.EventCandidate.id == candidate_id
+            )
+        )
+        candidate = result.scalar_one_or_none()
+        if candidate is None:
+            raise fastapi.HTTPException(status_code=404)
+        candidate.resolved_event_id = None
+        candidate.status = types_module.CandidateStatus.PENDING
+        candidate.confidence_score = 0
+        await db.commit()
+    return {"status": "unlinked", "candidate_id": str(candidate_id)}
+
+
+@router.post("/admin/resolution/delete-orphan-venue/{venue_id}")
+async def delete_orphan_venue(
+    venue_id: uuid.UUID,
+    request: fastapi.Request,
+) -> dict[str, str]:
+    """Delete a venue with no candidates and no events."""
+    deps_module.verify_admin_access(request)
+    async with _get_db(request) as db:
+        venue_result = await db.execute(
+            sa.select(concert_models.Venue)
+            .options(
+                sa_orm.selectinload(concert_models.Venue.candidates),
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+            .where(concert_models.Venue.id == venue_id)
+        )
+        venue = venue_result.scalar_one_or_none()
+        if venue is None:
+            raise fastapi.HTTPException(status_code=404)
+        if venue.candidates or venue.events:
+            raise fastapi.HTTPException(
+                status_code=409, detail="Venue still has candidates or events"
+            )
+        await db.delete(venue)
+        await db.commit()
+    return {"status": "deleted", "venue_id": str(venue_id)}
 
 
 @router.get("/admin/tasks/{task_id}", response_model=None)
