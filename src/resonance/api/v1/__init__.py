@@ -7,6 +7,7 @@ import resonance.api.v1.admin as admin_module
 import resonance.api.v1.artists as artists_module
 import resonance.api.v1.auth as auth_module
 import resonance.api.v1.calendar_feeds as calendar_feeds_module
+import resonance.api.v1.concert_archives as concert_archives_module
 import resonance.api.v1.events as events_module
 import resonance.api.v1.generators as generators_module
 import resonance.api.v1.history as history_module
@@ -21,6 +22,7 @@ router.include_router(admin_module.router)
 router.include_router(artists_module.router)
 router.include_router(auth_module.router)
 router.include_router(calendar_feeds_module.router)
+router.include_router(concert_archives_module.router)
 router.include_router(events_module.router)
 router.include_router(generators_module.router)
 router.include_router(history_module.router)
