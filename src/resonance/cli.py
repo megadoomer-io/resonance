@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import json
 import os
+import pathlib
 import sys
 import time
 import uuid
@@ -83,6 +84,7 @@ Commands:
   playlists                    List playlists
   playlist <id> [diff <other>] Show or diff a playlist
   watermark <service> [--reset] View or reset sync watermark (direct DB)
+  import concert_archives      Import Concert Archives CSV
   api [METHOD] PATH [opts]     Raw API request (like gh api)
   set-role <user_id> <role>    Set user role (direct DB)
 """
@@ -714,6 +716,104 @@ def _cmd_playlist() -> None:
         print(f"  {pos}. {t['title']} -- {t['artist_name']} {source_tag}{score_str}")
 
 
+_IMPORT_USAGE = """\
+Usage: resonance-api import <type> [args]
+
+Types:
+  concert_archives --file PATH  Import a Concert Archives CSV export
+      [--export-date YYYY-MM-DD]  Override export date (default: from filename or today)
+      [--wait]                    Poll until import completes
+"""
+
+
+def _cmd_import() -> None:
+    if len(sys.argv) < 3:
+        print(_IMPORT_USAGE)
+        sys.exit(1)
+    import_type = sys.argv[2]
+
+    if import_type == "concert_archives":
+        _import_concert_archives()
+    else:
+        print(f"Unknown import type: {import_type}")
+        print(_IMPORT_USAGE)
+        sys.exit(1)
+
+
+def _import_concert_archives() -> None:
+    remaining = sys.argv[3:]
+
+    file_path: str | None = None
+    export_date: str | None = None
+    wait = "--wait" in remaining
+
+    i = 0
+    while i < len(remaining):
+        if remaining[i] == "--file" and i + 1 < len(remaining):
+            file_path = remaining[i + 1]
+            i += 2
+        elif remaining[i] == "--export-date" and i + 1 < len(remaining):
+            export_date = remaining[i + 1]
+            i += 2
+        elif remaining[i] == "--wait":
+            i += 1
+        else:
+            i += 1
+
+    if not file_path:
+        print("Error: --file is required")
+        print(_IMPORT_USAGE)
+        sys.exit(1)
+
+    csv_path = pathlib.Path(file_path).expanduser().resolve()
+    if not csv_path.is_file():
+        print(f"Error: File not found: {csv_path}")
+        sys.exit(1)
+
+    print(f"Uploading {csv_path.name}...")
+
+    base_url, token = _get_api_config()
+    url = f"{base_url}/api/v1/connections/concert-archives/upload"
+
+    data: dict[str, str] = {}
+    if export_date:
+        data["export_date"] = export_date
+
+    try:
+        with csv_path.open("rb") as f:
+            response = httpx.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={"file": (csv_path.name, f, "text/csv")},
+                data=data,
+                timeout=300.0,
+                follow_redirects=True,
+            )
+    except httpx.ConnectError as exc:
+        print(f"Error: Could not connect to {base_url}: {exc}")
+        sys.exit(1)
+    except httpx.TimeoutException:
+        print(f"Error: Request to {url} timed out")
+        sys.exit(1)
+
+    if response.status_code >= 400:
+        print(f"Error: HTTP {response.status_code}")
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text[:500]
+        print(f"  {detail}")
+        sys.exit(1)
+
+    result = response.json()
+    task_id = result.get("task_id", "")
+    print(f"Import started: task {task_id}")
+
+    if wait:
+        task_result = _poll_task(task_id, "Importing concert archives")
+        print(json.dumps(task_result, indent=2))
+
+
 _HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 _API_USAGE = """\
@@ -877,6 +977,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "playlists": ("List playlists", _cmd_playlists),
     "playlist": ("Show or diff a playlist", _cmd_playlist),
     "watermark": ("View/reset sync watermark", _cmd_watermark),
+    "import": ("Import data from external sources", _cmd_import),
     "api": ("Raw API request", _cmd_api),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }
