@@ -51,6 +51,9 @@ class Venue(base_module.TimestampMixin, base_module.Base):
     )
 
     events: orm.Mapped[list[Event]] = orm.relationship(back_populates="venue")
+    candidates: orm.Mapped[list[VenueCandidate]] = orm.relationship(
+        back_populates="resolved_venue"
+    )
 
 
 class Event(base_module.TimestampMixin, base_module.Base):
@@ -90,6 +93,9 @@ class Event(base_module.TimestampMixin, base_module.Base):
     )
     artists: orm.Mapped[list[EventArtist]] = orm.relationship(
         back_populates="event", cascade="all, delete-orphan"
+    )
+    event_candidates: orm.Mapped[list[EventCandidate]] = orm.relationship(
+        back_populates="resolved_event"
     )
 
 
@@ -182,3 +188,129 @@ class UserEventAttendance(base_module.TimestampMixin, base_module.Base):
     source_service: orm.Mapped[types_module.ServiceType] = orm.mapped_column(
         sa.Enum(types_module.ServiceType, native_enum=False), nullable=False
     )
+
+
+class VenueCandidate(base_module.TimestampMixin, base_module.Base):
+    """Raw venue data from a source, pending or resolved to a canonical Venue."""
+
+    __tablename__ = "venue_candidates"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "source_service",
+            "external_id",
+            name="uq_venue_candidates_source_external",
+        ),
+    )
+
+    id: orm.Mapped[uuid.UUID] = orm.mapped_column(
+        sa.Uuid, primary_key=True, default=uuid.uuid4
+    )
+    source_service: orm.Mapped[types_module.ServiceType] = orm.mapped_column(
+        sa.Enum(types_module.ServiceType, native_enum=False), nullable=False
+    )
+    external_id: orm.Mapped[str] = orm.mapped_column(sa.String(512), nullable=False)
+    name: orm.Mapped[str] = orm.mapped_column(sa.String(512), nullable=False)
+    city: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
+    state: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
+    country: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(256), nullable=True, default=None
+    )
+    address: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(512), nullable=True, default=None
+    )
+    postal_code: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(32), nullable=True, default=None
+    )
+    resolved_venue_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
+        sa.ForeignKey("venues.id", ondelete="SET NULL"), nullable=True
+    )
+    status: orm.Mapped[types_module.CandidateStatus] = orm.mapped_column(
+        sa.Enum(types_module.CandidateStatus, native_enum=False),
+        nullable=False,
+        default=types_module.CandidateStatus.PENDING,
+    )
+    confidence_score: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=0
+    )
+
+    resolved_venue: orm.Mapped[Venue | None] = orm.relationship(
+        back_populates="candidates"
+    )
+    event_candidates: orm.Mapped[list[EventCandidate]] = orm.relationship(
+        back_populates="venue_candidate"
+    )
+
+
+class EventCandidate(base_module.TimestampMixin, base_module.Base):
+    """Raw event data from a source, pending or resolved to a canonical Event."""
+
+    __tablename__ = "event_candidates"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "source_service",
+            "external_id",
+            name="uq_event_candidates_source_external",
+        ),
+    )
+
+    id: orm.Mapped[uuid.UUID] = orm.mapped_column(
+        sa.Uuid, primary_key=True, default=uuid.uuid4
+    )
+    source_service: orm.Mapped[types_module.ServiceType] = orm.mapped_column(
+        sa.Enum(types_module.ServiceType, native_enum=False), nullable=False
+    )
+    external_id: orm.Mapped[str] = orm.mapped_column(sa.String(512), nullable=False)
+    external_url: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(1024), nullable=True, default=None
+    )
+    title: orm.Mapped[str] = orm.mapped_column(sa.String(1024), nullable=False)
+    event_date: orm.Mapped[datetime.date] = orm.mapped_column(sa.Date, nullable=False)
+    venue_candidate_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
+        sa.ForeignKey("venue_candidates.id", ondelete="SET NULL"), nullable=True
+    )
+    attendance_status: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(64), nullable=True, default=None
+    )
+    resolved_event_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
+        sa.ForeignKey("events.id", ondelete="SET NULL"), nullable=True
+    )
+    status: orm.Mapped[types_module.CandidateStatus] = orm.mapped_column(
+        sa.Enum(types_module.CandidateStatus, native_enum=False),
+        nullable=False,
+        default=types_module.CandidateStatus.PENDING,
+    )
+    confidence_score: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=0
+    )
+
+    venue_candidate: orm.Mapped[VenueCandidate | None] = orm.relationship(
+        back_populates="event_candidates"
+    )
+    resolved_event: orm.Mapped[Event | None] = orm.relationship(
+        back_populates="event_candidates"
+    )
+
+
+class EntityExclusion(base_module.TimestampMixin, base_module.Base):
+    """Records that two entities are known to be distinct (not duplicates)."""
+
+    __tablename__ = "entity_exclusions"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "entity_type",
+            "entity_a_id",
+            "entity_b_id",
+            name="uq_entity_exclusions_type_pair",
+        ),
+    )
+
+    id: orm.Mapped[uuid.UUID] = orm.mapped_column(
+        sa.Uuid, primary_key=True, default=uuid.uuid4
+    )
+    entity_type: orm.Mapped[str] = orm.mapped_column(sa.String(32), nullable=False)
+    entity_a_id: orm.Mapped[uuid.UUID] = orm.mapped_column(sa.Uuid, nullable=False)
+    entity_b_id: orm.Mapped[uuid.UUID] = orm.mapped_column(sa.Uuid, nullable=False)

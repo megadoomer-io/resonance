@@ -123,7 +123,7 @@ class TestCandidateStatus:
         assert types_module.CandidateStatus.REJECTED == "rejected"
 
     def test_candidate_status_count(self) -> None:
-        assert len(types_module.CandidateStatus) == 3
+        assert len(types_module.CandidateStatus) == 4
 
 
 # ---------------------------------------------------------------------------

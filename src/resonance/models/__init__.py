@@ -2,11 +2,14 @@
 
 from resonance.models.base import Base
 from resonance.models.concert import (
+    EntityExclusion,
     Event,
     EventArtist,
     EventArtistCandidate,
+    EventCandidate,
     UserEventAttendance,
     Venue,
+    VenueCandidate,
 )
 from resonance.models.generator import GenerationRecord, GeneratorProfile
 from resonance.models.music import Artist, ListeningEvent, Track
@@ -18,9 +21,11 @@ from resonance.models.user import ServiceConnection, User
 __all__ = [
     "Artist",
     "Base",
+    "EntityExclusion",
     "Event",
     "EventArtist",
     "EventArtistCandidate",
+    "EventCandidate",
     "GenerationRecord",
     "GeneratorProfile",
     "ListeningEvent",
@@ -34,4 +39,5 @@ __all__ = [
     "UserEventAttendance",
     "UserTrackRelation",
     "Venue",
+    "VenueCandidate",
 ]

@@ -90,9 +90,10 @@ class AttendanceStatus(enum.StrEnum):
 
 
 class CandidateStatus(enum.StrEnum):
-    """Status of an artist-to-event candidate."""
+    """Resolution status for source candidates matched to canonical entities."""
 
     PENDING = "pending"
+    AUTO_ACCEPTED = "auto_accepted"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
