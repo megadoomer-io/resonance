@@ -205,7 +205,15 @@
 
   var clearBtn = document.querySelector('.preset-clear');
   if (clearBtn) {
-    clearBtn.addEventListener('click', clearSavedFilters);
+    clearBtn.addEventListener('click', function() {
+      clearSavedFilters();
+      document.querySelectorAll('[data-filter-input]').forEach(function(el) {
+        if (el.type === 'checkbox') { el.checked = false; }
+        else { el.value = ''; }
+      });
+      var searchInput = document.querySelector('.filter-search input');
+      if (searchInput) { searchInput.value = ''; }
+    });
   }
 
   if (!window.location.search) {
