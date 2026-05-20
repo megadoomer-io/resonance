@@ -227,6 +227,8 @@ class TestParseCsv:
             / "data"
             / "mike.dougherty - Concert Archives Export - 05-19-2026.csv"
         )
+        if not csv_path.exists():
+            pytest.skip("Real CSV test data not available")
         content = csv_path.read_text()
         result = ca_module.parse_csv(content)
         assert len(result.events) == 290
