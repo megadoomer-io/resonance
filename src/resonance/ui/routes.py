@@ -795,6 +795,7 @@ async def events_page(
     params = dict(request.query_params)
     multi_params = {
         "attendance": request.query_params.getlist("attendance"),
+        "source_service": request.query_params.getlist("source_service"),
     }
 
     # Build presets (today's date resolved dynamically)
@@ -807,6 +808,7 @@ async def events_page(
         "date_from",
         "date_to",
         "attendance",
+        "source_service",
         "has_pending",
         "include_not_going",
     }

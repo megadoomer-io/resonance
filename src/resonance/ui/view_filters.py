@@ -43,12 +43,19 @@ _pending_candidates_subquery: sa.Select[Any] = (
     .correlate(concert_models.Event)
 )
 
+_EVENT_SOURCE_OPTIONS = ["SONGKICK", "CONCERT_ARCHIVES", "ICAL"]
+
 EVENT_FILTERS: list[filters_module.AnyFilterField] = [
     filters_module.TextField("title", concert_models.Event.title),
     filters_module.TextField("venue", concert_models.Venue.name),
     filters_module.TextField("artist", music_models.Artist.name),
     filters_module.DateRangeField("date", concert_models.Event.event_date),
     filters_module.ExistsField("has_pending", _pending_candidates_subquery),
+    filters_module.MultiSelectField(
+        "source_service",
+        concert_models.Event.source_service,
+        options=_EVENT_SOURCE_OPTIONS,
+    ),
 ]
 
 
@@ -92,6 +99,16 @@ EVENT_TEMPLATE_FILTERS: list[dict[str, Any]] = [
             {"value": "INTERESTED", "label": "Interested"},
             {"value": "NOT_GOING", "label": "Not going"},
             {"value": "UNSET", "label": "No status"},
+        ],
+    },
+    {
+        "name": "source_service",
+        "label": "Source",
+        "type": "multiselect",
+        "options": [
+            {"value": "SONGKICK", "label": "Songkick"},
+            {"value": "CONCERT_ARCHIVES", "label": "Concert Archives"},
+            {"value": "ICAL", "label": "iCal"},
         ],
     },
 ]

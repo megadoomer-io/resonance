@@ -627,7 +627,7 @@ class TestEventFilterRegistry:
         assert isinstance(by_name["has_pending"], filters_module.ExistsField)
 
     def test_event_filters_count(self) -> None:
-        assert len(view_filters_module.EVENT_FILTERS) == 5
+        assert len(view_filters_module.EVENT_FILTERS) == 6
 
 
 class TestEventPresets:
@@ -665,11 +665,18 @@ class TestEventTemplateFilters:
     """Test event template filter metadata."""
 
     def test_template_filters_has_expected_count(self) -> None:
-        assert len(view_filters_module.EVENT_TEMPLATE_FILTERS) == 5
+        assert len(view_filters_module.EVENT_TEMPLATE_FILTERS) == 6
 
     def test_template_filter_names(self) -> None:
         names = [f["name"] for f in view_filters_module.EVENT_TEMPLATE_FILTERS]
-        assert names == ["title", "date", "venue", "artist", "attendance"]
+        assert names == [
+            "title",
+            "date",
+            "venue",
+            "artist",
+            "attendance",
+            "source_service",
+        ]
 
     def test_attendance_has_options(self) -> None:
         att = next(
