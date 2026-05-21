@@ -3903,9 +3903,17 @@ _VENUE_PAGE_SIZE = 50
 
 def _entity_action_response(
     message: str,
+    *,
+    error: bool = False,
 ) -> fastapi.responses.HTMLResponse:
     """Return an HTML response with trigger to refresh entity detail."""
-    resp = fastapi.responses.HTMLResponse(f"<p><small>{message}</small></p>")
+    if error:
+        html = (
+            f'<p><mark style="background: var(--pico-del-color);">{message}</mark></p>'
+        )
+    else:
+        html = f"<p><small>{message}</small></p>"
+    resp = fastapi.responses.HTMLResponse(html)
     resp.headers["HX-Trigger"] = "entity-updated"
     return resp
 
@@ -4084,7 +4092,7 @@ async def admin_accept_venue_candidate(
     async with _get_db(request) as db:
         vc = await db.get(concert_models.VenueCandidate, candidate_id)
         if not vc or vc.resolved_venue_id != venue_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         vc.status = types_module.CandidateStatus.ACCEPTED
         await db.commit()
 
@@ -4110,7 +4118,7 @@ async def admin_reject_venue_candidate(
     async with _get_db(request) as db:
         vc = await db.get(concert_models.VenueCandidate, candidate_id)
         if not vc or vc.resolved_venue_id != venue_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         vc.status = types_module.CandidateStatus.REJECTED
         await db.commit()
 
@@ -4136,7 +4144,7 @@ async def admin_unlink_venue_candidate_detail(
     async with _get_db(request) as db:
         vc = await db.get(concert_models.VenueCandidate, candidate_id)
         if not vc or vc.resolved_venue_id != venue_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         vc.resolved_venue_id = None
         vc.status = types_module.CandidateStatus.PENDING
         vc.confidence_score = 0
@@ -4162,7 +4170,7 @@ async def admin_split_venue(
     candidate_ids = [uuid.UUID(str(cid)) for cid in raw_ids]
 
     if not candidate_ids:
-        return _entity_action_response("Select at least one candidate.")
+        return _entity_action_response("Select at least one candidate.", error=True)
 
     async with _get_db(request) as db:
         stmt = (
@@ -4172,13 +4180,13 @@ async def admin_split_venue(
         )
         venue = (await db.execute(stmt)).scalar_one_or_none()
         if not venue:
-            return _entity_action_response("Venue not found.")
+            return _entity_action_response("Venue not found.", error=True)
 
         to_move = [vc for vc in venue.candidates if vc.id in candidate_ids]
         if not to_move:
-            return _entity_action_response("No matching candidates.")
+            return _entity_action_response("No matching candidates.", error=True)
         if len(to_move) == len(venue.candidates):
-            return _entity_action_response("Cannot split all candidates.")
+            return _entity_action_response("Cannot split all candidates.", error=True)
 
         first = to_move[0]
         new_venue = concert_models.Venue(
@@ -4225,7 +4233,7 @@ async def admin_delete_venue_exclusion(
     async with _get_db(request) as db:
         exclusion = await db.get(concert_models.EntityExclusion, exclusion_id)
         if not exclusion:
-            return _entity_action_response("Exclusion not found.")
+            return _entity_action_response("Exclusion not found.", error=True)
         await db.delete(exclusion)
         await db.commit()
 
@@ -4418,7 +4426,7 @@ async def admin_accept_event_candidate(
     async with _get_db(request) as db:
         ec = await db.get(concert_models.EventCandidate, candidate_id)
         if not ec or ec.resolved_event_id != event_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         ec.status = types_module.CandidateStatus.ACCEPTED
         await db.commit()
 
@@ -4444,7 +4452,7 @@ async def admin_reject_event_candidate(
     async with _get_db(request) as db:
         ec = await db.get(concert_models.EventCandidate, candidate_id)
         if not ec or ec.resolved_event_id != event_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         ec.status = types_module.CandidateStatus.REJECTED
         await db.commit()
 
@@ -4470,7 +4478,7 @@ async def admin_unlink_event_candidate_detail(
     async with _get_db(request) as db:
         ec = await db.get(concert_models.EventCandidate, candidate_id)
         if not ec or ec.resolved_event_id != event_id:
-            return _entity_action_response("Candidate not found.")
+            return _entity_action_response("Candidate not found.", error=True)
         ec.resolved_event_id = None
         ec.status = types_module.CandidateStatus.PENDING
         ec.confidence_score = 0
@@ -4496,7 +4504,7 @@ async def admin_split_event(
     candidate_ids = [uuid.UUID(str(cid)) for cid in raw_ids]
 
     if not candidate_ids:
-        return _entity_action_response("Select at least one candidate.")
+        return _entity_action_response("Select at least one candidate.", error=True)
 
     async with _get_db(request) as db:
         stmt = (
@@ -4506,13 +4514,13 @@ async def admin_split_event(
         )
         event = (await db.execute(stmt)).scalar_one_or_none()
         if not event:
-            return _entity_action_response("Event not found.")
+            return _entity_action_response("Event not found.", error=True)
 
         to_move = [ec for ec in event.event_candidates if ec.id in candidate_ids]
         if not to_move:
-            return _entity_action_response("No matching candidates.")
+            return _entity_action_response("No matching candidates.", error=True)
         if len(to_move) == len(event.event_candidates):
-            return _entity_action_response("Cannot split all candidates.")
+            return _entity_action_response("Cannot split all candidates.", error=True)
 
         first = to_move[0]
         new_event = concert_models.Event(
@@ -4559,7 +4567,7 @@ async def admin_delete_event_exclusion(
     async with _get_db(request) as db:
         exclusion = await db.get(concert_models.EntityExclusion, exclusion_id)
         if not exclusion:
-            return _entity_action_response("Exclusion not found.")
+            return _entity_action_response("Exclusion not found.", error=True)
         await db.delete(exclusion)
         await db.commit()
 

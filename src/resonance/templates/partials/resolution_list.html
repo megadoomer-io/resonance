@@ -9,10 +9,11 @@
 {% if view == "pending" %}
     {% if pending_venue_candidates %}
     <h3>Venue Candidates ({{ pending_venue_candidates | length }})</h3>
+    <p><small>Unlinked candidates can be re-imported via sync, or find a matching venue to reassign them.</small></p>
     <figure>
         <table>
             <thead>
-                <tr><th>Name</th><th>City</th><th>Source</th><th>Status</th></tr>
+                <tr><th>Name</th><th>City</th><th>Source</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
                 {% for vc in pending_venue_candidates %}
@@ -21,6 +22,7 @@
                     <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
                     <td>{{ vc.source_service.value }}</td>
                     <td>{{ vc.status.value }}</td>
+                    <td><a href="/admin/venues?q={{ vc.name | urlencode }}" style="font-size:0.85em">Find venue</a></td>
                 </tr>
                 {% endfor %}
             </tbody>
