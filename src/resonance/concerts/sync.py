@@ -336,7 +336,6 @@ async def resolve_venue_candidate(
 
     venues_result = await session.execute(
         sa.select(concert_models.Venue).where(
-            sa.func.lower(concert_models.Venue.name) == norm_name,
             sa.func.lower(concert_models.Venue.city) == norm_city,
         )
     )
@@ -344,7 +343,8 @@ async def resolve_venue_candidate(
 
     for venue in potential_matches:
         if (
-            normalize_module.normalize_name(venue.state or "") == norm_state
+            normalize_module.normalize_name(venue.name) == norm_name
+            and normalize_module.normalize_name(venue.state or "") == norm_state
             and normalize_module.normalize_name(venue.country or "") == norm_country
         ):
             if await _is_excluded(session, "venue", venue.id, candidate):
