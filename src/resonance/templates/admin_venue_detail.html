@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}{{ venue.name }} — Venue Management — resonance{% endblock %}
+
+{% block content %}
+<h1>{{ venue.name }}</h1>
+<p><a href="/admin/venues">&larr; Back to Venues</a></p>
+
+<article>
+    <header>Venue Details</header>
+    <dl>
+        <dt>Name</dt><dd>{{ venue.name }}</dd>
+        {% if venue.address %}<dt>Address</dt><dd>{{ venue.address }}</dd>{% endif %}
+        <dt>City</dt><dd>{{ venue.city or '—' }}</dd>
+        <dt>State</dt><dd>{{ venue.state or '—' }}</dd>
+        <dt>Country</dt><dd>{{ venue.country or '—' }}</dd>
+        {% if venue.postal_code %}<dt>Postal Code</dt><dd>{{ venue.postal_code }}</dd>{% endif %}
+        <dt>Events</dt><dd><a href="/events?venue={{ venue.name }}">{{ venue.events | length }} event(s)</a></dd>
+    </dl>
+</article>
+
+<div id="entity-action-result"></div>
+
+<h2>Source Candidates ({{ venue.candidates | length }})</h2>
+<div id="venue-candidates"
+     hx-get="/admin/venues/{{ venue.id }}"
+     hx-trigger="entity-updated from:body"
+     hx-select="#venue-candidates-inner"
+     hx-target="#venue-candidates"
+     hx-swap="innerHTML">
+    <div id="venue-candidates-inner">
+        {% include "partials/admin_venue_candidates.html" %}
+    </div>
+</div>
+
+{% if exclusions %}
+<h2>Exclusions ({{ exclusions | length }})</h2>
+<figure>
+    <table>
+        <thead>
+            <tr><th>Excluded From</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+            {% for ex in exclusions %}
+            {% set other_id = ex.entity_b_id if ex.entity_a_id | string == venue.id | string else ex.entity_a_id %}
+            <tr>
+                <td>
+                    {% if other_venues.get(other_id) %}
+                    <a href="/admin/venues/{{ other_id }}">{{ other_venues[other_id].name }}</a>
+                    ({{ other_venues[other_id].city or '?' }})
+                    {% else %}
+                    {{ other_id }} (deleted?)
+                    {% endif %}
+                </td>
+                <td>
+                    <button
+                        hx-post="/admin/venues/exclusions/{{ ex.id }}/delete"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        hx-confirm="Remove this exclusion?"
+                        class="outline secondary"
+                        style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                    >Remove</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+{% endblock %}

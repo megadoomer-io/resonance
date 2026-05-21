@@ -1,0 +1,90 @@
+{% if event.event_candidates %}
+<form id="split-event-form" method="post" action="/admin/events/{{ event.id }}/split">
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="select-all-ec"></th>
+                <th>Source</th>
+                <th>Title (as imported)</th>
+                <th>Date</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ec in event.event_candidates %}
+            <tr>
+                <td><input type="checkbox" name="candidate_ids" value="{{ ec.id }}"></td>
+                <td>{{ ec.source_service.value }}</td>
+                <td>{{ ec.title }}</td>
+                <td>{{ ec.event_date }}</td>
+                <td>
+                    {% if ec.status.value == 'accepted' %}
+                    <ins>accepted</ins>
+                    {% elif ec.status.value == 'auto_accepted' %}
+                    <ins>auto</ins>
+                    {% elif ec.status.value == 'rejected' %}
+                    <del>rejected</del>
+                    {% else %}
+                    <mark>pending</mark>
+                    {% endif %}
+                </td>
+                <td>{{ ec.confidence_score }}%</td>
+                <td style="white-space: nowrap;">
+                    {% if ec.status.value in ('pending', 'rejected') %}
+                    <button type="button"
+                        hx-post="/admin/events/{{ event.id }}/candidates/{{ ec.id }}/accept"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        class="outline"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Accept</button>
+                    {% endif %}
+                    {% if ec.status.value in ('pending', 'accepted', 'auto_accepted') %}
+                    <button type="button"
+                        hx-post="/admin/events/{{ event.id }}/candidates/{{ ec.id }}/reject"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        class="outline secondary"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Reject</button>
+                    {% endif %}
+                    {% if ec.status.value in ('accepted', 'auto_accepted', 'rejected') %}
+                    <button type="button"
+                        hx-post="/admin/events/{{ event.id }}/candidates/{{ ec.id }}/unlink"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        hx-confirm="Unlink this candidate? It will return to the pending queue."
+                        class="outline secondary"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Unlink</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% if event.event_candidates | length > 1 %}
+<button type="submit" class="outline"
+    hx-post="/admin/events/{{ event.id }}/split"
+    hx-include="#split-event-form"
+    hx-target="#entity-action-result"
+    hx-swap="innerHTML"
+    hx-confirm="Split selected candidates into a new event?"
+>Split Selected to New Event</button>
+{% endif %}
+</form>
+
+<script>
+document.getElementById('select-all-ec')?.addEventListener('change', function() {
+    document.querySelectorAll('#split-event-form input[name="candidate_ids"]').forEach(
+        cb => cb.checked = this.checked
+    );
+});
+</script>
+{% else %}
+<p>No source candidates linked to this event.</p>
+{% endif %}

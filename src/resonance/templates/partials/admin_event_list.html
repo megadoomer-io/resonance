@@ -1,0 +1,62 @@
+{% if events %}
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Date</th>
+                <th>Venue</th>
+                <th>Sources</th>
+                <th>Artists</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for e in events %}
+            <tr>
+                <td><a href="/admin/events/{{ e.id }}/manage">{{ e.title }}</a></td>
+                <td>{{ e.event_date }}</td>
+                <td>
+                    {% if e.venue %}
+                    <a href="/admin/venues/{{ e.venue.id }}">{{ e.venue.name }}</a>
+                    {% else %}
+                    <em>none</em>
+                    {% endif %}
+                </td>
+                <td>{{ e.event_candidates | length }}</td>
+                <td>{{ e.artists | length }}</td>
+                <td>
+                    {% set pending = e.event_candidates | selectattr('status', 'equalto', 'pending') | list %}
+                    {% set accepted = e.event_candidates | selectattr('status', 'equalto', 'accepted') | list %}
+                    {% set auto = e.event_candidates | selectattr('status', 'equalto', 'auto_accepted') | list %}
+                    {% if pending %}
+                    <mark>{{ pending | length }} pending</mark>
+                    {% elif accepted or auto %}
+                    <ins>confirmed</ins>
+                    {% else %}
+                    &mdash;
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+
+<nav>
+    {% if has_prev %}
+    <a href="{{ list_url }}?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
+       hx-get="{{ list_url }}?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
+       hx-target="#event-admin-list" hx-swap="innerHTML"
+       role="button" class="outline">&larr; Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a href="{{ list_url }}?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
+       hx-get="{{ list_url }}?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
+       hx-target="#event-admin-list" hx-swap="innerHTML"
+       role="button" class="outline">Next &rarr;</a>
+    {% endif %}
+</nav>
+{% else %}
+<p>No events found{% if q %} matching "{{ q }}"{% endif %}.</p>
+{% endif %}

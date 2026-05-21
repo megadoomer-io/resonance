@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Event Management — resonance{% endblock %}
+
+{% block content %}
+<h1>Event Management</h1>
+<p><a href="/admin">&larr; Back to Admin</a></p>
+
+<form hx-get="/admin/events" hx-target="#event-admin-list" hx-swap="innerHTML" hx-push-url="true">
+    <div class="grid">
+        <input type="search" name="q" value="{{ q }}" placeholder="Search events by title or venue...">
+        <select name="filter" onchange="this.form.requestSubmit()">
+            <option value="">All Events</option>
+            <option value="multi_candidates" {% if filter == 'multi_candidates' %}selected{% endif %}>Multiple Candidates</option>
+            <option value="unresolved" {% if filter == 'unresolved' %}selected{% endif %}>Unresolved Candidates</option>
+            <option value="has_exclusions" {% if filter == 'has_exclusions' %}selected{% endif %}>Has Exclusions</option>
+        </select>
+        <button type="submit">Search</button>
+    </div>
+</form>
+
+<div id="event-admin-list">
+    {% include "partials/admin_event_list.html" %}
+</div>
+{% endblock %}

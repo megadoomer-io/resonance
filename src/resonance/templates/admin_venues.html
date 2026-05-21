@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Venue Management — resonance{% endblock %}
+
+{% block content %}
+<h1>Venue Management</h1>
+<p><a href="/admin">&larr; Back to Admin</a></p>
+
+<form hx-get="/admin/venues" hx-target="#venue-list" hx-swap="innerHTML" hx-push-url="true">
+    <div class="grid">
+        <input type="search" name="q" value="{{ q }}" placeholder="Search venues by name or city...">
+        <select name="filter" onchange="this.form.requestSubmit()">
+            <option value="">All Venues</option>
+            <option value="multi_candidates" {% if filter == 'multi_candidates' %}selected{% endif %}>Multiple Candidates</option>
+            <option value="unresolved" {% if filter == 'unresolved' %}selected{% endif %}>Unresolved Candidates</option>
+            <option value="has_exclusions" {% if filter == 'has_exclusions' %}selected{% endif %}>Has Exclusions</option>
+        </select>
+        <button type="submit">Search</button>
+    </div>
+</form>
+
+<div id="venue-list">
+    {% include "partials/admin_venue_list.html" %}
+</div>
+{% endblock %}

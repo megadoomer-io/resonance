@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}{{ event.title }} — Event Management — resonance{% endblock %}
+
+{% block content %}
+<h1>{{ event.title }}</h1>
+<p><a href="/admin/events">&larr; Back to Events</a></p>
+
+<article>
+    <header>Event Details</header>
+    <dl>
+        <dt>Title</dt><dd>{{ event.title }}</dd>
+        <dt>Date</dt><dd>{{ event.event_date }}</dd>
+        <dt>Venue</dt>
+        <dd>
+            {% if event.venue %}
+            <a href="/admin/venues/{{ event.venue.id }}">{{ event.venue.name }}</a>
+            ({{ event.venue.city or '?' }})
+            {% else %}
+            <em>none</em>
+            {% endif %}
+        </dd>
+        <dt>Source</dt><dd>{{ event.source_service.value }}</dd>
+        {% if event.external_url %}
+        <dt>External Link</dt><dd><a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.external_url }}</a></dd>
+        {% endif %}
+        <dt>Artists</dt><dd>{{ event.artists | length }} confirmed, {{ event.artist_candidates | length }} candidate(s)</dd>
+        <dt>User View</dt><dd><a href="/events/{{ event.id }}">View event page</a></dd>
+    </dl>
+</article>
+
+<div id="entity-action-result"></div>
+
+<h2>Source Candidates ({{ event.event_candidates | length }})</h2>
+<div id="event-candidates"
+     hx-get="/admin/events/{{ event.id }}/manage"
+     hx-trigger="entity-updated from:body"
+     hx-select="#event-candidates-inner"
+     hx-target="#event-candidates"
+     hx-swap="innerHTML">
+    <div id="event-candidates-inner">
+        {% include "partials/admin_event_candidates.html" %}
+    </div>
+</div>
+
+{% if event.artists %}
+<h2>Confirmed Artists ({{ event.artists | length }})</h2>
+<figure>
+    <table>
+        <thead>
+            <tr><th>Position</th><th>Artist</th><th>Raw Name</th></tr>
+        </thead>
+        <tbody>
+            {% for ea in event.artists | sort(attribute='position') %}
+            <tr>
+                <td>{{ ea.position }}</td>
+                <td><a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a></td>
+                <td>{{ ea.raw_name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+
+{% if exclusions %}
+<h2>Exclusions ({{ exclusions | length }})</h2>
+<figure>
+    <table>
+        <thead>
+            <tr><th>Excluded From</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+            {% for ex in exclusions %}
+            {% set other_id = ex.entity_b_id if ex.entity_a_id | string == event.id | string else ex.entity_a_id %}
+            <tr>
+                <td>
+                    {% if other_events.get(other_id) %}
+                    <a href="/admin/events/{{ other_id }}/manage">{{ other_events[other_id].title }}</a>
+                    ({{ other_events[other_id].event_date }})
+                    {% else %}
+                    {{ other_id }} (deleted?)
+                    {% endif %}
+                </td>
+                <td>
+                    <button
+                        hx-post="/admin/events/exclusions/{{ ex.id }}/delete"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        hx-confirm="Remove this exclusion?"
+                        class="outline secondary"
+                        style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                    >Remove</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% endif %}
+{% endblock %}

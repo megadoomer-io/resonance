@@ -1,0 +1,90 @@
+{% if venue.candidates %}
+<form id="split-form" method="post" action="/admin/venues/{{ venue.id }}/split">
+<figure>
+    <table>
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="select-all-vc"></th>
+                <th>Source</th>
+                <th>Name (as imported)</th>
+                <th>City</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for vc in venue.candidates %}
+            <tr>
+                <td><input type="checkbox" name="candidate_ids" value="{{ vc.id }}"></td>
+                <td>{{ vc.source_service.value }}</td>
+                <td>{{ vc.name }}</td>
+                <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
+                <td>
+                    {% if vc.status.value == 'accepted' %}
+                    <ins>accepted</ins>
+                    {% elif vc.status.value == 'auto_accepted' %}
+                    <ins>auto</ins>
+                    {% elif vc.status.value == 'rejected' %}
+                    <del>rejected</del>
+                    {% else %}
+                    <mark>pending</mark>
+                    {% endif %}
+                </td>
+                <td>{{ vc.confidence_score }}%</td>
+                <td style="white-space: nowrap;">
+                    {% if vc.status.value in ('pending', 'rejected') %}
+                    <button type="button"
+                        hx-post="/admin/venues/{{ venue.id }}/candidates/{{ vc.id }}/accept"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        class="outline"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Accept</button>
+                    {% endif %}
+                    {% if vc.status.value in ('pending', 'accepted', 'auto_accepted') %}
+                    <button type="button"
+                        hx-post="/admin/venues/{{ venue.id }}/candidates/{{ vc.id }}/reject"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        class="outline secondary"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Reject</button>
+                    {% endif %}
+                    {% if vc.status.value in ('accepted', 'auto_accepted', 'rejected') %}
+                    <button type="button"
+                        hx-post="/admin/venues/{{ venue.id }}/candidates/{{ vc.id }}/unlink"
+                        hx-target="#entity-action-result"
+                        hx-swap="innerHTML"
+                        hx-confirm="Unlink this candidate? It will return to the pending queue."
+                        class="outline secondary"
+                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                    >Unlink</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</figure>
+{% if venue.candidates | length > 1 %}
+<button type="submit" class="outline"
+    hx-post="/admin/venues/{{ venue.id }}/split"
+    hx-include="#split-form"
+    hx-target="#entity-action-result"
+    hx-swap="innerHTML"
+    hx-confirm="Split selected candidates into a new venue?"
+>Split Selected to New Venue</button>
+{% endif %}
+</form>
+
+<script>
+document.getElementById('select-all-vc')?.addEventListener('change', function() {
+    document.querySelectorAll('#split-form input[name="candidate_ids"]').forEach(
+        cb => cb.checked = this.checked
+    );
+});
+</script>
+{% else %}
+<p>No source candidates linked to this venue.</p>
+{% endif %}

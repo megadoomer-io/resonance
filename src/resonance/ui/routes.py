@@ -3892,3 +3892,675 @@ async def admin_track_search(
             )
 
     return {"query": q, "results": tracks_list}
+
+
+# ---------------------------------------------------------------------------
+# Admin: Venue management
+# ---------------------------------------------------------------------------
+
+_VENUE_PAGE_SIZE = 50
+
+
+def _entity_action_response(
+    message: str,
+) -> fastapi.responses.HTMLResponse:
+    """Return an HTML response with trigger to refresh entity detail."""
+    resp = fastapi.responses.HTMLResponse(f"<p><small>{message}</small></p>")
+    resp.headers["HX-Trigger"] = "entity-updated"
+    return resp
+
+
+@router.get("/admin/venues", response_model=None)
+async def admin_venues(
+    request: fastapi.Request,
+    q: str = "",
+    page: int = 1,
+    filter: str = "",
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Admin venue list with search and filtering."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    offset = (page - 1) * _VENUE_PAGE_SIZE
+    user_tz = _user_tz(request)
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Venue)
+            .options(
+                sa_orm.selectinload(concert_models.Venue.candidates),
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+            .order_by(concert_models.Venue.name)
+            .offset(offset)
+            .limit(_VENUE_PAGE_SIZE + 1)
+        )
+
+        if q:
+            escaped = _escape_ilike(q)
+            pattern = f"%{escaped}%"
+            stmt = stmt.where(
+                sa.or_(
+                    concert_models.Venue.name.ilike(pattern),
+                    concert_models.Venue.city.ilike(pattern),
+                )
+            )
+
+        if filter == "multi_candidates":
+            sub = (
+                sa.select(concert_models.VenueCandidate.resolved_venue_id)
+                .group_by(concert_models.VenueCandidate.resolved_venue_id)
+                .having(sa.func.count() > 1)
+            )
+            stmt = stmt.where(concert_models.Venue.id.in_(sub))
+        elif filter == "unresolved":
+            sub = sa.select(concert_models.VenueCandidate.resolved_venue_id).where(
+                concert_models.VenueCandidate.status
+                == types_module.CandidateStatus.PENDING,
+                concert_models.VenueCandidate.resolved_venue_id.isnot(None),
+            )
+            stmt = stmt.where(concert_models.Venue.id.in_(sub))
+        elif filter == "has_exclusions":
+            excl_sub = sa.union(
+                sa.select(concert_models.EntityExclusion.entity_a_id).where(
+                    concert_models.EntityExclusion.entity_type == "venue"
+                ),
+                sa.select(concert_models.EntityExclusion.entity_b_id).where(
+                    concert_models.EntityExclusion.entity_type == "venue"
+                ),
+            )
+            stmt = stmt.where(concert_models.Venue.id.in_(excl_sub))
+
+        result = await db.execute(stmt)
+        venues = list(result.scalars().unique())
+
+    has_next = len(venues) > _VENUE_PAGE_SIZE
+    has_prev = page > 1
+    venues = venues[:_VENUE_PAGE_SIZE]
+
+    ctx: dict[str, object] = {
+        "request": request,
+        "venues": venues,
+        "q": q,
+        "filter": filter,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": has_prev,
+        "user_tz": user_tz,
+        "user_role": user_role,
+        "list_url": "/admin/venues",
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/admin_venue_list.html", ctx
+        )
+
+    return templates.TemplateResponse(request, "admin_venues.html", ctx)
+
+
+@router.get("/admin/venues/{venue_id}", response_model=None)
+async def admin_venue_detail(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Admin venue detail page with candidate history."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    user_tz = _user_tz(request)
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Venue)
+            .options(
+                sa_orm.selectinload(concert_models.Venue.candidates),
+                sa_orm.selectinload(concert_models.Venue.events),
+            )
+            .where(concert_models.Venue.id == venue_id)
+        )
+        venue = (await db.execute(stmt)).scalar_one_or_none()
+        if not venue:
+            raise fastapi.HTTPException(status_code=404, detail="Venue not found")
+
+        exclusions_stmt = sa.select(concert_models.EntityExclusion).where(
+            concert_models.EntityExclusion.entity_type == "venue",
+            sa.or_(
+                concert_models.EntityExclusion.entity_a_id == venue_id,
+                concert_models.EntityExclusion.entity_b_id == venue_id,
+            ),
+        )
+        exclusions = list((await db.execute(exclusions_stmt)).scalars())
+
+        other_venue_ids = []
+        for ex in exclusions:
+            other_id = ex.entity_b_id if ex.entity_a_id == venue_id else ex.entity_a_id
+            other_venue_ids.append(other_id)
+
+        other_venues: dict[uuid.UUID, concert_models.Venue] = {}
+        if other_venue_ids:
+            ov_stmt = sa.select(concert_models.Venue).where(
+                concert_models.Venue.id.in_(other_venue_ids)
+            )
+            for ov in (await db.execute(ov_stmt)).scalars():
+                other_venues[ov.id] = ov
+
+    ctx: dict[str, object] = {
+        "request": request,
+        "venue": venue,
+        "exclusions": exclusions,
+        "other_venues": other_venues,
+        "user_tz": user_tz,
+        "user_role": user_role,
+    }
+
+    return templates.TemplateResponse(request, "admin_venue_detail.html", ctx)
+
+
+@router.post(
+    "/admin/venues/{venue_id}/candidates/{candidate_id}/accept",
+    response_model=None,
+)
+async def admin_accept_venue_candidate(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Accept a venue candidate (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        vc = await db.get(concert_models.VenueCandidate, candidate_id)
+        if not vc or vc.resolved_venue_id != venue_id:
+            return _entity_action_response("Candidate not found.")
+        vc.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+
+    return _entity_action_response("Candidate accepted.")
+
+
+@router.post(
+    "/admin/venues/{venue_id}/candidates/{candidate_id}/reject",
+    response_model=None,
+)
+async def admin_reject_venue_candidate(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Reject a venue candidate (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        vc = await db.get(concert_models.VenueCandidate, candidate_id)
+        if not vc or vc.resolved_venue_id != venue_id:
+            return _entity_action_response("Candidate not found.")
+        vc.status = types_module.CandidateStatus.REJECTED
+        await db.commit()
+
+    return _entity_action_response("Candidate rejected.")
+
+
+@router.post(
+    "/admin/venues/{venue_id}/candidates/{candidate_id}/unlink",
+    response_model=None,
+)
+async def admin_unlink_venue_candidate_detail(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Unlink a venue candidate back to pending (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        vc = await db.get(concert_models.VenueCandidate, candidate_id)
+        if not vc or vc.resolved_venue_id != venue_id:
+            return _entity_action_response("Candidate not found.")
+        vc.resolved_venue_id = None
+        vc.status = types_module.CandidateStatus.PENDING
+        vc.confidence_score = 0
+        await db.commit()
+
+    return _entity_action_response("Candidate unlinked.")
+
+
+@router.post("/admin/venues/{venue_id}/split", response_model=None)
+async def admin_split_venue(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Split selected candidates into a new venue (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    form = await request.form()
+    raw_ids = form.getlist("candidate_ids")
+    candidate_ids = [uuid.UUID(str(cid)) for cid in raw_ids]
+
+    if not candidate_ids:
+        return _entity_action_response("Select at least one candidate.")
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Venue)
+            .options(sa_orm.selectinload(concert_models.Venue.candidates))
+            .where(concert_models.Venue.id == venue_id)
+        )
+        venue = (await db.execute(stmt)).scalar_one_or_none()
+        if not venue:
+            return _entity_action_response("Venue not found.")
+
+        to_move = [vc for vc in venue.candidates if vc.id in candidate_ids]
+        if not to_move:
+            return _entity_action_response("No matching candidates.")
+        if len(to_move) == len(venue.candidates):
+            return _entity_action_response("Cannot split all candidates.")
+
+        first = to_move[0]
+        new_venue = concert_models.Venue(
+            name=first.name,
+            city=first.city,
+            state=first.state,
+            country=first.country,
+            address=first.address,
+            postal_code=first.postal_code,
+        )
+        db.add(new_venue)
+        await db.flush()
+
+        for vc in to_move:
+            vc.resolved_venue_id = new_venue.id
+            vc.status = types_module.CandidateStatus.ACCEPTED
+
+        exclusion = concert_models.EntityExclusion(
+            entity_type="venue",
+            entity_a_id=venue_id,
+            entity_b_id=new_venue.id,
+        )
+        db.add(exclusion)
+        await db.commit()
+
+    return _entity_action_response(f"Split {len(to_move)} candidate(s) to new venue.")
+
+
+@router.post(
+    "/admin/venues/exclusions/{exclusion_id}/delete",
+    response_model=None,
+)
+async def admin_delete_venue_exclusion(
+    request: fastapi.Request,
+    exclusion_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Remove a venue exclusion (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        exclusion = await db.get(concert_models.EntityExclusion, exclusion_id)
+        if not exclusion:
+            return _entity_action_response("Exclusion not found.")
+        await db.delete(exclusion)
+        await db.commit()
+
+    return _entity_action_response("Exclusion removed.")
+
+
+# ---------------------------------------------------------------------------
+# Admin: Event management
+# ---------------------------------------------------------------------------
+
+_EVENT_ADMIN_PAGE_SIZE = 50
+
+
+@router.get("/admin/events", response_model=None)
+async def admin_events(
+    request: fastapi.Request,
+    q: str = "",
+    page: int = 1,
+    filter: str = "",
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Admin event list with search and filtering."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    offset = (page - 1) * _EVENT_ADMIN_PAGE_SIZE
+    user_tz = _user_tz(request)
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Event)
+            .options(
+                sa_orm.selectinload(concert_models.Event.venue),
+                sa_orm.selectinload(concert_models.Event.event_candidates),
+                sa_orm.selectinload(concert_models.Event.artists),
+            )
+            .order_by(concert_models.Event.event_date.desc())
+            .offset(offset)
+            .limit(_EVENT_ADMIN_PAGE_SIZE + 1)
+        )
+
+        if q:
+            escaped = _escape_ilike(q)
+            pattern = f"%{escaped}%"
+            stmt = stmt.where(
+                sa.or_(
+                    concert_models.Event.title.ilike(pattern),
+                    concert_models.Event.venue.has(
+                        concert_models.Venue.name.ilike(pattern)
+                    ),
+                )
+            )
+
+        if filter == "multi_candidates":
+            sub = (
+                sa.select(concert_models.EventCandidate.resolved_event_id)
+                .group_by(concert_models.EventCandidate.resolved_event_id)
+                .having(sa.func.count() > 1)
+            )
+            stmt = stmt.where(concert_models.Event.id.in_(sub))
+        elif filter == "unresolved":
+            sub = sa.select(concert_models.EventCandidate.resolved_event_id).where(
+                concert_models.EventCandidate.status
+                == types_module.CandidateStatus.PENDING,
+                concert_models.EventCandidate.resolved_event_id.isnot(None),
+            )
+            stmt = stmt.where(concert_models.Event.id.in_(sub))
+        elif filter == "has_exclusions":
+            excl_sub = sa.union(
+                sa.select(concert_models.EntityExclusion.entity_a_id).where(
+                    concert_models.EntityExclusion.entity_type == "event"
+                ),
+                sa.select(concert_models.EntityExclusion.entity_b_id).where(
+                    concert_models.EntityExclusion.entity_type == "event"
+                ),
+            )
+            stmt = stmt.where(concert_models.Event.id.in_(excl_sub))
+
+        result = await db.execute(stmt)
+        events = list(result.scalars().unique())
+
+    has_next = len(events) > _EVENT_ADMIN_PAGE_SIZE
+    has_prev = page > 1
+    events = events[:_EVENT_ADMIN_PAGE_SIZE]
+
+    ctx: dict[str, object] = {
+        "request": request,
+        "events": events,
+        "q": q,
+        "filter": filter,
+        "page": page,
+        "has_next": has_next,
+        "has_prev": has_prev,
+        "user_tz": user_tz,
+        "user_role": user_role,
+        "list_url": "/admin/events",
+    }
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(
+            request, "partials/admin_event_list.html", ctx
+        )
+
+    return templates.TemplateResponse(request, "admin_events.html", ctx)
+
+
+@router.get("/admin/events/{event_id}/manage", response_model=None)
+async def admin_event_detail(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Admin event detail page with candidate history."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    user_role = _user_role(request)
+    if user_role not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    user_tz = _user_tz(request)
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Event)
+            .options(
+                sa_orm.selectinload(concert_models.Event.venue),
+                sa_orm.selectinload(concert_models.Event.event_candidates),
+                sa_orm.selectinload(concert_models.Event.artists),
+                sa_orm.selectinload(concert_models.Event.artist_candidates),
+            )
+            .where(concert_models.Event.id == event_id)
+        )
+        event = (await db.execute(stmt)).scalar_one_or_none()
+        if not event:
+            raise fastapi.HTTPException(status_code=404, detail="Event not found")
+
+        exclusions_stmt = sa.select(concert_models.EntityExclusion).where(
+            concert_models.EntityExclusion.entity_type == "event",
+            sa.or_(
+                concert_models.EntityExclusion.entity_a_id == event_id,
+                concert_models.EntityExclusion.entity_b_id == event_id,
+            ),
+        )
+        exclusions = list((await db.execute(exclusions_stmt)).scalars())
+
+        other_event_ids = []
+        for ex in exclusions:
+            other_id = ex.entity_b_id if ex.entity_a_id == event_id else ex.entity_a_id
+            other_event_ids.append(other_id)
+
+        other_events: dict[uuid.UUID, concert_models.Event] = {}
+        if other_event_ids:
+            oe_stmt = sa.select(concert_models.Event).where(
+                concert_models.Event.id.in_(other_event_ids)
+            )
+            for oe in (await db.execute(oe_stmt)).scalars():
+                other_events[oe.id] = oe
+
+    ctx: dict[str, object] = {
+        "request": request,
+        "event": event,
+        "exclusions": exclusions,
+        "other_events": other_events,
+        "user_tz": user_tz,
+        "user_role": user_role,
+    }
+
+    return templates.TemplateResponse(request, "admin_event_detail.html", ctx)
+
+
+@router.post(
+    "/admin/events/{event_id}/candidates/{candidate_id}/accept",
+    response_model=None,
+)
+async def admin_accept_event_candidate(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Accept an event candidate (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        ec = await db.get(concert_models.EventCandidate, candidate_id)
+        if not ec or ec.resolved_event_id != event_id:
+            return _entity_action_response("Candidate not found.")
+        ec.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+
+    return _entity_action_response("Candidate accepted.")
+
+
+@router.post(
+    "/admin/events/{event_id}/candidates/{candidate_id}/reject",
+    response_model=None,
+)
+async def admin_reject_event_candidate(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Reject an event candidate (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        ec = await db.get(concert_models.EventCandidate, candidate_id)
+        if not ec or ec.resolved_event_id != event_id:
+            return _entity_action_response("Candidate not found.")
+        ec.status = types_module.CandidateStatus.REJECTED
+        await db.commit()
+
+    return _entity_action_response("Candidate rejected.")
+
+
+@router.post(
+    "/admin/events/{event_id}/candidates/{candidate_id}/unlink",
+    response_model=None,
+)
+async def admin_unlink_event_candidate_detail(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Unlink an event candidate back to pending (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        ec = await db.get(concert_models.EventCandidate, candidate_id)
+        if not ec or ec.resolved_event_id != event_id:
+            return _entity_action_response("Candidate not found.")
+        ec.resolved_event_id = None
+        ec.status = types_module.CandidateStatus.PENDING
+        ec.confidence_score = 0
+        await db.commit()
+
+    return _entity_action_response("Candidate unlinked.")
+
+
+@router.post("/admin/events/{event_id}/split", response_model=None)
+async def admin_split_event(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Split selected candidates into a new event (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    form = await request.form()
+    raw_ids = form.getlist("candidate_ids")
+    candidate_ids = [uuid.UUID(str(cid)) for cid in raw_ids]
+
+    if not candidate_ids:
+        return _entity_action_response("Select at least one candidate.")
+
+    async with _get_db(request) as db:
+        stmt = (
+            sa.select(concert_models.Event)
+            .options(sa_orm.selectinload(concert_models.Event.event_candidates))
+            .where(concert_models.Event.id == event_id)
+        )
+        event = (await db.execute(stmt)).scalar_one_or_none()
+        if not event:
+            return _entity_action_response("Event not found.")
+
+        to_move = [ec for ec in event.event_candidates if ec.id in candidate_ids]
+        if not to_move:
+            return _entity_action_response("No matching candidates.")
+        if len(to_move) == len(event.event_candidates):
+            return _entity_action_response("Cannot split all candidates.")
+
+        first = to_move[0]
+        new_event = concert_models.Event(
+            title=first.title,
+            event_date=first.event_date,
+            source_service=first.source_service,
+            external_id=f"split-{uuid.uuid4().hex[:8]}",
+            external_url=first.external_url,
+            venue_id=event.venue_id,
+        )
+        db.add(new_event)
+        await db.flush()
+
+        for ec in to_move:
+            ec.resolved_event_id = new_event.id
+            ec.status = types_module.CandidateStatus.ACCEPTED
+
+        exclusion = concert_models.EntityExclusion(
+            entity_type="event",
+            entity_a_id=event_id,
+            entity_b_id=new_event.id,
+        )
+        db.add(exclusion)
+        await db.commit()
+
+    return _entity_action_response(f"Split {len(to_move)} candidate(s) to new event.")
+
+
+@router.post(
+    "/admin/events/exclusions/{exclusion_id}/delete",
+    response_model=None,
+)
+async def admin_delete_event_exclusion(
+    request: fastapi.Request,
+    exclusion_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Remove an event exclusion (UI action)."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        exclusion = await db.get(concert_models.EntityExclusion, exclusion_id)
+        if not exclusion:
+            return _entity_action_response("Exclusion not found.")
+        await db.delete(exclusion)
+        await db.commit()
+
+    return _entity_action_response("Exclusion removed.")
