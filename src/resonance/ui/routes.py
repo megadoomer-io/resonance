@@ -3394,10 +3394,16 @@ async def admin_resolution(
                     )
                 )
                 for venue in venues_result.scalars().all():
-                    if len(venue.candidates) > 1:
-                        if search_norm and search_norm not in venue.name.lower():
-                            continue
-                        multi_cand_venues.append((venue, list(venue.candidates)))
+                    if len(venue.candidates) < 2:
+                        continue
+                    if all(
+                        c.status == types_module.CandidateStatus.ACCEPTED
+                        for c in venue.candidates
+                    ):
+                        continue
+                    if search_norm and search_norm not in venue.name.lower():
+                        continue
+                    multi_cand_venues.append((venue, list(venue.candidates)))
 
             if entity in ("all", "events"):
                 events_result = await db.execute(
@@ -3406,10 +3412,16 @@ async def admin_resolution(
                     )
                 )
                 for event in events_result.scalars().all():
-                    if len(event.event_candidates) > 1:
-                        if search_norm and search_norm not in event.title.lower():
-                            continue
-                        multi_cand_events.append((event, list(event.event_candidates)))
+                    if len(event.event_candidates) < 2:
+                        continue
+                    if all(
+                        c.status == types_module.CandidateStatus.ACCEPTED
+                        for c in event.event_candidates
+                    ):
+                        continue
+                    if search_norm and search_norm not in event.title.lower():
+                        continue
+                    multi_cand_events.append((event, list(event.event_candidates)))
 
         elif view == "merge_suggestions":
             all_venues_result = await db.execute(
