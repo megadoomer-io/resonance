@@ -1,3 +1,5 @@
+@./AGENTS.md
+
 # Resonance
 
 Personal media discovery platform — aggregates music data from external services and generates curated playlists.
