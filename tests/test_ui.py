@@ -143,7 +143,7 @@ class TestAdminPage:
             "/admin/users/00000000-0000-0000-0000-000000000000/role",
             follow_redirects=False,
         )
-        assert response.status_code == 403
+        assert response.status_code == 307
 
 
 class TestSongkickConnectPartials:
@@ -205,17 +205,17 @@ class TestTaskCloning:
     """Tests for task cloning and resume endpoints."""
 
     async def test_clone_requires_auth(self, client: httpx.AsyncClient) -> None:
-        """Unauthenticated clone requests should be rejected with 403."""
+        """Unauthenticated clone requests should redirect to login."""
         response = await client.post(
             "/admin/tasks/00000000-0000-0000-0000-000000000000/clone",
             follow_redirects=False,
         )
-        assert response.status_code == 403
+        assert response.status_code == 307
 
     async def test_resume_requires_auth(self, client: httpx.AsyncClient) -> None:
-        """Unauthenticated resume requests should be rejected with 403."""
+        """Unauthenticated resume requests should redirect to login."""
         response = await client.post(
             "/admin/tasks/00000000-0000-0000-0000-000000000000/resume",
             follow_redirects=False,
         )
-        assert response.status_code == 403
+        assert response.status_code == 307
