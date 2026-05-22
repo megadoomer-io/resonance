@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import filter_bar %}
 
 {% block title %}Entity Resolution — resonance{% endblock %}
 
@@ -6,7 +7,7 @@
 <h1>Entity Resolution</h1>
 <p><a href="/admin">&larr; Back to Admin</a></p>
 
-{% include "partials/filter_bar.html" %}
+{{ filter_bar(list_url, list_target, presets, filters, active_filters, active_preset) }}
 
 <div id="resolution-list">
     {% include "partials/resolution_list.html" %}

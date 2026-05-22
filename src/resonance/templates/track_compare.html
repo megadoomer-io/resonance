@@ -1,12 +1,12 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section, action_button %}
 {% block title %}Compare Tracks — resonance{% endblock %}
 {% block content %}
 <p><a href="/tracks/{{ track_a.id }}">&larr; Back to {{ track_a.title }}</a></p>
 <h2>Compare Tracks</h2>
 
 <div class="grid">
-    <article{% if canonical.id == track_a.id %} style="border-color: var(--pico-primary);"{% endif %}>
-        <header>{% if canonical.id == track_a.id %}Keep{% else %}Merge into other{% endif %}</header>
+    {% call() detail_section("Keep" if canonical.id == track_a.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == track_a.id else none) %}
         <h3>{{ track_a.title }}</h3>
         <p>by <a href="/artists/{{ track_a.artist_id }}">{{ track_a.artist.name }}</a></p>
         <table>
@@ -35,10 +35,9 @@
                 <tr><th>Created</th><td>{{ track_a.created_at | localtime(user_tz) }}</td></tr>
             </tbody>
         </table>
-    </article>
+    {% endcall %}
 
-    <article{% if canonical.id == track_b.id %} style="border-color: var(--pico-primary);"{% endif %}>
-        <header>{% if canonical.id == track_b.id %}Keep{% else %}Merge into other{% endif %}</header>
+    {% call() detail_section("Keep" if canonical.id == track_b.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == track_b.id else none) %}
         <h3>{{ track_b.title }}</h3>
         <p>by <a href="/artists/{{ track_b.artist_id }}">{{ track_b.artist.name }}</a></p>
         <table>
@@ -67,17 +66,14 @@
                 <tr><th>Created</th><td>{{ track_b.created_at | localtime(user_tz) }}</td></tr>
             </tbody>
         </table>
-    </article>
+    {% endcall %}
 </div>
 
 <p><a href="/tracks/{{ track_b.id }}/compare/{{ track_a.id }}">Swap canonical selection</a></p>
 
 <h3>Merge</h3>
 <div id="merge-preview">
-    <button
-        hx-post="/tracks/{{ canonical.id }}/merge-preview/{{ duplicate.id }}"
-        hx-target="#merge-preview"
-        hx-swap="innerHTML">Preview Merge</button>
+    {{ action_button("Preview Merge", "/tracks/" ~ canonical.id ~ "/merge-preview/" ~ duplicate.id, hx_target="#merge-preview", style="") }}
     <a href="/tracks/{{ track_a.id }}" role="button" class="secondary outline">Cancel</a>
 </div>
 {% endblock %}

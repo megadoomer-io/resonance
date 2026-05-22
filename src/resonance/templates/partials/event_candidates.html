@@ -1,81 +1,62 @@
+{% from "components/macros.html" import entity_list, action_button, empty_state %}
 {% set pending = event.artist_candidates | selectattr("status.value", "equalto", "pending") | list %}
 {% set resolved = event.artist_candidates | selectattr("status.value", "ne", "pending") | list %}
 
 {% if pending %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Raw Name</th>
-                <th>Matched Artist</th>
-                <th>Confidence</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for candidate in pending %}
-            <tr id="candidate-{{ candidate.id }}">
-                <td>{{ candidate.raw_name }}</td>
-                <td>
-                    {% if candidate.matched_artist_id and candidate.matched_artist_id in matched_artists %}
-                    <a href="/artists/{{ candidate.matched_artist_id }}">{{ matched_artists[candidate.matched_artist_id].name }}</a>
-                    {% else %}
-                    <small style="opacity: 0.6;">No match</small>
-                    {% endif %}
-                </td>
-                <td>{{ candidate.confidence_score }}%</td>
-                <td>
-                    {% if candidate.matched_artist_id %}
-                    <button hx-post="/events/{{ event.id }}/candidates/{{ candidate.id }}/accept"
-                            hx-target="#candidate-{{ candidate.id }}"
-                            hx-swap="outerHTML"
-                            class="outline"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;">Accept</button>
-                    {% else %}
-                    <button hx-get="/partials/artist-search-modal?q={{ candidate.raw_name | urlencode }}&event_id={{ event.id }}&candidate_id={{ candidate.id }}"
-                            hx-target="#modal-container"
-                            hx-swap="innerHTML"
-                            class="outline"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;"
-                            title="Search external services for this artist">&#x2B07; Import</button>
-                    {% endif %}
-                    <button hx-post="/events/{{ event.id }}/candidates/{{ candidate.id }}/reject"
-                            hx-target="#candidate-{{ candidate.id }}"
-                            hx-swap="outerHTML"
-                            class="secondary outline"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em;">Reject</button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
+{% call(candidate) entity_list(
+    items=pending,
+    list_id="pending-candidates",
+    htmx_source="/events/" ~ event.id ~ "/candidates",
+    headers=[
+        {"label": "Raw Name"},
+        {"label": "Matched Artist"},
+        {"label": "Confidence"},
+        {"label": "Actions"},
+    ],
+    empty_message="No pending candidates."
+) %}
+<tr id="candidate-{{ candidate.id }}">
+    <td>{{ candidate.raw_name }}</td>
+    <td>
+        {% if candidate.matched_artist_id and candidate.matched_artist_id in matched_artists %}
+        <a href="/artists/{{ candidate.matched_artist_id }}">{{ matched_artists[candidate.matched_artist_id].name }}</a>
+        {% else %}
+        <small style="opacity: 0.6;">No match</small>
+        {% endif %}
+    </td>
+    <td>{{ candidate.confidence_score }}%</td>
+    <td>
+        {% if candidate.matched_artist_id %}
+        {{ action_button("Accept", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/accept", hx_target="#candidate-" ~ candidate.id, hx_swap="outerHTML", style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;") }}
+        {% else %}
+        {{ action_button("&#x2B07; Import", "/partials/artist-search-modal?q=" ~ (candidate.raw_name | urlencode) ~ "&event_id=" ~ event.id ~ "&candidate_id=" ~ candidate.id, hx_method="get", hx_target="#modal-container", style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;") }}
+        {% endif %}
+        {{ action_button("Reject", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/reject", hx_target="#candidate-" ~ candidate.id, hx_swap="outerHTML", css_class="secondary outline", style="padding: 0.25em 0.5em; font-size: 0.85em;") }}
+    </td>
+</tr>
+{% endcall %}
 {% else %}
-<p>No pending candidates.</p>
+{{ empty_state("No pending candidates.") }}
 {% endif %}
 
 {% if resolved %}
 <details>
     <summary>Resolved Candidates ({{ resolved | length }})</summary>
-    <figure>
-        <table>
-            <thead>
-                <tr>
-                    <th>Raw Name</th>
-                    <th>Status</th>
-                    <th>Confidence</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for candidate in resolved %}
-                <tr>
-                    <td>{{ candidate.raw_name }}</td>
-                    <td>{{ candidate.status.value }}</td>
-                    <td>{{ candidate.confidence_score }}%</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </figure>
+    {% call(candidate) entity_list(
+        items=resolved,
+        list_id="resolved-candidates",
+        htmx_source="/events/" ~ event.id ~ "/candidates",
+        headers=[
+            {"label": "Raw Name"},
+            {"label": "Status"},
+            {"label": "Confidence"},
+        ]
+    ) %}
+    <tr>
+        <td>{{ candidate.raw_name }}</td>
+        <td>{{ candidate.status.value }}</td>
+        <td>{{ candidate.confidence_score }}%</td>
+    </tr>
+    {% endcall %}
 </details>
 {% endif %}

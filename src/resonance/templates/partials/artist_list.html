@@ -1,40 +1,23 @@
-{% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
-{% if artists %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                {{ service_badge_headers() }}
-            </tr>
-        </thead>
-        <tbody>
-            {% for artist in artists %}
-            <tr>
-                <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
-                {{ service_badge_cells(artist.service_links, entity_type="artist", entity_name=artist.name) }}
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-<nav>
-    {% if has_prev %}
-    <a href="/artists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/artists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#artist-list"
-       hx-swap="innerHTML"
-       role="button"
-       class="secondary">Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="/artists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/artists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#artist-list"
-       hx-swap="innerHTML"
-       role="button">Next</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No artists synced yet.</p>
-{% endif %}
+{% from "components/macros.html" import entity_list %}
+{% from "partials/service_badges.html" import service_badge_cells %}
+{% call(artist) entity_list(
+    items=artists,
+    list_id="artist-list",
+    htmx_source="/artists",
+    headers=[
+        {"label": "Name"},
+        {"label": "SP", "width": "3em", "style": "text-align: center;"},
+        {"label": "LF", "width": "3em", "style": "text-align: center;"},
+        {"label": "LB", "width": "3em", "style": "text-align: center;"},
+    ],
+    empty_message="No artists synced yet.",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=filter_qs
+) %}
+<tr>
+    <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
+    {{ service_badge_cells(artist.service_links, entity_type="artist", entity_name=artist.name) }}
+</tr>
+{% endcall %}

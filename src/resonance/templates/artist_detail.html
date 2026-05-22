@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section %}
 {% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
 {% block title %}{{ artist.name }} — resonance{% endblock %}
 {% block content %}
@@ -8,7 +9,7 @@
 <p><small>Origin: {{ artist.origin }}</small></p>
 {% endif %}
 
-<article>
+{% call() detail_section("Artist Details") %}
     <table>
         <tbody>
             <tr>
@@ -37,7 +38,7 @@
             </tr>
         </tbody>
     </table>
-</article>
+{% endcall %}
 
 {% if candidates %}
 <h3>Pending Matches</h3>

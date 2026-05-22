@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section %}
 {% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
 {% block title %}{{ track.title }} — resonance{% endblock %}
 {% block content %}
@@ -6,7 +7,7 @@
 <h2>{{ track.title }}</h2>
 <p>by <a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></p>
 
-<article>
+{% call() detail_section("Track Details") %}
     <table>
         <tbody>
             <tr>
@@ -37,7 +38,7 @@
             </tr>
         </tbody>
     </table>
-</article>
+{% endcall %}
 
 <h3>Listening History</h3>
 <div id="track-history">

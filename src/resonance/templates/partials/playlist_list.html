@@ -1,82 +1,58 @@
+{% from "components/macros.html" import entity_list, confirm_action %}
 <p><a href="/playlists/new" role="button">New Playlist</a></p>
-{% if playlists %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Tracks</th>
-                <th>Source</th>
-                <th>Created</th>
-                <th>Spotify</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for playlist in playlists %}
-            <tr>
-                <td><a href="/playlists/{{ playlist.id }}">{{ playlist.name }}</a></td>
-                <td>{{ playlist.track_count }}</td>
-                <td>
-                    {% if playlist._generator_type %}
-                    <small>{{ playlist._generator_type }}</small>
-                    {% endif %}
-                </td>
-                <td>{{ playlist.created_at | localtime(user_tz) }}</td>
-                <td>
-                    {% set sp_links = (playlist.service_links or {}).get('spotify', {}) %}
-                    {% if sp_links %}
-                        {% set any_stale = [] %}
-                        {% for cid, info in sp_links.items() %}
-                            {% if playlist.updated_at and playlist.updated_at.isoformat() > info.get('exported_at', '') %}
-                                {% if any_stale.append(1) %}{% endif %}
-                            {% endif %}
-                        {% endfor %}
-                        {% if any_stale %}
-                        <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
-                            <button type="submit" class="outline" style="padding: 0.15rem 0.4rem; font-size: 0.75rem; color: var(--pico-color-amber-500, orange); border-color: var(--pico-color-amber-500, orange);">Update</button>
-                        </form>
-                        {% else %}
-                        <small style="color: var(--pico-color-green-500, green);">Synced</small>
-                        {% endif %}
-                    {% else %}
-                    <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
-                        <button type="submit" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;">Export</button>
-                    </form>
-                    {% endif %}
-                </td>
-                <td>
-                    <button
-                        hx-delete="/api/v1/playlists/{{ playlist.id }}"
-                        hx-confirm="Delete '{{ playlist.name }}'?"
-                        hx-target="closest tr"
-                        hx-swap="outerHTML"
-                        class="outline secondary"
-                        style="padding: 0.15rem 0.4rem; font-size: 0.75rem;"
-                    >Delete</button>
-                </td>
-            </tr>
+{% call(playlist) entity_list(
+    items=playlists,
+    list_id="playlist-list",
+    htmx_source="/playlists",
+    headers=[
+        {"label": "Name"},
+        {"label": "Tracks"},
+        {"label": "Source"},
+        {"label": "Created"},
+        {"label": "Spotify"},
+        {"label": ""},
+    ],
+    empty_message="No playlists yet.",
+    empty_action_url="/playlists/new",
+    empty_action_label="Create your first playlist",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=filter_qs
+) %}
+<tr>
+    <td><a href="/playlists/{{ playlist.id }}">{{ playlist.name }}</a></td>
+    <td>{{ playlist.track_count }}</td>
+    <td>
+        {% if playlist._generator_type %}
+        <small>{{ playlist._generator_type }}</small>
+        {% endif %}
+    </td>
+    <td>{{ playlist.created_at | localtime(user_tz) }}</td>
+    <td>
+        {% set sp_links = (playlist.service_links or {}).get('spotify', {}) %}
+        {% if sp_links %}
+            {% set any_stale = [] %}
+            {% for cid, info in sp_links.items() %}
+                {% if playlist.updated_at and playlist.updated_at.isoformat() > info.get('exported_at', '') %}
+                    {% if any_stale.append(1) %}{% endif %}
+                {% endif %}
             {% endfor %}
-        </tbody>
-    </table>
-</figure>
-<nav>
-    {% if has_prev %}
-    <a href="/playlists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/playlists?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#playlist-list"
-       hx-swap="innerHTML"
-       role="button"
-       class="secondary">Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="/playlists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/playlists?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#playlist-list"
-       hx-swap="innerHTML"
-       role="button">Next</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No playlists yet. <a href="/playlists/new">Create your first playlist</a>.</p>
-{% endif %}
+            {% if any_stale %}
+            <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+                <button type="submit" class="outline" style="padding: 0.15rem 0.4rem; font-size: 0.75rem; color: var(--pico-color-amber-500, orange); border-color: var(--pico-color-amber-500, orange);">Update</button>
+            </form>
+            {% else %}
+            <small style="color: var(--pico-color-green-500, green);">Synced</small>
+            {% endif %}
+        {% else %}
+        <form method="post" action="/playlists/{{ playlist.id }}/export" style="display:inline; margin:0;">
+            <button type="submit" style="padding: 0.15rem 0.4rem; font-size: 0.75rem;">Export</button>
+        </form>
+        {% endif %}
+    </td>
+    <td>
+        {{ confirm_action("Delete", "/api/v1/playlists/" ~ playlist.id, method="delete", confirm_message="Delete '" ~ playlist.name ~ "'?", target="closest tr", swap="outerHTML", style="padding: 0.15rem 0.4rem; font-size: 0.75rem;") }}
+    </td>
+</tr>
+{% endcall %}
