@@ -1,43 +1,24 @@
-{% if events %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Track</th>
-                <th>Artist</th>
-                <th>Played</th>
-                <th>Source</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for event in events %}
-            <tr>
-                <td>{{ event.track.title }}</td>
-                <td>{{ event.track.artist.name }}</td>
-                <td>{{ (event.listened_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>{{ event.source_service.value }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-<nav>
-    {% if has_prev %}
-    <a href="/history?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/history?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#history-list"
-       hx-swap="innerHTML"
-       role="button"
-       class="secondary">Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="/history?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/history?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#history-list"
-       hx-swap="innerHTML"
-       role="button">Next</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No listening history yet.</p>
-{% endif %}
+{% from "components/macros.html" import entity_list %}
+{% call(event) entity_list(
+    items=events,
+    list_id="history-list",
+    htmx_source="/history",
+    headers=[
+        {"label": "Track"},
+        {"label": "Artist"},
+        {"label": "Played"},
+        {"label": "Source"},
+    ],
+    empty_message="No listening history yet.",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=filter_qs
+) %}
+<tr>
+    <td>{{ event.track.title }}</td>
+    <td>{{ event.track.artist.name }}</td>
+    <td>{{ (event.listened_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
+    <td>{{ event.source_service.value }}</td>
+</tr>
+{% endcall %}

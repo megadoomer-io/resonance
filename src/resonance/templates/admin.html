@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section, confirm_action %}
 
 {% block title %}Admin — resonance{% endblock %}
 
@@ -6,10 +7,9 @@
 <h1>Admin</h1>
 
 <div class="grid">
-    <article>
-        <header>Users</header>
+    {% call() detail_section("Users") %}
         <p><strong>{{ user_count }}</strong></p>
-    </article>
+    {% endcall %}
 </div>
 
 <h2>Users</h2>
@@ -103,26 +103,8 @@
 <h2>Maintenance</h2>
 <div id="dedup-result"></div>
 <p>
-<button
-    hx-post="/admin/dedup-events"
-    hx-target="#dedup-result"
-    hx-swap="innerHTML"
-    hx-confirm="Remove duplicate cross-service listening events?"
-    class="outline"
->Dedup Listening Events</button>
-<button
-    hx-post="/admin/dedup-artists"
-    hx-target="#dedup-result"
-    hx-swap="innerHTML"
-    hx-confirm="Merge duplicate artist records? This cannot be undone."
-    class="outline"
->Dedup Artists</button>
-<button
-    hx-post="/admin/dedup-tracks"
-    hx-target="#dedup-result"
-    hx-swap="innerHTML"
-    hx-confirm="Merge duplicate track records? This cannot be undone."
-    class="outline"
->Dedup Tracks</button>
+{{ confirm_action("Dedup Listening Events", "/admin/dedup-events", confirm_message="Remove duplicate cross-service listening events?", target="#dedup-result", css_class="outline", style="") }}
+{{ confirm_action("Dedup Artists", "/admin/dedup-artists", confirm_message="Merge duplicate artist records? This cannot be undone.", target="#dedup-result", css_class="outline", style="") }}
+{{ confirm_action("Dedup Tracks", "/admin/dedup-tracks", confirm_message="Merge duplicate track records? This cannot be undone.", target="#dedup-result", css_class="outline", style="") }}
 </p>
 {% endblock %}

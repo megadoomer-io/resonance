@@ -1,54 +1,40 @@
-{% if venues %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Location</th>
-                <th>Sources</th>
-                <th>Events</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for v in venues %}
-            <tr>
-                <td><a href="/admin/venues/{{ v.id }}">{{ v.name }}</a></td>
-                <td>{{ v.city or '' }}{% if v.state %}, {{ v.state }}{% endif %}{% if v.country %} ({{ v.country }}){% endif %}</td>
-                <td>{{ v.candidates | length }}</td>
-                <td>{{ v.events | length }}</td>
-                <td>
-                    {% set pending = v.candidates | selectattr('status', 'equalto', 'pending') | list %}
-                    {% set accepted = v.candidates | selectattr('status', 'equalto', 'accepted') | list %}
-                    {% set auto = v.candidates | selectattr('status', 'equalto', 'auto_accepted') | list %}
-                    {% if pending %}
-                    <mark>{{ pending | length }} pending</mark>
-                    {% elif accepted or auto %}
-                    <ins>confirmed</ins>
-                    {% else %}
-                    &mdash;
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-
-<nav>
-    {% if has_prev %}
-    <a href="{{ list_url }}?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
-       hx-get="{{ list_url }}?page={{ page - 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
-       hx-target="#venue-list" hx-swap="innerHTML"
-       role="button" class="outline">&larr; Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="{{ list_url }}?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
-       hx-get="{{ list_url }}?page={{ page + 1 }}{% if q %}&q={{ q }}{% endif %}{% if filter %}&filter={{ filter }}{% endif %}"
-       hx-target="#venue-list" hx-swap="innerHTML"
-       role="button" class="outline">Next &rarr;</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No venues found{% if q %} matching "{{ q }}"{% endif %}.</p>
-{% endif %}
+{% from "components/macros.html" import entity_list %}
+{% set admin_filter_qs = [] %}
+{% if q %}{% if admin_filter_qs.append("q=" ~ q) %}{% endif %}{% endif %}
+{% if filter %}{% if admin_filter_qs.append("filter=" ~ filter) %}{% endif %}{% endif %}
+{% call(v) entity_list(
+    items=venues,
+    list_id="venue-list",
+    htmx_source=list_url,
+    headers=[
+        {"label": "Name"},
+        {"label": "Location"},
+        {"label": "Sources"},
+        {"label": "Events"},
+        {"label": "Status"},
+    ],
+    empty_message="No venues found" ~ (' matching "' ~ q ~ '"' if q else '') ~ ".",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=admin_filter_qs | join("&")
+) %}
+<tr>
+    <td><a href="/admin/venues/{{ v.id }}">{{ v.name }}</a></td>
+    <td>{{ v.city or '' }}{% if v.state %}, {{ v.state }}{% endif %}{% if v.country %} ({{ v.country }}){% endif %}</td>
+    <td>{{ v.candidates | length }}</td>
+    <td>{{ v.events | length }}</td>
+    <td>
+        {% set pending = v.candidates | selectattr('status', 'equalto', 'pending') | list %}
+        {% set accepted = v.candidates | selectattr('status', 'equalto', 'accepted') | list %}
+        {% set auto = v.candidates | selectattr('status', 'equalto', 'auto_accepted') | list %}
+        {% if pending %}
+        <mark>{{ pending | length }} pending</mark>
+        {% elif accepted or auto %}
+        <ins>confirmed</ins>
+        {% else %}
+        &mdash;
+        {% endif %}
+    </td>
+</tr>
+{% endcall %}
