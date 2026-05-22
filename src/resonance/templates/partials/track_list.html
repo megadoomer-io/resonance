@@ -1,42 +1,25 @@
-{% from "partials/service_badges.html" import service_badge_headers, service_badge_cells %}
-{% if tracks %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th>Title</th>
-                <th>Artist</th>
-                {{ service_badge_headers() }}
-            </tr>
-        </thead>
-        <tbody>
-            {% for track in tracks %}
-            <tr>
-                <td><a href="/tracks/{{ track.id }}">{{ track.title }}</a></td>
-                <td><a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></td>
-                {{ service_badge_cells(track.service_links, entity_type="track", entity_name=track.artist.name, track_title=track.title) }}
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-<nav>
-    {% if has_prev %}
-    <a href="/tracks?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/tracks?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#track-list"
-       hx-swap="innerHTML"
-       role="button"
-       class="secondary">Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="/tracks?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/tracks?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#track-list"
-       hx-swap="innerHTML"
-       role="button">Next</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No tracks synced yet.</p>
-{% endif %}
+{% from "components/macros.html" import entity_list %}
+{% from "partials/service_badges.html" import service_badge_cells %}
+{% call(track) entity_list(
+    items=tracks,
+    list_id="track-list",
+    htmx_source="/tracks",
+    headers=[
+        {"label": "Title"},
+        {"label": "Artist"},
+        {"label": "SP", "width": "3em", "style": "text-align: center;"},
+        {"label": "LF", "width": "3em", "style": "text-align: center;"},
+        {"label": "LB", "width": "3em", "style": "text-align: center;"},
+    ],
+    empty_message="No tracks synced yet.",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=filter_qs
+) %}
+<tr>
+    <td><a href="/tracks/{{ track.id }}">{{ track.title }}</a></td>
+    <td><a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></td>
+    {{ service_badge_cells(track.service_links, entity_type="track", entity_name=track.artist.name, track_title=track.title) }}
+</tr>
+{% endcall %}
