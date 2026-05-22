@@ -6,7 +6,7 @@
 <h2>Compare Artists</h2>
 
 <div class="grid">
-    {% call() detail_section("Keep" if canonical.id == artist_a.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == artist_a.id else none) %}
+    {% call() detail_section("Keep" if canonical.id == artist_a.id else "Merge into other", style="border-color: var(--primary);" if canonical.id == artist_a.id else none) %}
         <h3>{{ artist_a.name }}</h3>
         {% if artist_a.origin %}<p><small>Origin: {{ artist_a.origin }}</small></p>{% endif %}
         <table>
@@ -28,7 +28,7 @@
         </table>
     {% endcall %}
 
-    {% call() detail_section("Keep" if canonical.id == artist_b.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == artist_b.id else none) %}
+    {% call() detail_section("Keep" if canonical.id == artist_b.id else "Merge into other", style="border-color: var(--primary);" if canonical.id == artist_b.id else none) %}
         <h3>{{ artist_b.name }}</h3>
         {% if artist_b.origin %}<p><small>Origin: {{ artist_b.origin }}</small></p>{% endif %}
         <table>

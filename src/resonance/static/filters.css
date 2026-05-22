@@ -16,22 +16,22 @@
 
 .preset-btn {
   padding: 0.25rem 0.75rem;
-  border: 1px solid var(--pico-primary);
+  border: 1px solid var(--primary);
   border-radius: 2rem;
   background: transparent;
-  color: var(--pico-primary);
+  color: var(--primary);
   cursor: pointer;
   font-size: 0.875rem;
 }
 
 .preset-btn.preset-active {
-  background: var(--pico-primary);
-  color: var(--pico-primary-inverse);
+  background: var(--primary);
+  color: #fff;
 }
 
 .preset-btn.preset-clear {
-  border-color: var(--pico-muted-border-color);
-  color: var(--pico-muted-color);
+  border-color: var(--border);
+  color: var(--text-muted);
 }
 
 .filter-search {
@@ -50,7 +50,7 @@
 .filter-panel summary {
   cursor: pointer;
   font-size: 0.875rem;
-  color: var(--pico-muted-color);
+  color: var(--text-muted);
 }
 
 .filter-fields {
@@ -84,7 +84,7 @@
 .daterange-inputs span,
 .numrange-inputs span {
   font-size: 0.8rem;
-  color: var(--pico-muted-color);
+  color: var(--text-muted);
 }
 
 .multiselect-dropdown {
@@ -93,8 +93,8 @@
 
 .multiselect-dropdown summary {
   padding: 0.25rem 0.5rem;
-  border: 1px solid var(--pico-form-element-border-color);
-  border-radius: var(--pico-border-radius);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   font-size: 0.875rem;
   cursor: pointer;
   list-style: none;
@@ -103,9 +103,9 @@
 .multiselect-options {
   position: absolute;
   z-index: 10;
-  background: var(--pico-background-color);
-  border: 1px solid var(--pico-form-element-border-color);
-  border-radius: var(--pico-border-radius);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 0.25rem;
   min-width: 100%;
 }
@@ -162,7 +162,7 @@
 
 /* Muted text and row states */
 .text-muted {
-  color: var(--pico-muted-color);
+  color: var(--text-muted);
 }
 
 .row-accepted {

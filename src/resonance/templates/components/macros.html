@@ -146,12 +146,12 @@
 
 {% macro flash_message(message, severity="success") %}
 {% set colors = {
-    "success": "var(--pico-color-green-500, green)",
-    "error": "var(--pico-del-color, red)",
-    "warning": "var(--pico-color-amber-500, orange)",
-    "info": "var(--pico-primary)"
+    "success": "var(--success)",
+    "error": "var(--error)",
+    "warning": "var(--warning)",
+    "info": "var(--primary)"
 } %}
-<div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid {{ colors.get(severity, colors.info) }}; background: var(--pico-card-background-color);">
+<div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid {{ colors.get(severity, colors.info) }}; background: var(--surface);">
     <small style="color: {{ colors.get(severity, colors.info) }}">{{ message }}</small>
 </div>
 {% endmacro %}
@@ -162,8 +162,8 @@
 {# ------------------------------------------------------------------ #}
 
 {% macro error_state(message="An error occurred.", errors=none) %}
-<div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid var(--pico-del-color, red); background: var(--pico-card-background-color);">
-    <small style="color: var(--pico-del-color, red)">{{ message }}</small>
+<div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid var(--error); background: var(--surface);">
+    <small style="color: var(--error)">{{ message }}</small>
     {% if errors %}
     <ul style="margin-top: 0.5em; font-size: 0.85em;">
         {% for err in errors %}

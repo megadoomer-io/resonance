@@ -6,7 +6,7 @@
 <h2>Compare Tracks</h2>
 
 <div class="grid">
-    {% call() detail_section("Keep" if canonical.id == track_a.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == track_a.id else none) %}
+    {% call() detail_section("Keep" if canonical.id == track_a.id else "Merge into other", style="border-color: var(--primary);" if canonical.id == track_a.id else none) %}
         <h3>{{ track_a.title }}</h3>
         <p>by <a href="/artists/{{ track_a.artist_id }}">{{ track_a.artist.name }}</a></p>
         <table>
@@ -37,7 +37,7 @@
         </table>
     {% endcall %}
 
-    {% call() detail_section("Keep" if canonical.id == track_b.id else "Merge into other", style="border-color: var(--pico-primary);" if canonical.id == track_b.id else none) %}
+    {% call() detail_section("Keep" if canonical.id == track_b.id else "Merge into other", style="border-color: var(--primary);" if canonical.id == track_b.id else none) %}
         <h3>{{ track_b.title }}</h3>
         <p>by <a href="/artists/{{ track_b.artist_id }}">{{ track_b.artist.name }}</a></p>
         <table>

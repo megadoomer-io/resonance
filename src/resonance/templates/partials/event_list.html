@@ -19,7 +19,7 @@
     filter_qs=filter_qs
 ) %}
 {% set att = attendance_map.get(event.id) if attendance_map is defined else none %}
-<tr{% if att and att.status.value == "going" %} style="border-left: 3px solid var(--pico-primary);"{% endif %}>
+<tr{% if att and att.status.value == "going" %} style="border-left: 3px solid var(--primary);"{% endif %}>
     <td style="text-align: center;" title="{{ att.status.value if att else 'no status' }}">
         {% if att and att.status.value == "going" %}&#x2714;{% elif att and att.status.value == "interested" %}&#x2606;{% endif %}
     </td>

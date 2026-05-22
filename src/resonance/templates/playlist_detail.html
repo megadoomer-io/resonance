@@ -70,7 +70,7 @@
         {% if export_info %}
             {% set exported_at = export_info.get('exported_at', '') %}
             {% if playlist.updated_at and playlist.updated_at.isoformat() > exported_at %}
-            <small style="color: var(--pico-color-amber-500, orange);">Playlist changed since last export</small>
+            <small style="color: var(--warning);">Playlist changed since last export</small>
             <form method="post" action="/playlists/{{ playlist.id }}/export" class="inline-form">
                 <input type="hidden" name="connection_id" value="{{ conn_id }}">
                 <button type="submit" class="outline btn-sm">Update on Spotify</button>

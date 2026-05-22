@@ -40,10 +40,10 @@
             {% endfor %}
             {% if any_stale %}
             <form method="post" action="/playlists/{{ playlist.id }}/export" class="inline-form">
-                <button type="submit" class="outline btn-xs" style="color: var(--pico-color-amber-500, orange); border-color: var(--pico-color-amber-500, orange);">Update</button>
+                <button type="submit" class="outline btn-xs" style="color: var(--warning); border-color: var(--warning);">Update</button>
             </form>
             {% else %}
-            <small style="color: var(--pico-color-green-500, green);">Synced</small>
+            <small style="color: var(--success);">Synced</small>
             {% endif %}
         {% else %}
         <form method="post" action="/playlists/{{ playlist.id }}/export" class="inline-form">
