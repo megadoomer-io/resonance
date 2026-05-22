@@ -31,7 +31,7 @@
                 <td>{{ (u.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
                 <td>
                     {% if u.id | string != user_id %}
-                    <form method="post" action="/admin/users/{{ u.id }}/role" style="display:inline">
+                    <form method="post" action="/admin/users/{{ u.id }}/role" class="inline-form">
                         <select name="role" onchange="this.form.submit()">
                             <option value="user" {% if u.role.value == 'user' %}selected{% endif %}>User</option>
                             <option value="admin" {% if u.role.value == 'admin' %}selected{% endif %}>Admin</option>
@@ -74,16 +74,16 @@
                 <td>{{ task.progress_current }}/{{ task.progress_total or '?' }}</td>
                 <td>{{ (task.created_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') }}</td>
                 <td>
-                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" style="display:inline">
-                        <button type="submit" class="outline secondary" style="padding:0.25rem 0.5rem;font-size:0.8rem">Clone</button>
+                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" class="inline-form">
+                        <button type="submit" class="outline secondary btn-sm">Clone</button>
                     </form>
-                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" style="display:inline">
+                    <form method="post" action="/admin/tasks/{{ task.id }}/clone" class="inline-form">
                         <input type="hidden" name="step_mode" value="true">
-                        <button type="submit" class="outline" style="padding:0.25rem 0.5rem;font-size:0.8rem">Step</button>
+                        <button type="submit" class="outline btn-sm">Step</button>
                     </form>
                     {% if task.params and task.params.get('step_mode') and task.status.value in ('running', 'deferred') %}
-                    <form method="post" action="/admin/tasks/{{ task.id }}/resume" style="display:inline">
-                        <button type="submit" style="padding:0.25rem 0.5rem;font-size:0.8rem">Next Step</button>
+                    <form method="post" action="/admin/tasks/{{ task.id }}/resume" class="inline-form">
+                        <button type="submit" class="btn-sm">Next Step</button>
                     </form>
                     {% endif %}
                 </td>

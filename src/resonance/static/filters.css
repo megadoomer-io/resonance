@@ -159,3 +159,17 @@
 .service-badge-spotify  { background: var(--color-spotify); }
 .service-badge-lastfm   { background: var(--color-lastfm); }
 .service-badge-lb       { background: var(--color-listenbrainz); }
+
+/* Muted text and row states */
+.text-muted {
+  color: var(--pico-muted-color);
+}
+
+.row-accepted {
+  opacity: 0.5;
+}
+
+.row-rejected {
+  opacity: 0.3;
+  text-decoration: line-through;
+}

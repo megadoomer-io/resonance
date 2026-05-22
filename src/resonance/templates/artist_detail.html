@@ -75,7 +75,7 @@
             <tr>
                 <td><a href="/artists/{{ dupe.id }}">{{ dupe.name }}</a></td>
                 {{ service_badge_cells(dupe.service_links, entity_type="artist", entity_name=dupe.name) }}
-                <td><a href="/artists/{{ artist.id }}/compare/{{ dupe.id }}" role="button" class="secondary outline" style="padding: 0.25em 0.5em; font-size: 0.85em;">Compare</a></td>
+                <td><a href="/artists/{{ artist.id }}/compare/{{ dupe.id }}" role="button" class="secondary outline btn-sm">Compare</a></td>
             </tr>
             {% endfor %}
         </tbody>

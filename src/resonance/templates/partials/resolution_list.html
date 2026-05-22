@@ -68,8 +68,8 @@
                 hx-post="/admin/resolution/confirm-venue/{{ venue.id }}"
                 hx-target="#resolution-result"
                 hx-swap="innerHTML"
-                class="outline"
-                style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+                class="outline btn-xs"
+                style="margin-left: 0.5em;"
                 onclick="event.stopPropagation()"
             >Confirm All</button>
         </summary>
@@ -91,8 +91,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Unlink this candidate? It will return to the pending queue."
-                                class="outline secondary"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline secondary btn-sm"
                             >Unlink</button>
                         </td>
                     </tr>
@@ -114,8 +113,8 @@
                 hx-post="/admin/resolution/confirm-event/{{ event.id }}"
                 hx-target="#resolution-result"
                 hx-swap="innerHTML"
-                class="outline"
-                style="padding: 0.2em 0.5em; font-size: 0.8em; margin-left: 0.5em;"
+                class="outline btn-xs"
+                style="margin-left: 0.5em;"
                 onclick="event.stopPropagation()"
             >Confirm All</button>
         </summary>
@@ -137,8 +136,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Unlink this candidate? It will return to the pending queue."
-                                class="outline secondary"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline secondary btn-sm"
                             >Unlink</button>
                         </td>
                     </tr>
@@ -172,7 +170,7 @@
                         {% endfor %}
                     </td>
                     <td style="white-space: nowrap;">
-                        <form style="display:inline">
+                        <form class="inline-form">
                             {% for v in group %}
                             <input type="hidden" name="venue_ids" value="{{ v.id }}">
                             {% endfor %}
@@ -183,8 +181,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Merge these {{ group | length }} venues?"
-                                class="outline"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline btn-sm"
                             >Merge</button>
                             <button
                                 type="button"
@@ -193,8 +190,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Mark these venues as not duplicates?"
-                                class="outline secondary"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline secondary btn-sm"
                             >Not Duplicates</button>
                         </form>
                     </td>
@@ -223,7 +219,7 @@
                         <br><small>{{ group[0].event_date }}{% if group[0].venue %} — {{ group[0].venue.name }}{% endif %}</small>
                     </td>
                     <td style="white-space: nowrap;">
-                        <form style="display:inline">
+                        <form class="inline-form">
                             {% for e in group %}
                             <input type="hidden" name="event_ids" value="{{ e.id }}">
                             {% endfor %}
@@ -234,8 +230,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Merge these {{ group | length }} events?"
-                                class="outline"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline btn-sm"
                             >Merge</button>
                             <button
                                 type="button"
@@ -244,8 +239,7 @@
                                 hx-target="#resolution-result"
                                 hx-swap="innerHTML"
                                 hx-confirm="Mark these events as not duplicates?"
-                                class="outline secondary"
-                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                                class="outline secondary btn-sm"
                             >Not Duplicates</button>
                         </form>
                     </td>
@@ -280,8 +274,7 @@
                             hx-target="#resolution-result"
                             hx-swap="innerHTML"
                             hx-confirm="Delete orphaned venue {{ v.name }}?"
-                            class="outline secondary"
-                            style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            class="outline secondary btn-sm"
                         >Delete</button>
                     </td>
                 </tr>

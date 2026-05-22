@@ -38,8 +38,7 @@
                         hx-post="/admin/events/{{ event.id }}/candidates/{{ ec.id }}/accept"
                         hx-target="#entity-action-result"
                         hx-swap="innerHTML"
-                        class="outline"
-                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                        class="outline btn-xs"
                     >Accept</button>
                     {% endif %}
                     {% if ec.status.value in ('pending', 'accepted', 'auto_accepted') %}
@@ -47,8 +46,7 @@
                         hx-post="/admin/events/{{ event.id }}/candidates/{{ ec.id }}/reject"
                         hx-target="#entity-action-result"
                         hx-swap="innerHTML"
-                        class="outline secondary"
-                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                        class="outline secondary btn-xs"
                     >Reject</button>
                     {% endif %}
                     {% if ec.status.value in ('accepted', 'auto_accepted', 'rejected') %}
@@ -57,8 +55,7 @@
                         hx-target="#entity-action-result"
                         hx-swap="innerHTML"
                         hx-confirm="Unlink this candidate? It will return to the pending queue."
-                        class="outline secondary"
-                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                        class="outline secondary btn-xs"
                     >Unlink</button>
                     {% endif %}
                 </td>

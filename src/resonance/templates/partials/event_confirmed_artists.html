@@ -9,9 +9,9 @@
                     <a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>
                     {% if sorted_artists | length > 1 %}
                     {% if loop.first %}
-                    <small style="opacity: 0.5; margin-left: 0.5em;">headliner</small>
+                    <small class="text-muted" style="margin-left: 0.5em;">headliner</small>
                     {% elif loop.last %}
-                    <small style="opacity: 0.5; margin-left: 0.5em;">opener</small>
+                    <small class="text-muted" style="margin-left: 0.5em;">opener</small>
                     {% endif %}
                     {% endif %}
                 </td>
@@ -20,22 +20,22 @@
                     <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/move-up"
                             hx-target="#event-artists"
                             hx-swap="innerHTML"
-                            class="outline secondary"
-                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em;">&uarr;</button>
+                            class="outline secondary btn-xs"
+                            style="margin: 0 0.1em;">&uarr;</button>
                     {% endif %}
                     {% if not loop.last %}
                     <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/move-down"
                             hx-target="#event-artists"
                             hx-swap="innerHTML"
-                            class="outline secondary"
-                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em;">&darr;</button>
+                            class="outline secondary btn-xs"
+                            style="margin: 0 0.1em;">&darr;</button>
                     {% endif %}
                     <button hx-post="/events/{{ event.id }}/artists/{{ ea.id }}/remove"
                             hx-target="#event-artists"
                             hx-swap="innerHTML"
                             hx-confirm="Remove {{ ea.raw_name }} from this event?"
-                            class="outline secondary"
-                            style="padding: 0.15em 0.4em; font-size: 0.8em; margin: 0 0.1em; color: var(--pico-del-color);">&times;</button>
+                            class="outline secondary btn-xs"
+                            style="margin: 0 0.1em; color: var(--pico-del-color);">&times;</button>
                 </td>
             </tr>
             {% endfor %}
@@ -43,5 +43,5 @@
     </table>
 </figure>
 {% else %}
-<p><small style="opacity: 0.6;">No confirmed artists yet.</small></p>
+<p><small class="text-muted">No confirmed artists yet.</small></p>
 {% endif %}

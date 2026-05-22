@@ -63,7 +63,7 @@
                 <td><a href="/tracks/{{ dupe.id }}">{{ dupe.title }}</a></td>
                 <td>{{ dupe.artist.name }}</td>
                 {{ service_badge_cells(dupe.service_links, entity_type="track", entity_name=dupe.artist.name, track_title=dupe.title) }}
-                <td><a href="/tracks/{{ track.id }}/compare/{{ dupe.id }}" role="button" class="secondary outline" style="padding: 0.25em 0.5em; font-size: 0.85em;">Compare</a></td>
+                <td><a href="/tracks/{{ track.id }}/compare/{{ dupe.id }}" role="button" class="secondary outline btn-sm">Compare</a></td>
             </tr>
             {% endfor %}
         </tbody>

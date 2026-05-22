@@ -21,7 +21,7 @@
         {% if candidate.matched_artist_id and candidate.matched_artist_id in matched_artists %}
         <a href="/artists/{{ candidate.matched_artist_id }}">{{ matched_artists[candidate.matched_artist_id].name }}</a>
         {% else %}
-        <small style="opacity: 0.6;">No match</small>
+        <small class="text-muted">No match</small>
         {% endif %}
     </td>
     <td>{{ candidate.confidence_score }}%</td>
