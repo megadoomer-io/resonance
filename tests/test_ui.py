@@ -219,3 +219,12 @@ class TestTaskCloning:
             follow_redirects=False,
         )
         assert response.status_code == 307
+
+
+class TestComponentPlayground:
+    """Tests for the component playground."""
+
+    async def test_playground_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/dev/components", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
