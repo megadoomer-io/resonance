@@ -3346,6 +3346,7 @@ async def admin_resolution(
         tuple[concert_models.Event, list[concert_models.EventCandidate]]
     ] = []
     venue_merge_suggestions: list[list[concert_models.Venue]] = []
+    event_merge_suggestions: list[list[concert_models.Event]] = []
     orphaned_venues: list[concert_models.Venue] = []
 
     async with _get_db(request) as db:
@@ -3448,6 +3449,47 @@ async def admin_resolution(
                     for v in group:
                         seen_ids.add(v.id)
 
+            event_excl_result = await db.execute(
+                sa.select(concert_models.EntityExclusion).where(
+                    concert_models.EntityExclusion.entity_type == "event"
+                )
+            )
+            excluded_event_pairs: set[frozenset[uuid.UUID]] = set()
+            for ex in event_excl_result.scalars():
+                excluded_event_pairs.add(frozenset([ex.entity_a_id, ex.entity_b_id]))
+
+            all_events_result = await db.execute(
+                sa.select(concert_models.Event).options(
+                    sa_orm.selectinload(concert_models.Event.venue),
+                    sa_orm.selectinload(concert_models.Event.event_candidates),
+                    sa_orm.selectinload(concert_models.Event.artists),
+                )
+            )
+            evt_groups: dict[
+                tuple[datetime.date, uuid.UUID | None],
+                list[concert_models.Event],
+            ] = {}
+            for evt in all_events_result.scalars().unique():
+                evt_key = (evt.event_date, evt.venue_id)
+                evt_groups.setdefault(evt_key, []).append(evt)
+
+            seen_event_ids: set[uuid.UUID] = set()
+            for evt_group in evt_groups.values():
+                if len(evt_group) < 2:
+                    continue
+                if evt_group[0].id in seen_event_ids:
+                    continue
+                pair = frozenset(e.id for e in evt_group)
+                if len(evt_group) == 2 and pair in excluded_event_pairs:
+                    continue
+                if search_norm:
+                    titles = " ".join(e.title.lower() for e in evt_group)
+                    if search_norm not in titles:
+                        continue
+                event_merge_suggestions.append(evt_group)
+                for e in evt_group:
+                    seen_event_ids.add(e.id)
+
         elif view == "orphaned":
             venues_with_rels = await db.execute(
                 sa.select(concert_models.Venue).options(
@@ -3478,6 +3520,7 @@ async def admin_resolution(
         "multi_cand_venues": multi_cand_venues,
         "multi_cand_events": multi_cand_events,
         "venue_merge_suggestions": venue_merge_suggestions,
+        "event_merge_suggestions": event_merge_suggestions,
         "orphaned_venues": orphaned_venues,
         "presets": _RESOLUTION_PRESETS,
         "active_preset": view,
@@ -3709,6 +3752,96 @@ async def exclude_venue_group(
                     db.add(
                         concert_models.EntityExclusion(
                             entity_type="venue",
+                            entity_a_id=lo,
+                            entity_b_id=hi,
+                        )
+                    )
+                    created += 1
+        await db.commit()
+
+    return _resolution_response(f"Excluded — {created} exclusion(s) created.")
+
+
+@router.post("/admin/resolution/merge-events")
+async def merge_event_group(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Merge events by moving candidates and artists to the canonical one."""
+    deps_module.verify_admin_access(request)
+    form = await request.form()
+    raw_ids = form.getlist("event_ids")
+    event_ids = [uuid.UUID(str(eid)) for eid in raw_ids]
+    if len(event_ids) < 2:
+        return _resolution_response("Need at least 2 events.")
+
+    async with _get_db(request) as db:
+        events_result = await db.execute(
+            sa.select(concert_models.Event)
+            .options(
+                sa_orm.selectinload(concert_models.Event.event_candidates),
+                sa_orm.selectinload(concert_models.Event.artists),
+                sa_orm.selectinload(concert_models.Event.artist_candidates),
+            )
+            .where(concert_models.Event.id.in_(event_ids))
+        )
+        events = list(events_result.scalars().unique())
+        if len(events) < 2:
+            return _resolution_response("Events not found.")
+
+        events.sort(
+            key=lambda e: len(e.event_candidates) + len(e.artists),
+            reverse=True,
+        )
+        canonical = events[0]
+        merged_count = 0
+
+        for dup in events[1:]:
+            for ec in dup.event_candidates:
+                ec.resolved_event_id = canonical.id
+            for eac in dup.artist_candidates:
+                eac.event_id = canonical.id
+            for confirmed_ea in dup.artists:
+                confirmed_ea.event_id = canonical.id
+            merged_count += 1
+
+        await db.commit()
+
+    return _resolution_response(
+        f'Merged {merged_count} event(s) into "{canonical.title}".'
+    )
+
+
+@router.post("/admin/resolution/exclude-events")
+async def exclude_event_group(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Create exclusions between all event pairs."""
+    deps_module.verify_admin_access(request)
+    form = await request.form()
+    raw_ids = form.getlist("event_ids")
+    event_ids = [uuid.UUID(str(eid)) for eid in raw_ids]
+
+    if len(event_ids) < 2:
+        return _resolution_response("Need at least 2 events to exclude.")
+
+    async with _get_db(request) as db:
+        created = 0
+        for i, a_id in enumerate(event_ids):
+            for b_id in event_ids[i + 1 :]:
+                lo, hi = sorted([a_id, b_id])
+                existing = (
+                    await db.execute(
+                        sa.select(concert_models.EntityExclusion).where(
+                            concert_models.EntityExclusion.entity_type == "event",
+                            concert_models.EntityExclusion.entity_a_id == lo,
+                            concert_models.EntityExclusion.entity_b_id == hi,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not existing:
+                    db.add(
+                        concert_models.EntityExclusion(
+                            entity_type="event",
                             entity_a_id=lo,
                             entity_b_id=hi,
                         )

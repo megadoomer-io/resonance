@@ -203,7 +203,60 @@
             </tbody>
         </table>
     </figure>
-    {% else %}
+    {% endif %}
+
+    {% if event_merge_suggestions %}
+    <h3>Event Merge Suggestions ({{ event_merge_suggestions | length }})</h3>
+    <p>Events on the same date at the same venue. Merging moves candidates and artists to the event with the most data.</p>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Events</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for group in event_merge_suggestions %}
+                <tr>
+                    <td>
+                        {% for e in group %}
+                        <strong>{{ e.title }}</strong> ({{ e.source_service.value }}, {{ e.event_candidates | length }} candidates, {{ e.artists | length }} artists){% if not loop.last %}<br>{% endif %}
+                        {% endfor %}
+                        <br><small>{{ group[0].event_date }}{% if group[0].venue %} — {{ group[0].venue.name }}{% endif %}</small>
+                    </td>
+                    <td style="white-space: nowrap;">
+                        <form style="display:inline">
+                            {% for e in group %}
+                            <input type="hidden" name="event_ids" value="{{ e.id }}">
+                            {% endfor %}
+                            <button
+                                type="button"
+                                hx-post="/admin/resolution/merge-events"
+                                hx-include="closest form"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Merge these {{ group | length }} events?"
+                                class="outline"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Merge</button>
+                            <button
+                                type="button"
+                                hx-post="/admin/resolution/exclude-events"
+                                hx-include="closest form"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Mark these events as not duplicates?"
+                                class="outline secondary"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Not Duplicates</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% endif %}
+
+    {% if not venue_merge_suggestions and not event_merge_suggestions %}
     <p>No merge suggestions found.</p>
     {% endif %}
 
