@@ -69,33 +69,42 @@
 </figure>
 {% endif %}
 
-{% if orphan_candidates %}
-<h2>Claimable Candidates ({{ orphan_candidates | length }})</h2>
-<p><small>Pending candidates with a matching name that aren't linked to any venue.</small></p>
-<figure>
-    <table>
-        <thead>
-            <tr><th>Name</th><th>City</th><th>Source</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-            {% for vc in orphan_candidates %}
-            <tr>
-                <td>{{ vc.name }}</td>
-                <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
-                <td>{{ vc.source_service.value }}</td>
-                <td>
-                    <button
-                        hx-post="/admin/venues/{{ venue.id }}/claim/{{ vc.id }}"
-                        hx-target="#entity-action-result"
-                        hx-swap="innerHTML"
-                        class="outline"
-                        style="padding: 0.2em 0.4em; font-size: 0.8em;"
-                    >Claim</button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-{% endif %}
+<div id="claimable-candidates"
+     hx-get="/admin/venues/{{ venue.id }}"
+     hx-trigger="entity-updated from:body"
+     hx-select="#claimable-candidates-inner"
+     hx-target="#claimable-candidates"
+     hx-swap="innerHTML">
+    <div id="claimable-candidates-inner">
+    {% if orphan_candidates %}
+    <h2>Claimable Candidates ({{ orphan_candidates | length }})</h2>
+    <p><small>Pending candidates with a matching name that aren't linked to any venue.</small></p>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Name</th><th>City</th><th>Source</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for vc in orphan_candidates %}
+                <tr>
+                    <td>{{ vc.name }}</td>
+                    <td>{{ vc.city or '' }}{% if vc.state %}, {{ vc.state }}{% endif %}</td>
+                    <td>{{ vc.source_service.value }}</td>
+                    <td>
+                        <button
+                            hx-post="/admin/venues/{{ venue.id }}/claim/{{ vc.id }}"
+                            hx-target="#entity-action-result"
+                            hx-swap="innerHTML"
+                            class="outline"
+                            style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                        >Claim</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% endif %}
+    </div>
+</div>
 {% endblock %}
