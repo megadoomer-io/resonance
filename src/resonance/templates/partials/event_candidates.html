@@ -29,7 +29,7 @@
         {% if candidate.matched_artist_id %}
         {{ action_button("Accept", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/accept", hx_target="#candidate-" ~ candidate.id, hx_swap="outerHTML", style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;") }}
         {% else %}
-        {{ action_button("&#x2B07; Import", "/partials/artist-search-modal?q=" ~ (candidate.raw_name | urlencode) ~ "&event_id=" ~ event.id ~ "&candidate_id=" ~ candidate.id, hx_method="get", hx_target="#modal-container", style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;") }}
+        {{ action_button("⬇ Import", "/partials/artist-search-modal?q=" ~ (candidate.raw_name | urlencode) ~ "&event_id=" ~ event.id ~ "&candidate_id=" ~ candidate.id, hx_method="get", hx_target="#modal-container", style="padding: 0.25em 0.5em; font-size: 0.85em; margin-right: 0.25em;") }}
         {% endif %}
         {{ action_button("Reject", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/reject", hx_target="#candidate-" ~ candidate.id, hx_swap="outerHTML", css_class="secondary outline", style="padding: 0.25em 0.5em; font-size: 0.85em;") }}
     </td>
