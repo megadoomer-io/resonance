@@ -188,3 +188,10 @@ App config is loaded via Pydantic `Settings`. Key variables:
 - `MUSICBRAINZ_CLIENT_ID`, `MUSICBRAINZ_CLIENT_SECRET` — MusicBrainz OAuth credentials (for ListenBrainz)
 - `LASTFM_API_KEY`, `LASTFM_SHARED_SECRET` — Last.fm API credentials
 - `ADMIN_API_TOKEN` — Bearer token for admin API access (CLI and programmatic use)
+
+## Design System
+
+Always read DESIGN.md before making any visual or UI decisions.
+All font choices, colors, spacing, and aesthetic direction are defined there.
+Do not deviate without explicit user approval.
+In QA mode, flag any code that doesn't match DESIGN.md.
