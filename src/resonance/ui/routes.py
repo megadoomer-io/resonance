@@ -4102,11 +4102,32 @@ async def admin_venue_detail(
             for ov in (await db.execute(ov_stmt)).scalars():
                 other_venues[ov.id] = ov
 
+        import resonance.normalize as normalize_module
+
+        norm_name = normalize_module.normalize_name(venue.name)
+        orphan_stmt = (
+            sa.select(concert_models.VenueCandidate)
+            .where(
+                concert_models.VenueCandidate.resolved_venue_id.is_(None),
+                concert_models.VenueCandidate.status
+                == types_module.CandidateStatus.PENDING,
+            )
+            .order_by(concert_models.VenueCandidate.name)
+            .limit(20)
+        )
+        all_orphans = list((await db.execute(orphan_stmt)).scalars())
+        orphan_candidates = [
+            vc
+            for vc in all_orphans
+            if normalize_module.normalize_name(vc.name) == norm_name
+        ]
+
     ctx: dict[str, object] = {
         "request": request,
         "venue": venue,
         "exclusions": exclusions,
         "other_venues": other_venues,
+        "orphan_candidates": orphan_candidates,
         "user_tz": user_tz,
         "user_role": user_role,
     }
@@ -4192,6 +4213,35 @@ async def admin_unlink_venue_candidate_detail(
         await db.commit()
 
     return _entity_action_response("Candidate unlinked.")
+
+
+@router.post(
+    "/admin/venues/{venue_id}/claim/{candidate_id}",
+    response_model=None,
+)
+async def admin_claim_venue_candidate(
+    request: fastapi.Request,
+    venue_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Claim an orphaned pending candidate into this venue."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        vc = await db.get(concert_models.VenueCandidate, candidate_id)
+        if not vc:
+            return _entity_action_response("Candidate not found.", error=True)
+        if vc.resolved_venue_id is not None:
+            return _entity_action_response("Candidate already assigned.", error=True)
+        vc.resolved_venue_id = venue_id
+        vc.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+
+    return _entity_action_response("Candidate claimed.")
 
 
 @router.post("/admin/venues/{venue_id}/split", response_model=None)
