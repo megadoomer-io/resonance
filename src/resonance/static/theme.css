@@ -1,0 +1,187 @@
+/* Resonance Design System — see DESIGN.md */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Light theme (default) ────────────────────────────────── */
+
+:root {
+  /* Theme tokens */
+  --bg: #FAFAF8;
+  --surface: #FFFFFF;
+  --surface-alt: #F3F3F0;
+  --text: #1C1C1A;
+  --text-muted: #6B6B66;
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --primary-subtle: #EFF6FF;
+  --border: #E5E5E0;
+  --border-strong: #D4D4CF;
+  --success: #16A34A;
+  --warning: #D97706;
+  --error: #DC2626;
+  --heading-font: 'Instrument Serif', Georgia, serif;
+  --body-font: 'DM Sans', system-ui, sans-serif;
+  --mono-font: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Pico CSS overrides — map Pico vars to theme tokens */
+  --pico-font-family: var(--body-font);
+  --pico-background-color: var(--bg);
+  --pico-color: var(--text);
+  --pico-muted-color: var(--text-muted);
+  --pico-primary: var(--primary);
+  --pico-primary-hover: var(--primary-hover);
+  --pico-primary-background: var(--primary);
+  --pico-primary-inverse: #FFFFFF;
+  --pico-card-background-color: var(--surface);
+  --pico-card-border-color: var(--border);
+  --pico-border-color: var(--border);
+  --pico-muted-border-color: var(--border);
+  --pico-form-element-border-color: var(--border);
+  --pico-form-element-background-color: var(--surface);
+  --pico-form-element-focus-color: var(--primary);
+  --pico-table-border-color: var(--border);
+  --pico-code-background-color: var(--surface-alt);
+  --pico-code-color: var(--text);
+  --pico-font-family-monospace: var(--mono-font);
+  --pico-del-color: var(--error);
+  --pico-color-green-500: var(--success);
+  --pico-color-amber-500: var(--warning);
+
+  /* Spacing scale (8px base) */
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+  /* Border radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* Motion */
+  --ease-enter: ease-out;
+  --ease-exit: ease-in;
+  --ease-move: ease-in-out;
+  --dur-micro: 75ms;
+  --dur-short: 200ms;
+  --dur-medium: 300ms;
+}
+
+/* ── Dark theme ───────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  --bg: #121214;
+  --surface: #1E1E21;
+  --surface-alt: #2A2A2E;
+  --text: #E8E8E6;
+  --text-muted: #9B9B96;
+  --primary: #3B82F6;
+  --primary-hover: #60A5FA;
+  --primary-subtle: #1E293B;
+  --border: #2E2E32;
+  --border-strong: #3E3E42;
+
+  --pico-primary-inverse: #121214;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121214;
+    --surface: #1E1E21;
+    --surface-alt: #2A2A2E;
+    --text: #E8E8E6;
+    --text-muted: #9B9B96;
+    --primary: #3B82F6;
+    --primary-hover: #60A5FA;
+    --primary-subtle: #1E293B;
+    --border: #2E2E32;
+    --border-strong: #3E3E42;
+
+    --pico-primary-inverse: #121214;
+  }
+}
+
+/* ── Typography ───────────────────────────────────────────── */
+
+body {
+  font-family: var(--body-font);
+  line-height: 1.6;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--heading-font);
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
+h1 { font-size: 2.441rem; }
+h2 { font-size: 1.953rem; }
+h3 { font-size: 1.563rem; }
+h4 { font-size: 1.25rem; }
+
+code, pre, kbd, samp {
+  font-family: var(--mono-font);
+}
+
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Nav wordmark ─────────────────────────────────────────── */
+
+.nav-wordmark {
+  font-family: var(--heading-font);
+  font-style: italic;
+  letter-spacing: -0.04em;
+  font-size: 1.25rem;
+}
+
+/* ── Theme toggle ─────────────────────────────────────────── */
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  padding: 0.25em 0.5em;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  transition: color var(--dur-short) var(--ease-enter),
+              border-color var(--dur-short) var(--ease-enter);
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* ── Sound wave divider ───────────────────────────────────── */
+
+.wave-divider {
+  height: 24px;
+  margin: var(--space-xl) 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 24'%3E%3Cpath d='M0 12 Q150 0 300 12 Q450 24 600 12 Q750 0 900 12 Q1050 24 1200 12' fill='none' stroke='%236B6B66' stroke-width='1'/%3E%3C/svg%3E");
+  background-repeat: repeat-x;
+  background-size: 1200px 24px;
+  background-position: center;
+  opacity: 0.06;
+}
+
+[data-theme="dark"] .wave-divider {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 24'%3E%3Cpath d='M0 12 Q150 0 300 12 Q450 24 600 12 Q750 0 900 12 Q1050 24 1200 12' fill='none' stroke='%239B9B96' stroke-width='1'/%3E%3C/svg%3E");
+}
+
+/* ── Reduced motion ───────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

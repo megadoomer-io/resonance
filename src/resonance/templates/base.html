@@ -5,7 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}resonance{% endblock %}</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="/static/theme.css">
     <link rel="stylesheet" href="/static/filters.css">
+    <script>
+    (function() {
+        var t = localStorage.getItem('theme');
+        if (t) document.documentElement.setAttribute('data-theme', t);
+    })();
+    </script>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script src="https://unpkg.com/htmx-ext-json-enc@2.0.1/json-enc.js"></script>
     {% block head %}{% endblock %}
@@ -28,7 +35,7 @@
     {% if user_id %}
     <nav class="container">
         <ul>
-            <li><strong>resonance</strong></li>
+            <li><strong class="nav-wordmark">resonance</strong></li>
         </ul>
         <ul>
             {% set nav_path = request.url.path %}
@@ -42,6 +49,7 @@
             {% if user_role in ("admin", "owner") %}
             <li><a href="/admin"{% if nav_path.startswith("/admin") %} aria-current="page"{% endif %}>Admin</a></li>
             {% endif %}
+            <li><button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode">&#9789;</button></li>
         </ul>
     </nav>
     {% endif %}
@@ -131,6 +139,25 @@
             doExternalSearch();
         }
     });
+
+    (function() {
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        function updateIcon() {
+            var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+                (!document.documentElement.getAttribute('data-theme') &&
+                 window.matchMedia('(prefers-color-scheme: dark)').matches);
+            btn.textContent = isDark ? '☀' : '☽';
+        }
+        updateIcon();
+        btn.addEventListener('click', function() {
+            var current = document.documentElement.getAttribute('data-theme');
+            var next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            updateIcon();
+        });
+    })();
     </script>
 </body>
 </html>
