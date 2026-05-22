@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section %}
 {% block title %}{{ playlist.name }} — resonance{% endblock %}
 {% block content %}
 <p><a href="/playlists">&larr; Back to Playlists</a></p>
@@ -18,7 +19,7 @@
 </p>
 
 {% if generation %}
-<article>
+{% call() detail_section("Generation Info") %}
     <table>
         <tbody>
             <tr>
@@ -54,7 +55,7 @@
             {% endif %}
         </tbody>
     </table>
-</article>
+{% endcall %}
 {% endif %}
 
 {# Export to Spotify #}
