@@ -122,3 +122,40 @@
 .multiselect-options input[type="checkbox"] {
   margin: 0;
 }
+
+/* Compact button sizes — replaces scattered inline styles */
+.btn-sm {
+  padding: 0.25em 0.5em;
+  font-size: 0.85em;
+}
+
+.btn-xs {
+  padding: 0.15em 0.4em;
+  font-size: 0.75em;
+}
+
+/* Inline form — for side-by-side buttons in table cells */
+.inline-form {
+  display: inline;
+  margin: 0;
+}
+
+/* Service badge colors */
+:root {
+  --color-spotify: #1DB954;
+  --color-lastfm: #D51007;
+  --color-listenbrainz: #E66000;
+}
+
+.service-badge {
+  text-decoration: none;
+  font-size: 0.75em;
+  font-weight: bold;
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.service-badge-spotify  { background: var(--color-spotify); }
+.service-badge-lastfm   { background: var(--color-lastfm); }
+.service-badge-lb       { background: var(--color-listenbrainz); }

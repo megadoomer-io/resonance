@@ -100,8 +100,8 @@
     hx_target=none,
     hx_swap="innerHTML",
     confirm_message=none,
-    css_class="outline",
-    style="padding: 0.2em 0.5em; font-size: 0.85em;",
+    css_class="outline btn-sm",
+    style=none,
     user_role="user"
 ) %}
 <button
@@ -110,7 +110,7 @@
     hx-swap="{{ hx_swap }}"
     {% if confirm_message %}hx-confirm="{{ confirm_message }}"{% endif %}
     class="{{ css_class }}"
-    style="{{ style }}"
+    {% if style %}style="{{ style }}"{% endif %}
 >{{ label }}</button>
 {% endmacro %}
 
@@ -126,8 +126,8 @@
     confirm_message="Are you sure?",
     target=none,
     swap="innerHTML",
-    css_class="outline secondary",
-    style="padding: 0.25em 0.5em; font-size: 0.85em;"
+    css_class="outline secondary btn-sm",
+    style=none
 ) %}
 <button
     hx-{{ method }}="{{ action_url }}"
@@ -135,7 +135,7 @@
     hx-swap="{{ swap }}"
     hx-confirm="{{ confirm_message }}"
     class="{{ css_class }}"
-    style="{{ style }}"
+    {% if style %}style="{{ style }}"{% endif %}
 >{{ label }}</button>
 {% endmacro %}
 

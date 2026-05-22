@@ -103,8 +103,8 @@
 <h2>Maintenance</h2>
 <div id="dedup-result"></div>
 <p>
-{{ confirm_action("Dedup Listening Events", "/admin/dedup-events", confirm_message="Remove duplicate cross-service listening events?", target="#dedup-result", css_class="outline", style="") }}
-{{ confirm_action("Dedup Artists", "/admin/dedup-artists", confirm_message="Merge duplicate artist records? This cannot be undone.", target="#dedup-result", css_class="outline", style="") }}
-{{ confirm_action("Dedup Tracks", "/admin/dedup-tracks", confirm_message="Merge duplicate track records? This cannot be undone.", target="#dedup-result", css_class="outline", style="") }}
+{{ confirm_action("Dedup Listening Events", "/admin/dedup-events", confirm_message="Remove duplicate cross-service listening events?", target="#dedup-result", css_class="outline") }}
+{{ confirm_action("Dedup Artists", "/admin/dedup-artists", confirm_message="Merge duplicate artist records? This cannot be undone.", target="#dedup-result", css_class="outline") }}
+{{ confirm_action("Dedup Tracks", "/admin/dedup-tracks", confirm_message="Merge duplicate track records? This cannot be undone.", target="#dedup-result", css_class="outline") }}
 </p>
 {% endblock %}

@@ -28,7 +28,7 @@
         <small>{{ playlist._generator_type }}</small>
         {% endif %}
     </td>
-    <td>{{ playlist.created_at | localtime(user_tz) }}</td>
+    <td>{{ (playlist.created_at | localtime(user_tz)).strftime('%Y-%m-%d') }}</td>
     <td>
         {% set sp_links = (playlist.service_links or {}).get('spotify', {}) %}
         {% if sp_links %}
@@ -52,7 +52,7 @@
         {% endif %}
     </td>
     <td>
-        {{ confirm_action("Delete", "/api/v1/playlists/" ~ playlist.id, method="delete", confirm_message="Delete '" ~ playlist.name ~ "'?", target="closest tr", swap="outerHTML", style="padding: 0.15rem 0.4rem; font-size: 0.75rem;") }}
+        {{ confirm_action("Delete", "/api/v1/playlists/" ~ playlist.id, method="delete", confirm_message="Delete '" ~ playlist.name ~ "'?", target="closest tr", swap="outerHTML", css_class="outline secondary btn-xs") }}
     </td>
 </tr>
 {% endcall %}

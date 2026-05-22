@@ -31,15 +31,16 @@
             <li><strong>resonance</strong></li>
         </ul>
         <ul>
-            <li><a href="/">Dashboard</a></li>
-            <li><a href="/playlists">Playlists</a></li>
-            <li><a href="/artists">Artists</a></li>
-            <li><a href="/tracks">Tracks</a></li>
-            <li><a href="/events">Events</a></li>
-            <li><a href="/history">History</a></li>
-            <li><a href="/account">Account</a></li>
+            {% set nav_path = request.url.path %}
+            <li><a href="/"{% if nav_path == "/" %} aria-current="page"{% endif %}>Dashboard</a></li>
+            <li><a href="/playlists"{% if nav_path.startswith("/playlists") %} aria-current="page"{% endif %}>Playlists</a></li>
+            <li><a href="/artists"{% if nav_path.startswith("/artists") %} aria-current="page"{% endif %}>Artists</a></li>
+            <li><a href="/tracks"{% if nav_path.startswith("/tracks") %} aria-current="page"{% endif %}>Tracks</a></li>
+            <li><a href="/events"{% if nav_path.startswith("/events") %} aria-current="page"{% endif %}>Events</a></li>
+            <li><a href="/history"{% if nav_path.startswith("/history") %} aria-current="page"{% endif %}>History</a></li>
+            <li><a href="/account"{% if nav_path.startswith("/account") %} aria-current="page"{% endif %}>Account</a></li>
             {% if user_role in ("admin", "owner") %}
-            <li><a href="/admin">Admin</a></li>
+            <li><a href="/admin"{% if nav_path.startswith("/admin") %} aria-current="page"{% endif %}>Admin</a></li>
             {% endif %}
         </ul>
     </nav>

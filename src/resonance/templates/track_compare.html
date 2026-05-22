@@ -73,7 +73,7 @@
 
 <h3>Merge</h3>
 <div id="merge-preview">
-    {{ action_button("Preview Merge", "/tracks/" ~ canonical.id ~ "/merge-preview/" ~ duplicate.id, hx_target="#merge-preview", style="") }}
+    {{ action_button("Preview Merge", "/tracks/" ~ canonical.id ~ "/merge-preview/" ~ duplicate.id, hx_target="#merge-preview") }}
     <a href="/tracks/{{ track_a.id }}" role="button" class="secondary outline">Cancel</a>
 </div>
 {% endblock %}
