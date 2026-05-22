@@ -16,8 +16,8 @@ import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
 import resonance.types as types_module
+import resonance.ui.dashboard as ui_dashboard_module
 import resonance.ui.events as ui_events_module
-import resonance.ui.routes as ui_routes_module
 
 # --- Test infrastructure ---
 
@@ -154,7 +154,7 @@ def _create_app(
         secret_key=settings.session_secret_key,
     )
     app.include_router(ui_events_module.router)
-    app.include_router(ui_routes_module.router)
+    app.include_router(ui_dashboard_module.router)
     app.state.connector_registry = registry or registry_module.ConnectorRegistry()
 
     return app
@@ -219,7 +219,7 @@ class TestArtistEnrichAuth:
             secret_key=settings.session_secret_key,
         )
         app.include_router(ui_events_module.router)
-        app.include_router(ui_routes_module.router)
+        app.include_router(ui_dashboard_module.router)
         app.state.connector_registry = registry_module.ConnectorRegistry()
 
         transport = httpx.ASGITransport(app=app)

@@ -28,10 +28,14 @@ import resonance.logging as logging_module
 import resonance.middleware.session as session_middleware
 import resonance.models.task as task_models
 import resonance.types as types_module
+import resonance.ui.account as ui_account_module
 import resonance.ui.admin as ui_admin_module
 import resonance.ui.artists as ui_artists_module
+import resonance.ui.dashboard as ui_dashboard_module
 import resonance.ui.events as ui_events_module
-import resonance.ui.routes as ui_routes_module
+import resonance.ui.playground as ui_playground_module
+import resonance.ui.playlists as ui_playlists_module
+import resonance.ui.sync as ui_sync_module
 import resonance.ui.tracks as ui_tracks_module
 
 logger = structlog.get_logger()
@@ -103,11 +107,15 @@ def create_app() -> fastapi.FastAPI:
     application.include_router(api_v1_module.router)
 
     # Register UI routes
+    application.include_router(ui_account_module.router)
     application.include_router(ui_admin_module.router)
     application.include_router(ui_artists_module.router)
+    application.include_router(ui_dashboard_module.router)
     application.include_router(ui_events_module.router)
+    application.include_router(ui_playground_module.router)
+    application.include_router(ui_playlists_module.router)
+    application.include_router(ui_sync_module.router)
     application.include_router(ui_tracks_module.router)
-    application.include_router(ui_routes_module.router)
 
     # Serve static assets (CSS, JS)
     _static_dir = pathlib.Path(__file__).resolve().parent / "static"

@@ -155,16 +155,15 @@ class TestSongkickConnectPartials:
         response = await client.get(
             "/partials/songkick-connect", follow_redirects=False
         )
-        # Returns empty HTML for unauthenticated users
-        assert response.status_code == 200
-        assert response.text == ""
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
 
     async def test_songkick_lookup_form_requires_auth(
         self, client: httpx.AsyncClient
     ) -> None:
         response = await client.get("/partials/songkick-lookup", follow_redirects=False)
-        assert response.status_code == 200
-        assert response.text == ""
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
 
     async def test_songkick_lookup_submit_requires_auth(
         self, client: httpx.AsyncClient
@@ -174,8 +173,8 @@ class TestSongkickConnectPartials:
             data={"username": "testuser"},
             follow_redirects=False,
         )
-        assert response.status_code == 200
-        assert response.text == ""
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
 
     async def test_songkick_confirm_requires_auth(
         self, client: httpx.AsyncClient
@@ -185,8 +184,8 @@ class TestSongkickConnectPartials:
             data={"username": "testuser"},
             follow_redirects=False,
         )
-        assert response.status_code == 200
-        assert response.text == ""
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
 
 
 class TestSongkickSyncTrigger:
@@ -198,7 +197,8 @@ class TestSongkickSyncTrigger:
         response = await client.post(
             "/partials/songkick-sync/testuser", follow_redirects=False
         )
-        assert response.status_code == 401
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
 
 
 class TestTaskCloning:
