@@ -3814,6 +3814,35 @@ async def merge_event_group(
                 else:
                     confirmed_ea.event_id = canonical.id
                     canonical_artist_ids.add(confirmed_ea.artist_id)
+            existing_att = {
+                row[0]
+                for row in (
+                    await db.execute(
+                        sa.select(concert_models.UserEventAttendance.user_id).where(
+                            concert_models.UserEventAttendance.event_id == canonical.id
+                        )
+                    )
+                ).all()
+            }
+            dup_att = (
+                (
+                    await db.execute(
+                        sa.select(concert_models.UserEventAttendance).where(
+                            concert_models.UserEventAttendance.event_id == dup.id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for att in dup_att:
+                if att.user_id in existing_att:
+                    await db.delete(att)
+                else:
+                    att.event_id = canonical.id
+                    existing_att.add(att.user_id)
+            await db.flush()
+            await db.delete(dup)
             merged_count += 1
 
         await db.commit()
