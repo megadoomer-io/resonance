@@ -16,6 +16,7 @@ import resonance.connectors.base as base_module
 import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
 import resonance.types as types_module
+import resonance.ui.events as ui_events_module
 import resonance.ui.routes as ui_routes_module
 
 # --- Test infrastructure ---
@@ -152,6 +153,7 @@ def _create_app(
         redis=fake_redis,  # type: ignore[arg-type]
         secret_key=settings.session_secret_key,
     )
+    app.include_router(ui_events_module.router)
     app.include_router(ui_routes_module.router)
     app.state.connector_registry = registry or registry_module.ConnectorRegistry()
 
@@ -216,6 +218,7 @@ class TestArtistEnrichAuth:
             redis=fake_redis,  # type: ignore[arg-type]
             secret_key=settings.session_secret_key,
         )
+        app.include_router(ui_events_module.router)
         app.include_router(ui_routes_module.router)
         app.state.connector_registry = registry_module.ConnectorRegistry()
 

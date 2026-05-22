@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import fastapi
-
-if TYPE_CHECKING:
-    import fastapi.templating
+import fastapi.templating
 
 
 def is_htmx_request(request: fastapi.Request) -> bool:
@@ -37,11 +35,11 @@ def render_fragment(
     return templates.TemplateResponse(request, template, context)
 
 
-def trigger_event(
-    response: fastapi.responses.Response,
+def trigger_event[R: fastapi.responses.Response](
+    response: R,
     event: str,
     detail: dict[str, Any] | None = None,
-) -> fastapi.responses.Response:
+) -> R:
     """Add HX-Trigger header for cross-component updates.
 
     Args:
