@@ -1,60 +1,43 @@
-{% if events %}
-<figure>
-    <table>
-        <thead>
-            <tr>
-                <th style="width: 2em;"></th>
-                <th>Date</th>
-                <th>Event</th>
-                <th>Venue</th>
-                <th>Artists</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for event in events %}
-            {% set att = attendance_map.get(event.id) if attendance_map is defined else none %}
-            <tr{% if att and att.status.value == "going" %} style="border-left: 3px solid var(--pico-primary);"{% endif %}>
-                <td style="text-align: center;" title="{{ att.status.value if att else 'no status' }}">
-                    {% if att and att.status.value == "going" %}&#x2714;{% elif att and att.status.value == "interested" %}&#x2606;{% endif %}
-                </td>
-                <td>{{ event.event_date }}</td>
-                <td>
-                    <a href="/events/{{ event.id }}">{{ event.title }}</a>
-                    {% if event.external_url %}
-                    <a href="{{ event.external_url }}" target="_blank" rel="noopener" style="opacity: 0.5; margin-left: 0.25em;">&#x2197;</a>
-                    {% endif %}
-                </td>
-                <td>{{ event.venue.name if event.venue else "" }}</td>
-                <td>
-                    {% set confirmed_names = event.artists | map(attribute="raw_name") | list %}
-                    {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
-                    {% set pending = [] %}
-                    {% for candidate in event.artist_candidates %}{% if candidate.status.value == "pending" and candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
-                    {% if event.artists and pending %}, {% endif %}
-                    {% for candidate in pending %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</figure>
-<nav>
-    {% if has_prev %}
-    <a href="/events?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/events?page={{ page - 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#event-list"
-       hx-swap="innerHTML"
-       role="button"
-       class="secondary">Previous</a>
-    {% endif %}
-    {% if has_next %}
-    <a href="/events?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-get="/events?page={{ page + 1 }}{% if filter_qs %}&{{ filter_qs }}{% endif %}"
-       hx-target="#event-list"
-       hx-swap="innerHTML"
-       role="button">Next</a>
-    {% endif %}
-</nav>
-{% else %}
-<p>No events synced yet. <a href="/account">Connect Songkick</a> to import concert data.</p>
-{% endif %}
+{% from "components/macros.html" import entity_list %}
+{% call(event) entity_list(
+    items=events,
+    list_id="event-list",
+    htmx_source="/events",
+    headers=[
+        {"label": "", "width": "2em"},
+        {"label": "Date"},
+        {"label": "Event"},
+        {"label": "Venue"},
+        {"label": "Artists"},
+    ],
+    empty_message="No events synced yet.",
+    empty_action_url="/account",
+    empty_action_label="Connect Songkick",
+    page=page,
+    has_next=has_next,
+    has_prev=has_prev,
+    filter_qs=filter_qs
+) %}
+{% set att = attendance_map.get(event.id) if attendance_map is defined else none %}
+<tr{% if att and att.status.value == "going" %} style="border-left: 3px solid var(--pico-primary);"{% endif %}>
+    <td style="text-align: center;" title="{{ att.status.value if att else 'no status' }}">
+        {% if att and att.status.value == "going" %}&#x2714;{% elif att and att.status.value == "interested" %}&#x2606;{% endif %}
+    </td>
+    <td>{{ event.event_date }}</td>
+    <td>
+        <a href="/events/{{ event.id }}">{{ event.title }}</a>
+        {% if event.external_url %}
+        <a href="{{ event.external_url }}" target="_blank" rel="noopener" style="opacity: 0.5; margin-left: 0.25em;">&#x2197;</a>
+        {% endif %}
+    </td>
+    <td>{{ event.venue.name if event.venue else "" }}</td>
+    <td>
+        {% set confirmed_names = event.artists | map(attribute="raw_name") | list %}
+        {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
+        {% set pending = [] %}
+        {% for candidate in event.artist_candidates %}{% if candidate.status.value == "pending" and candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
+        {% if event.artists and pending %}, {% endif %}
+        {% for candidate in pending %}<small style="opacity: 0.6">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
+    </td>
+</tr>
+{% endcall %}

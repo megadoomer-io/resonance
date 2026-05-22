@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% from "components/macros.html" import detail_section %}
 {% block title %}{{ event.title }} — resonance{% endblock %}
 {% block content %}
 <p><a href="/events">&larr; Back to Events</a></p>
 <h2>{{ event.title }}</h2>
 
-<article>
+{% call() detail_section("Event Details") %}
     <table>
         <tbody>
             <tr>
@@ -40,7 +41,7 @@
     <a href="/playlists/new?event_id={{ event.id }}&type=concert_prep" role="button">
         &#9889; Generate Playlist
     </a>
-</article>
+{% endcall %}
 
 <h3>Confirmed Artists</h3>
 <div id="event-artists"
