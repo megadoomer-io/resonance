@@ -35,7 +35,7 @@
         <thead>
             <tr>
                 {% for header in headers %}
-                <th{% if header.width %} style="width: {{ header.width }}"{% endif %}>{{ header.label }}</th>
+                <th{% if header.width or header.style %} style="{% if header.width %}width: {{ header.width }};{% endif %}{% if header.style %} {{ header.style }}{% endif %}"{% endif %}>{{ header.label }}</th>
                 {% endfor %}
             </tr>
         </thead>
@@ -420,8 +420,8 @@
 {# detail_section — detail page layout for metadata/related items      #}
 {# ------------------------------------------------------------------ #}
 
-{% macro detail_section(title, user_role="user") %}
-<article>
+{% macro detail_section(title, style=none, user_role="user") %}
+<article{% if style %} style="{{ style }}"{% endif %}>
     <header>{{ title }}</header>
     {{ caller() }}
 </article>
