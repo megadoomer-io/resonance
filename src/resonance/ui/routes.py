@@ -3678,6 +3678,47 @@ async def confirm_event_resolution(
     return _resolution_response("All candidates confirmed.")
 
 
+@router.post("/admin/resolution/exclude-venues")
+async def exclude_venue_group(
+    request: fastapi.Request,
+) -> fastapi.responses.HTMLResponse:
+    """Create exclusions between all venue pairs."""
+    deps_module.verify_admin_access(request)
+    form = await request.form()
+    raw_ids = form.getlist("venue_ids")
+    venue_ids = [uuid.UUID(str(vid)) for vid in raw_ids]
+
+    if len(venue_ids) < 2:
+        return _resolution_response("Need at least 2 venues to exclude.")
+
+    async with _get_db(request) as db:
+        created = 0
+        for i, a_id in enumerate(venue_ids):
+            for b_id in venue_ids[i + 1 :]:
+                lo, hi = sorted([a_id, b_id])
+                existing = (
+                    await db.execute(
+                        sa.select(concert_models.EntityExclusion).where(
+                            concert_models.EntityExclusion.entity_type == "venue",
+                            concert_models.EntityExclusion.entity_a_id == lo,
+                            concert_models.EntityExclusion.entity_b_id == hi,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not existing:
+                    db.add(
+                        concert_models.EntityExclusion(
+                            entity_type="venue",
+                            entity_a_id=lo,
+                            entity_b_id=hi,
+                        )
+                    )
+                    created += 1
+        await db.commit()
+
+    return _resolution_response(f"Excluded — {created} exclusion(s) created.")
+
+
 @router.get("/admin/tasks/{task_id}", response_model=None)
 async def admin_task_status(
     task_id: uuid.UUID,

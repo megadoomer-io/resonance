@@ -169,7 +169,7 @@
                         <strong>{{ v.name }}</strong> ({{ v.city or '?' }}, {{ v.events | length }} events){% if not loop.last %}<br>{% endif %}
                         {% endfor %}
                     </td>
-                    <td>
+                    <td style="white-space: nowrap;">
                         <form style="display:inline">
                             {% for v in group %}
                             <input type="hidden" name="venue_ids" value="{{ v.id }}">
@@ -184,6 +184,16 @@
                                 class="outline"
                                 style="padding: 0.25em 0.5em; font-size: 0.85em;"
                             >Merge</button>
+                            <button
+                                type="button"
+                                hx-post="/admin/resolution/exclude-venues"
+                                hx-include="closest form"
+                                hx-target="#resolution-result"
+                                hx-swap="innerHTML"
+                                hx-confirm="Mark these venues as not duplicates?"
+                                class="outline secondary"
+                                style="padding: 0.25em 0.5em; font-size: 0.85em;"
+                            >Not Duplicates</button>
                         </form>
                     </td>
                 </tr>
