@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% from "components/macros.html" import entity_list, action_button, confirm_action, empty_state, flash_message, error_state, filter_bar, detail_section %}
+
+{% block title %}Component Playground - resonance{% endblock %}
+
+{% block content %}
+<h1>Component Playground</h1>
+<p><small>Admin-only. Every macro rendered in every state for visual verification.</small></p>
+
+<nav>
+    <ul>
+        {% for c in components %}
+        <li><a href="#{{ c.name }}">{{ c.name }}</a></li>
+        {% endfor %}
+    </ul>
+</nav>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# entity_list                                                        #}
+{# ------------------------------------------------------------------ #}
+<section id="entity_list">
+    <h2>entity_list</h2>
+    <p>List shell with table wrapper, pagination, empty state.</p>
+
+    <h3>Populated</h3>
+    {% call(item) entity_list(
+        items=[
+            {"name": "Alpha Artist", "count": 42, "url": "#"},
+            {"name": "Beta Band", "count": 17, "url": "#"},
+            {"name": "Charlie Choir", "count": 8, "url": "#"},
+        ],
+        list_id="demo-list",
+        htmx_source="/dev/components",
+        headers=[
+            {"label": "Name", "width": "60%"},
+            {"label": "Plays", "width": "20%"},
+            {"label": "", "width": "20%"},
+        ],
+        page=1,
+        has_next=true,
+        has_prev=false,
+        user_role=user_role
+    ) %}
+    <tr>
+        <td><a href="{{ item.url }}">{{ item.name }}</a></td>
+        <td>{{ item.count }}</td>
+        <td></td>
+    </tr>
+    {% endcall %}
+
+    <h3>Empty</h3>
+    {% call(item) entity_list(
+        items=[],
+        list_id="demo-list-empty",
+        htmx_source="/dev/components",
+        headers=[{"label": "Name"}, {"label": "Plays"}],
+        empty_message="No artists found. Connect a music service to get started.",
+        empty_action_url="/account",
+        empty_action_label="Connect Service",
+        user_role=user_role
+    ) %}
+    <tr><td>{{ item }}</td></tr>
+    {% endcall %}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# action_button                                                      #}
+{# ------------------------------------------------------------------ #}
+<section id="action_button">
+    <h2>action_button</h2>
+    <p>Button with HTMX attrs, loading state, confirm.</p>
+
+    <h3>Default</h3>
+    {{ action_button(label="Sync Now", hx_method="post", hx_url="/api/v1/sync", hx_target="#sync-status") }}
+
+    <h3>Danger</h3>
+    {{ action_button(label="Delete", hx_method="delete", hx_url="#", hx_target="#result", css_class="secondary") }}
+
+    <h3>With Confirm</h3>
+    {{ action_button(label="Merge Accounts", hx_method="post", hx_url="#", hx_target="#result", confirm_message="This cannot be undone. Continue?") }}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# confirm_action                                                     #}
+{# ------------------------------------------------------------------ #}
+<section id="confirm_action">
+    <h2>confirm_action</h2>
+    <p>Confirmation before destructive actions.</p>
+
+    {{ confirm_action(
+        label="Merge Artists",
+        action_url="/admin/artists/merge",
+        method="post",
+        confirm_message="Are you sure you want to merge these artists? This action cannot be undone."
+    ) }}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# empty_state                                                        #}
+{# ------------------------------------------------------------------ #}
+<section id="empty_state">
+    <h2>empty_state</h2>
+    <p>Consistent empty state messaging.</p>
+
+    <h3>Default</h3>
+    {{ empty_state(message="No playlists yet.") }}
+
+    <h3>With Action</h3>
+    {{ empty_state(message="No events found.", action_url="/playlists/new", action_label="Create Playlist") }}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# flash_message                                                      #}
+{# ------------------------------------------------------------------ #}
+<section id="flash_message">
+    <h2>flash_message</h2>
+    <p>Action feedback with severity and auto-fade.</p>
+
+    {{ flash_message("Artist merged successfully.", severity="success") }}
+    {{ flash_message("Export failed: Spotify API returned 429.", severity="error") }}
+    {{ flash_message("Sync is already in progress.", severity="warning") }}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# error_state                                                        #}
+{# ------------------------------------------------------------------ #}
+<section id="error_state">
+    <h2>error_state</h2>
+    <p>Validation failure / server error display.</p>
+
+    <h3>Message Only</h3>
+    {{ error_state(message="Something went wrong. Please try again.") }}
+
+    <h3>With Errors</h3>
+    {{ error_state(
+        message="Validation failed.",
+        errors=["Name is required.", "Event date must be in the future.", "At least one artist must be selected."]
+    ) }}
+</section>
+
+<hr>
+
+{# ------------------------------------------------------------------ #}
+{# detail_section                                                     #}
+{# ------------------------------------------------------------------ #}
+<section id="detail_section">
+    <h2>detail_section</h2>
+    <p>Detail page layout block.</p>
+
+    {% call detail_section("Event Details", user_role=user_role) %}
+    <dl>
+        <dt>Venue</dt>
+        <dd>The Fillmore</dd>
+        <dt>Date</dt>
+        <dd>2026-06-15</dd>
+        <dt>Artists</dt>
+        <dd>Example Band, Opening Act</dd>
+    </dl>
+    {% endcall %}
+</section>
+
+{% endblock %}

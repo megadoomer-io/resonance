@@ -83,6 +83,31 @@ uv run resonance-api playlist <playlist-id>
 
 See [docs/architecture.md](docs/architecture.md) for project structure and system design.
 
+### UI Module Layout
+
+UI routes live in `src/resonance/ui/`, split by domain:
+
+| Module | Scope |
+|--------|-------|
+| `common.py` | Shared infrastructure: templates singleton, `require_user`/`require_admin` auth deps, `base_context()`, pagination, `escape_ilike`, `count_rows` |
+| `htmx.py` | HTMX helpers: `is_htmx_request()`, `render_fragment()`, `trigger_event()` |
+| `dashboard.py` | Login + dashboard |
+| `artists.py` | Artist list, detail, compare, merge preview |
+| `events.py` | Event list, detail, artist management, candidates, attendance, enrichment |
+| `tracks.py` | Track list, detail, compare, merge preview, listening history |
+| `playlists.py` | Playlist list, detail, new, generation status, export |
+| `admin.py` | Admin dashboard, resolution, venue/event management, dedup, tasks, stats |
+| `sync.py` | Songkick connect, Concert Archives, sync status |
+| `account.py` | Account page, merge flow |
+| `playground.py` | Component playground at `/dev/components` (admin-only) |
+
+All route modules use FastAPI dependency injection:
+- `Annotated[uuid.UUID, Depends(common.require_user)]` for auth
+- `Annotated[AsyncSession, Depends(deps_module.get_db)]` for DB sessions
+- `common.base_context(request)` for template context
+
+Macro library: `templates/components/macros.html` (entity_list, action_button, filter_bar, etc.)
+
 ## CLI Tool
 
 ### `resonance-api`
