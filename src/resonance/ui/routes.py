@@ -4486,11 +4486,33 @@ async def admin_event_detail(
             for oe in (await db.execute(oe_stmt)).scalars():
                 other_events[oe.id] = oe
 
+        import resonance.normalize as normalize_module
+
+        norm_title = normalize_module.normalize_name(event.title)
+        orphan_ec_stmt = (
+            sa.select(concert_models.EventCandidate)
+            .where(
+                concert_models.EventCandidate.resolved_event_id.is_(None),
+                concert_models.EventCandidate.status
+                == types_module.CandidateStatus.PENDING,
+                concert_models.EventCandidate.event_date == event.event_date,
+            )
+            .order_by(concert_models.EventCandidate.title)
+            .limit(20)
+        )
+        all_orphan_ec = list((await db.execute(orphan_ec_stmt)).scalars())
+        orphan_event_candidates = [
+            ec
+            for ec in all_orphan_ec
+            if normalize_module.normalize_name(ec.title) == norm_title
+        ]
+
     ctx: dict[str, object] = {
         "request": request,
         "event": event,
         "exclusions": exclusions,
         "other_events": other_events,
+        "orphan_event_candidates": orphan_event_candidates,
         "user_tz": user_tz,
         "user_role": user_role,
     }
@@ -4576,6 +4598,35 @@ async def admin_unlink_event_candidate_detail(
         await db.commit()
 
     return _entity_action_response("Candidate unlinked.")
+
+
+@router.post(
+    "/admin/events/{event_id}/claim/{candidate_id}",
+    response_model=None,
+)
+async def admin_claim_event_candidate(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse | fastapi.responses.RedirectResponse:
+    """Claim an orphaned pending candidate into this event."""
+    user_id = request.state.session.get("user_id")
+    if not user_id:
+        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+    if _user_role(request) not in ("admin", "owner"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    async with _get_db(request) as db:
+        ec = await db.get(concert_models.EventCandidate, candidate_id)
+        if not ec:
+            return _entity_action_response("Candidate not found.", error=True)
+        if ec.resolved_event_id is not None:
+            return _entity_action_response("Candidate already assigned.", error=True)
+        ec.resolved_event_id = event_id
+        ec.status = types_module.CandidateStatus.ACCEPTED
+        await db.commit()
+
+    return _entity_action_response("Candidate claimed.")
 
 
 @router.post("/admin/events/{event_id}/split", response_model=None)

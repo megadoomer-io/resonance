@@ -32,10 +32,11 @@
 
     {% if pending_event_candidates %}
     <h3>Event Candidates ({{ pending_event_candidates | length }})</h3>
+    <p><small>Unlinked candidates can be re-imported via sync, or find a matching event to reassign them.</small></p>
     <figure>
         <table>
             <thead>
-                <tr><th>Title</th><th>Date</th><th>Source</th><th>Status</th></tr>
+                <tr><th>Title</th><th>Date</th><th>Source</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
                 {% for ec in pending_event_candidates %}
@@ -44,6 +45,7 @@
                     <td>{{ ec.event_date }}</td>
                     <td>{{ ec.source_service.value }}</td>
                     <td>{{ ec.status.value }}</td>
+                    <td><a href="/admin/events?q={{ ec.title | urlencode }}" style="font-size:0.85em">Find event</a></td>
                 </tr>
                 {% endfor %}
             </tbody>

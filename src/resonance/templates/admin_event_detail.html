@@ -98,4 +98,43 @@
     </table>
 </figure>
 {% endif %}
+
+<div id="claimable-event-candidates"
+     hx-get="/admin/events/{{ event.id }}/manage"
+     hx-trigger="entity-updated from:body"
+     hx-select="#claimable-event-candidates-inner"
+     hx-target="#claimable-event-candidates"
+     hx-swap="innerHTML">
+    <div id="claimable-event-candidates-inner">
+    {% if orphan_event_candidates %}
+    <h2>Claimable Candidates ({{ orphan_event_candidates | length }})</h2>
+    <p><small>Pending candidates with a matching title and date that aren't linked to any event.</small></p>
+    <figure>
+        <table>
+            <thead>
+                <tr><th>Title</th><th>Date</th><th>Source</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for ec in orphan_event_candidates %}
+                <tr>
+                    <td>{{ ec.title }}</td>
+                    <td>{{ ec.event_date }}</td>
+                    <td>{{ ec.source_service.value }}</td>
+                    <td>
+                        <button
+                            hx-post="/admin/events/{{ event.id }}/claim/{{ ec.id }}"
+                            hx-target="#entity-action-result"
+                            hx-swap="innerHTML"
+                            class="outline"
+                            style="padding: 0.2em 0.4em; font-size: 0.8em;"
+                        >Claim</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </figure>
+    {% endif %}
+    </div>
+</div>
 {% endblock %}
