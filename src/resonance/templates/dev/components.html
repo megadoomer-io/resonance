@@ -94,9 +94,10 @@
     <p>Confirmation before destructive actions.</p>
 
     {{ confirm_action(
-        message="Are you sure you want to merge these artists? This action cannot be undone.",
+        label="Merge Artists",
         action_url="/admin/artists/merge",
-        method="post"
+        method="post",
+        confirm_message="Are you sure you want to merge these artists? This action cannot be undone."
     ) }}
 </section>
 
