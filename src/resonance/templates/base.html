@@ -15,6 +15,7 @@
     </script>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <script src="https://unpkg.com/htmx-ext-json-enc@2.0.1/json-enc.js"></script>
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
     {% block head %}{% endblock %}
     {% if user_id and not user_tz %}
     <script>
@@ -158,6 +159,12 @@
             updateIcon();
         });
     })();
+    </script>
+    <script>
+    lucide.createIcons();
+    document.body.addEventListener('htmx:afterSwap', function() {
+        lucide.createIcons();
+    });
     </script>
 </body>
 </html>

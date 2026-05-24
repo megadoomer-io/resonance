@@ -4,13 +4,13 @@
     hx-target="#songkick-connect"
     hx-swap="innerHTML"
     class="outline"
->Connect Songkick</button>
+><i data-lucide="ticket" class="icon-inline"></i> Connect Songkick</button>
 
 {% elif state == "form" %}
 <form hx-post="/partials/songkick-lookup" hx-target="#songkick-connect" hx-swap="innerHTML">
     <fieldset role="group">
         <input name="username" placeholder="Songkick username" required autofocus>
-        <button type="submit">Look up</button>
+        <button type="submit"><i data-lucide="search" class="icon-inline"></i> Look up</button>
     </fieldset>
 </form>
 
@@ -25,7 +25,7 @@
                 hx-vals='{"username": "{{ username }}"}'
                 hx-target="#songkick-connect"
                 hx-swap="innerHTML"
-            >Connect</button>
+            ><i data-lucide="link" class="icon-inline"></i> Connect</button>
             <button
                 hx-get="/partials/songkick-connect"
                 hx-target="#songkick-connect"

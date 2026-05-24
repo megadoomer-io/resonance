@@ -4,7 +4,7 @@
     hx-target="#concert-archives-connect"
     hx-swap="innerHTML"
     class="outline"
->Connect Concert Archives</button>
+><i data-lucide="archive" class="icon-inline"></i> Connect Concert Archives</button>
 
 {% elif state == "form" %}
 <form
@@ -50,7 +50,7 @@
     </script>
     <p id="ca-upload-error" style="display:none"><mark></mark></p>
     <div class="grid">
-        <button type="submit">Upload</button>
+        <button type="submit"><i data-lucide="upload" class="icon-inline"></i> Upload</button>
         <button
             hx-get="/partials/concert-archives-connect"
             hx-target="#concert-archives-connect"

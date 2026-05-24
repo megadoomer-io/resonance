@@ -72,6 +72,46 @@ def _service_name(value: str) -> str:
 
 templates.env.filters["service_name"] = _service_name
 
+# ---------------------------------------------------------------------------
+# Service icon filter (Lucide icon names)
+# ---------------------------------------------------------------------------
+
+SERVICE_ICONS: dict[str, str] = {
+    "spotify": "music",
+    "lastfm": "radio",
+    "listenbrainz": "headphones",
+    "songkick": "ticket",
+    "bandsintown": "map-pin",
+    "bandcamp": "disc",
+    "soundcloud": "cloud",
+    "ical": "calendar",
+    "concert_archives": "archive",
+    "manual": "pen-tool",
+    "test": "flask-conical",
+}
+
+
+def _service_icon(value: str) -> str:
+    """Return the Lucide icon name for a service type value."""
+    return SERVICE_ICONS.get(value, "link")
+
+
+templates.env.filters["service_icon"] = _service_icon
+
+SERVICE_COLORS: dict[str, str] = {
+    "spotify": "var(--color-spotify)",
+    "lastfm": "var(--color-lastfm)",
+    "listenbrainz": "var(--color-listenbrainz)",
+}
+
+
+def _service_color(value: str) -> str:
+    """Return the CSS color value for a service, or empty string if none."""
+    return SERVICE_COLORS.get(value, "")
+
+
+templates.env.filters["service_color"] = _service_color
+
 
 # ---------------------------------------------------------------------------
 # Auth dependencies

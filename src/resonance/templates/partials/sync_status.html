@@ -17,7 +17,10 @@
             {% for job in sync_jobs %}
             <tr>
                 <td>
-                    {{ job.service_connection.service_type.value | service_name }}
+                    {% set svc = job.service_connection.service_type.value %}
+                    {% set svc_color = svc | service_color %}
+                    <i data-lucide="{{ svc | service_icon }}" class="icon-inline"{% if svc_color %} style="color: {{ svc_color }}"{% endif %}></i>
+                    {{ svc | service_name }}
                 </td>
                 <td>
                     {% if job.status.value == 'deferred' %}

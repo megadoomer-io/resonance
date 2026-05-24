@@ -35,7 +35,12 @@
         <tbody>
             {% for conn in connections %}
             <tr>
-                <td>{{ conn.service_type.value | service_name }}</td>
+                <td>
+                    {% set svc = conn.service_type.value %}
+                    {% set svc_color = svc | service_color %}
+                    <i data-lucide="{{ svc | service_icon }}" class="icon-inline"{% if svc_color %} style="color: {{ svc_color }}"{% endif %}></i>
+                    {{ svc | service_name }}
+                </td>
                 <td>{{ conn.external_user_id or conn.label or conn.url or '' }}</td>
                 <td>{{ (conn.last_synced_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if conn.last_synced_at else 'Never' }}</td>
                 <td>
@@ -58,14 +63,14 @@
                         hx-get="/partials/concert-archives-upload"
                         hx-target="#ca-upload-{{ conn.id }}"
                         hx-swap="innerHTML"
-                    >Upload CSV</button>
+                    ><i data-lucide="upload" class="icon-inline"></i> Upload CSV</button>
                     <div id="ca-upload-{{ conn.id }}"></div>
                     {% else %}
                     <button
                         hx-post="/api/v1/sync/connection/{{ conn.id }}"
                         hx-swap="none"
                         hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
-                    >Sync Now</button>
+                    ><i data-lucide="refresh-cw" class="icon-inline"></i> Sync Now</button>
                     {% endif %}
                 </td>
             </tr>
