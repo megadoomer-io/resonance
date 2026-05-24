@@ -35,7 +35,7 @@
         <tbody>
             {% for conn in connections %}
             <tr>
-                <td>{{ conn.service_type.value | capitalize }}</td>
+                <td>{{ conn.service_type.value | service_name }}</td>
                 <td>{{ conn.external_user_id or conn.label or conn.url or '' }}</td>
                 <td>{{ (conn.last_synced_at | localtime(user_tz)).strftime('%Y-%m-%d %H:%M') if conn.last_synced_at else 'Never' }}</td>
                 <td>

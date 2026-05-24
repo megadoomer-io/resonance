@@ -68,7 +68,7 @@
             {% for task in tasks %}
             <tr>
                 <td>{{ task.service_connection.user.display_name if task.service_connection else '?' }}</td>
-                <td>{{ task.service_connection.service_type.value | capitalize if task.service_connection else '?' }}</td>
+                <td>{{ task.service_connection.service_type.value | service_name if task.service_connection else '?' }}</td>
                 <td>{{ task.task_type.value | replace('_', ' ') | capitalize }}</td>
                 <td>{{ task.status.value | capitalize }}</td>
                 <td>{{ task.progress_current }}/{{ task.progress_total or '?' }}</td>

@@ -29,7 +29,7 @@
             {% for svc in connected_services %}
             <label style="display: inline; margin-left: 0.5em;">
                 <input type="checkbox" id="svc-{{ svc }}" class="svc-checkbox" value="{{ svc }}">
-                {{ svc | capitalize }}
+                {{ svc | service_name }}
             </label>
             {% endfor %}
         </div>

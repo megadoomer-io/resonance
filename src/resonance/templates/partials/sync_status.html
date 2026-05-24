@@ -17,7 +17,7 @@
             {% for job in sync_jobs %}
             <tr>
                 <td>
-                    {{ job.service_connection.service_type.value | capitalize }}
+                    {{ job.service_connection.service_type.value | service_name }}
                 </td>
                 <td>
                     {% if job.status.value == 'deferred' %}

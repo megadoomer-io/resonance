@@ -46,6 +46,32 @@ def _localtime(
 
 templates.env.filters["localtime"] = _localtime
 
+# ---------------------------------------------------------------------------
+# Service display-name filter
+# ---------------------------------------------------------------------------
+
+SERVICE_DISPLAY_NAMES: dict[str, str] = {
+    "spotify": "Spotify",
+    "lastfm": "Last.fm",
+    "listenbrainz": "ListenBrainz",
+    "songkick": "Songkick",
+    "bandsintown": "Bandsintown",
+    "bandcamp": "Bandcamp",
+    "soundcloud": "SoundCloud",
+    "ical": "iCal",
+    "concert_archives": "Concert Archives",
+    "manual": "Manual",
+    "test": "Test",
+}
+
+
+def _service_name(value: str) -> str:
+    """Return the human-friendly display name for a service type value."""
+    return SERVICE_DISPLAY_NAMES.get(value, value.replace("_", " ").title())
+
+
+templates.env.filters["service_name"] = _service_name
+
 
 # ---------------------------------------------------------------------------
 # Auth dependencies
