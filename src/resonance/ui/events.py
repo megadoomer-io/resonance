@@ -570,6 +570,11 @@ async def accept_candidate_ui(
     )
     db.add(event_artist)
     candidate.status = types_module.CandidateStatus.ACCEPTED
+    await db.flush()
+
+    # Normalize positions to ensure sequential ordering after insert
+    event = await _load_event_with_artists(db, event_id)
+    _normalize_positions(list(event.artists))
     await db.commit()
 
     response = common.templates.TemplateResponse(
@@ -722,6 +727,11 @@ async def add_artist_to_event_ui(
         raw_name=artist.name,
     )
     db.add(event_artist)
+    await db.flush()
+
+    # Normalize positions to ensure sequential ordering after insert
+    add_event = await _load_event_with_artists(db, event_id)
+    _normalize_positions(list(add_event.artists))
     await db.commit()
 
     event = (
@@ -1057,6 +1067,11 @@ async def artist_import_partial(
                     raw_name=artist.name,
                 )
             )
+            await db.flush()
+
+            # Normalize positions to ensure sequential ordering after insert
+            import_event = await _load_event_with_artists(db, event_id)
+            _normalize_positions(list(import_event.artists))
 
     await db.commit()
 
