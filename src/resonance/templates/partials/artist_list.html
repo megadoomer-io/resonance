@@ -17,7 +17,7 @@
     filter_qs=filter_qs
 ) %}
 <tr>
-    <td><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></td>
+    <td><span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse"><a href="/artists/{{ artist.id }}">{{ artist.name }}</a></span></td>
     {{ service_badge_cells(artist.service_links, entity_type="artist", entity_name=artist.name) }}
 </tr>
 {% endcall %}

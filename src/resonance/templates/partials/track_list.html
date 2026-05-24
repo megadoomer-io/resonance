@@ -18,8 +18,8 @@
     filter_qs=filter_qs
 ) %}
 <tr>
-    <td><a href="/tracks/{{ track.id }}">{{ track.title }}</a></td>
-    <td><a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></td>
+    <td><span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse"><a href="/tracks/{{ track.id }}">{{ track.title }}</a></span></td>
+    <td><span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse"><a href="/artists/{{ track.artist_id }}">{{ track.artist.name }}</a></span></td>
     {{ service_badge_cells(track.service_links, entity_type="track", entity_name=track.artist.name, track_title=track.title) }}
 </tr>
 {% endcall %}

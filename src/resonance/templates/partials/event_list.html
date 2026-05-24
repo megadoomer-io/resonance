@@ -34,19 +34,23 @@
     </td>
     <td>{{ event.event_date }}</td>
     <td>
+        <span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse">
         <a href="/events/{{ event.id }}">{{ event.title }}</a>
         {% if event.external_url %}
         <a href="{{ event.external_url }}" target="_blank" rel="noopener" style="opacity: 0.5; margin-left: 0.25em;">&#x2197;</a>
         {% endif %}
+        </span>
     </td>
-    <td>{{ event.venue.name if event.venue else "" }}</td>
+    <td><span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse">{{ event.venue.name if event.venue else "" }}</span></td>
     <td>
+        <span class="truncate" onclick="this.classList.toggle('expanded')" title="Click to expand/collapse">
         {% set confirmed_names = event.artists | map(attribute="raw_name") | list %}
         {% for ea in event.artists %}{{ ", " if not loop.first }}<a href="/artists/{{ ea.artist_id }}">{{ ea.raw_name }}</a>{% endfor %}
         {% set pending = [] %}
         {% for candidate in event.artist_candidates %}{% if candidate.status.value == "pending" and candidate.raw_name not in confirmed_names %}{% if pending.append(candidate) %}{% endif %}{% endif %}{% endfor %}
         {% if event.artists and pending %}, {% endif %}
         {% for candidate in pending %}<small class="text-muted">{{ ", " if not loop.first }}{{ candidate.raw_name }}</small>{% endfor %}
+        </span>
     </td>
 </tr>
 {% endcall %}
