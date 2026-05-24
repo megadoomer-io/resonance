@@ -1,4 +1,13 @@
 {% from "components/macros.html" import entity_list %}
+{% if total_event_count is defined and total_event_count > 0 %}
+  {% set _empty_message = "No events match the current filters." %}
+  {% set _empty_action_url = "/events" %}
+  {% set _empty_action_label = "Clear filters" %}
+{% else %}
+  {% set _empty_message = "No events synced yet." %}
+  {% set _empty_action_url = "/account" %}
+  {% set _empty_action_label = "Connect Songkick" %}
+{% endif %}
 {% call(event) entity_list(
     items=events,
     list_id="event-list",
@@ -10,9 +19,9 @@
         {"label": "Venue"},
         {"label": "Artists"},
     ],
-    empty_message="No events synced yet.",
-    empty_action_url="/account",
-    empty_action_label="Connect Songkick",
+    empty_message=_empty_message,
+    empty_action_url=_empty_action_url,
+    empty_action_label=_empty_action_label,
     page=page,
     has_next=has_next,
     has_prev=has_prev,

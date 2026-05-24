@@ -188,6 +188,8 @@ async def events_page(
         .limit(common.PAGE_SIZE + 1)
     )
 
+    total_event_count = await common.count_rows(db, concert_models.Event)
+
     event_ids_subquery = query.with_only_columns(concert_models.Event.id)
     final_query = (
         sa.select(concert_models.Event)
@@ -252,6 +254,7 @@ async def events_page(
         "list_url": "/events",
         "list_target": "#event-list",
         "filter_qs": filter_qs,
+        "total_event_count": total_event_count,
     }
 
     return htmx.render_fragment(
