@@ -527,6 +527,24 @@ class TestCheckParentCompletion:
 # ---------------------------------------------------------------------------
 
 
+def _not_cancelled_result(
+    parent_id: uuid.UUID | None = None,
+) -> MagicMock:
+    """Create a mock result for is_cancelled() parent lookup.
+
+    Returns a mock that simulates a RUNNING parent task so is_cancelled()
+    returns False and the task proceeds normally.
+    """
+    parent_task = task_module.Task(
+        id=parent_id or uuid.uuid4(),
+        task_type=types_module.TaskType.SYNC_JOB,
+        status=types_module.SyncStatus.RUNNING,
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = parent_task
+    return result
+
+
 def _mock_session_factory(session: AsyncMock) -> MagicMock:
     """Create a mock async_sessionmaker that yields the given session.
 
@@ -766,6 +784,7 @@ class TestSyncRangeWatermarkResume:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             parent_result,
@@ -863,6 +882,7 @@ class TestSyncRangeWatermarkResume:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             parent_result,
@@ -954,6 +974,7 @@ class TestSyncRangeDeferral:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             next_result,
@@ -1034,7 +1055,11 @@ class TestSyncRangeShutdown:
         conn_result = MagicMock()
         conn_result.scalar_one.return_value = connection
 
-        session.execute.side_effect = [task_result, conn_result]
+        session.execute.side_effect = [
+            task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
+            conn_result,
+        ]
 
         # Strategy that raises ShutdownRequest
         mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
@@ -1131,6 +1156,7 @@ class TestSyncRangeWatermarkWrite:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             parent_result,
@@ -1218,6 +1244,7 @@ class TestSyncRangeWatermarkWrite:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             parent_result,
@@ -1304,6 +1331,7 @@ class TestSyncRangeWatermarkWrite:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             conn_result,
             pending_result,
             parent_result,
@@ -2403,6 +2431,7 @@ class TestDiscoverTracksForArtist:
 
         session.execute.side_effect = [
             task_result,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             pending_count,
             next_pending_result,
         ]
@@ -2642,6 +2671,7 @@ class TestScoreAndBuildPlaylist:
 
         session.execute.side_effect = [
             task_result_mock,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             profile_result,
             ea_result,
             eac_result,
@@ -2789,6 +2819,7 @@ class TestScoreAndBuildPlaylist:
 
         session.execute.side_effect = [
             task_result_mock,
+            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
             profile_result,
             ea_result,
             eac_result,

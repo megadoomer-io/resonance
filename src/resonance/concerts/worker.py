@@ -69,6 +69,15 @@ async def sync_calendar_feed(
                 log.error("calendar_sync_task_not_found")
                 return
 
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("calendar_sync_cancelled")
+                return
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -264,6 +273,15 @@ async def sync_concert_archives(
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("concert_archives_import_task_not_found")
+                return
+
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("concert_archives_import_cancelled")
                 return
 
             # Orphan recovery cannot reconstruct the uploaded CSV content.

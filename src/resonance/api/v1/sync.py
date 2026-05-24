@@ -15,6 +15,7 @@ import structlog
 import resonance.dependencies as deps_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -310,7 +311,7 @@ async def cancel_sync(
     job_id: uuid.UUID,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Cancel a pending or running sync task."""
     stmt = sa.select(task_models.Task).where(
         task_models.Task.id == job_id,
@@ -332,9 +333,16 @@ async def cancel_sync(
     job.status = types_module.SyncStatus.FAILED
     job.error_message = "Cancelled by user"
     job.completed_at = datetime.datetime.now(datetime.UTC)
+
+    # Immediately fail any PENDING children so they are never picked up
+    children_cancelled = await lifecycle_module.cancel_pending_children(db, job.id)
     await db.commit()
 
-    return {"status": "cancelled", "job_id": str(job_id)}
+    return {
+        "status": "cancelled",
+        "job_id": str(job_id),
+        "children_cancelled": children_cancelled,
+    }
 
 
 @router.get(

@@ -137,6 +137,15 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 log.error("plan_sync_task_not_found")
                 return
 
+            # Check if this task was cancelled before we start
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("plan_sync_cancelled")
+                return
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -274,6 +283,18 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             task = await _load_task(session, sync_task_id)
             if task is None:
                 log.error("sync_range_task_not_found")
+                return
+
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("sync_range_cancelled")
+                # Still check parent completion so sibling pipeline advances
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
                 return
 
             # Detect retry: task is still RUNNING from a previous crashed attempt
@@ -415,6 +436,15 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 log.error("bulk_job_task_not_found")
                 return
 
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("bulk_job_cancelled")
+                return
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -495,6 +525,15 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("generate_playlist_task_not_found")
+                return
+
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("generate_playlist_cancelled")
                 return
 
             task.status = types_module.SyncStatus.RUNNING
@@ -684,6 +723,18 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 log.error("discover_tracks_task_not_found")
                 return
 
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("discover_tracks_cancelled")
+                # Still check parent completion so pipeline advances
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
+                return
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -828,6 +879,17 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("score_and_build_task_not_found")
+                return
+
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("score_and_build_cancelled")
+                arq_redis = wctx["redis"]
+                await _check_parent_completion(session, task, arq_redis, log)
                 return
 
             generation_start = time_module.monotonic()
@@ -1113,6 +1175,15 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("export_playlist_task_not_found")
+                return
+
+            # Check if this task or its parent was cancelled
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("export_playlist_cancelled")
                 return
 
             task.status = types_module.SyncStatus.RUNNING
