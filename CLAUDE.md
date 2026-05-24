@@ -20,6 +20,20 @@ Personal media discovery platform — aggregates music data from external servic
 - [Self-Hosting](docs/self-hosting.md) — setup and deployment
 - [Spotify API Constraints](docs/spotify-api-constraints.md) — dev mode limitations
 
+## Local Development
+
+The app requires PostgreSQL and Redis. Docker Compose provides both:
+
+```bash
+make dev          # Start PG + Redis, run migrations, launch app
+make dev-up       # Start PG + Redis only (background)
+make dev-down     # Stop services
+make dev-reset    # Stop services and delete all data
+make dev-migrate  # Run alembic upgrade head
+```
+
+Requires Docker (on macOS: Colima or Docker Desktop).
+
 ## Development Commands
 
 ```bash
@@ -28,7 +42,7 @@ Personal media discovery platform — aggregates music data from external servic
 # Plain `uv sync` does NOT install them. Always use --all-extras.
 uv sync --all-extras
 
-# Run the app locally
+# Run the app locally (requires PG + Redis running, see Local Development above)
 uv run uvicorn resonance.app:create_app --factory --reload
 
 # Run tests

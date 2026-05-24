@@ -9,3 +9,4 @@ dist/
 .claude/
 .vscode/
 .gstack/
+data/
