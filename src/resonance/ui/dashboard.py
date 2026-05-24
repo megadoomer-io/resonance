@@ -19,10 +19,34 @@ import resonance.ui.common as common
 
 router = fastapi.APIRouter(tags=["ui"])
 
+# Services that support OAuth login (auto-redirect targets).
+_AUTH_SERVICES = frozenset({"spotify", "listenbrainz", "lastfm"})
+
 
 @router.get("/login", response_class=fastapi.responses.HTMLResponse)
-async def login(request: fastapi.Request) -> fastapi.responses.HTMLResponse:
-    """Render the login page."""
+async def login(
+    request: fastapi.Request,
+    prompt: str | None = None,
+) -> fastapi.responses.Response:
+    """Render the login page, or auto-redirect to the last auth service.
+
+    If the user already has a valid session, redirect straight to the
+    dashboard.  If a ``last_auth_service`` cookie is set (and
+    ``prompt`` is not ``"select"``), redirect to that service's OAuth
+    flow so expired sessions re-authenticate automatically.
+    """
+    # Already logged in — skip login page entirely.
+    if request.state.session.get("user_id"):
+        return fastapi.responses.RedirectResponse(url="/", status_code=307)
+
+    # Auto-login unless the user explicitly asked to pick a service.
+    if prompt != "select":
+        last_service = request.cookies.get("last_auth_service")
+        if last_service and last_service in _AUTH_SERVICES:
+            return fastapi.responses.RedirectResponse(
+                url=f"/api/v1/auth/{last_service}", status_code=307
+            )
+
     return common.templates.TemplateResponse(request, "login.html")
 
 

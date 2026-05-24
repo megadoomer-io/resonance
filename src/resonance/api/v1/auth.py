@@ -297,7 +297,15 @@ async def auth_callback(
     session["oauth_state"] = None
     session["oauth_service"] = None
 
-    return fastapi_responses.RedirectResponse(url="/", status_code=307)
+    response = fastapi_responses.RedirectResponse(url="/", status_code=307)
+    response.set_cookie(
+        key="last_auth_service",
+        value=service,
+        max_age=86400 * 365,  # 1 year
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 @router.post(
@@ -315,4 +323,6 @@ async def logout(
     """Clear the session and log the user out."""
     session.clear()
     # 303 See Other — browser follows redirect with GET (not POST)
-    return fastapi_responses.RedirectResponse(url="/login", status_code=303)
+    response = fastapi_responses.RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie("last_auth_service")
+    return response

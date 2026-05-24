@@ -38,7 +38,9 @@ async def account_page(
 
     if user is None:
         request.state.session.clear()
-        return fastapi.responses.RedirectResponse(url="/login", status_code=307)
+        return fastapi.responses.RedirectResponse(
+            url="/login?prompt=select", status_code=307
+        )
 
     connections_result = await db.execute(
         sa.select(user_models.ServiceConnection).where(
