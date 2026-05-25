@@ -34,17 +34,21 @@ async def upsert_venue(
     Returns:
         The existing or newly created Venue.
     """
+    norm_state = normalize_module.normalize_state(venue_data.state or "")
+    norm_country = normalize_module.normalize_country(venue_data.country or "")
+
     stmt = sa.select(concert_models.Venue).where(
         sa.func.lower(concert_models.Venue.name) == (venue_data.name or "").lower(),
         sa.func.lower(concert_models.Venue.city) == (venue_data.city or "").lower(),
-        sa.func.lower(concert_models.Venue.state) == (venue_data.state or "").lower(),
-        sa.func.lower(concert_models.Venue.country)
-        == (venue_data.country or "").lower(),
     )
     result = await session.execute(stmt)
-    existing = result.scalar_one_or_none()
-    if existing is not None:
-        return existing
+    for existing in result.scalars().all():
+        if (
+            normalize_module.normalize_state(existing.state or "") == norm_state
+            and normalize_module.normalize_country(existing.country or "")
+            == norm_country
+        ):
+            return existing
 
     venue = concert_models.Venue(
         id=uuid.uuid4(),
@@ -331,8 +335,8 @@ async def resolve_venue_candidate(
 
     norm_name = normalize_module.normalize_name(candidate.name)
     norm_city = normalize_module.normalize_name(candidate.city or "")
-    norm_state = normalize_module.normalize_name(candidate.state or "")
-    norm_country = normalize_module.normalize_name(candidate.country or "")
+    norm_state = normalize_module.normalize_state(candidate.state or "")
+    norm_country = normalize_module.normalize_country(candidate.country or "")
 
     venues_result = await session.execute(
         sa.select(concert_models.Venue).where(
@@ -344,8 +348,8 @@ async def resolve_venue_candidate(
     for venue in potential_matches:
         if (
             normalize_module.normalize_name(venue.name) == norm_name
-            and normalize_module.normalize_name(venue.state or "") == norm_state
-            and normalize_module.normalize_name(venue.country or "") == norm_country
+            and normalize_module.normalize_state(venue.state or "") == norm_state
+            and normalize_module.normalize_country(venue.country or "") == norm_country
         ):
             if await _is_excluded(session, "venue", venue.id, candidate):
                 continue

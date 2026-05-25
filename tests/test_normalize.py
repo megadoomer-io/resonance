@@ -91,3 +91,143 @@ class TestNamesMatch:
 
     def test_empty_vs_nonempty(self) -> None:
         assert not normalize_module.names_match("", "Iron Maiden")
+
+
+class TestNormalizeState:
+    def test_abbreviation_expands(self) -> None:
+        assert normalize_module.normalize_state("CA") == "california"
+
+    def test_full_name_lowered(self) -> None:
+        assert normalize_module.normalize_state("California") == "california"
+
+    def test_case_insensitive(self) -> None:
+        assert normalize_module.normalize_state("ca") == "california"
+        assert normalize_module.normalize_state("Ca") == "california"
+
+    def test_all_50_states(self) -> None:
+        expected = {
+            "AL": "alabama",
+            "AK": "alaska",
+            "AZ": "arizona",
+            "AR": "arkansas",
+            "CA": "california",
+            "CO": "colorado",
+            "CT": "connecticut",
+            "DE": "delaware",
+            "FL": "florida",
+            "GA": "georgia",
+            "HI": "hawaii",
+            "ID": "idaho",
+            "IL": "illinois",
+            "IN": "indiana",
+            "IA": "iowa",
+            "KS": "kansas",
+            "KY": "kentucky",
+            "LA": "louisiana",
+            "ME": "maine",
+            "MD": "maryland",
+            "MA": "massachusetts",
+            "MI": "michigan",
+            "MN": "minnesota",
+            "MS": "mississippi",
+            "MO": "missouri",
+            "MT": "montana",
+            "NE": "nebraska",
+            "NV": "nevada",
+            "NH": "new hampshire",
+            "NJ": "new jersey",
+            "NM": "new mexico",
+            "NY": "new york",
+            "NC": "north carolina",
+            "ND": "north dakota",
+            "OH": "ohio",
+            "OK": "oklahoma",
+            "OR": "oregon",
+            "PA": "pennsylvania",
+            "RI": "rhode island",
+            "SC": "south carolina",
+            "SD": "south dakota",
+            "TN": "tennessee",
+            "TX": "texas",
+            "UT": "utah",
+            "VT": "vermont",
+            "VA": "virginia",
+            "WA": "washington",
+            "WV": "west virginia",
+            "WI": "wisconsin",
+            "WY": "wyoming",
+        }
+        for abbr, full in expected.items():
+            assert normalize_module.normalize_state(abbr) == full
+
+    def test_dc_and_territories(self) -> None:
+        assert normalize_module.normalize_state("DC") == "district of columbia"
+        assert normalize_module.normalize_state("PR") == "puerto rico"
+        assert normalize_module.normalize_state("GU") == "guam"
+
+    def test_whitespace_stripped(self) -> None:
+        assert normalize_module.normalize_state("  CA  ") == "california"
+
+    def test_unknown_passthrough(self) -> None:
+        assert normalize_module.normalize_state("Ontario") == "ontario"
+        assert normalize_module.normalize_state("Bavaria") == "bavaria"
+
+    def test_empty(self) -> None:
+        assert normalize_module.normalize_state("") == ""
+
+
+class TestNormalizeCountry:
+    def test_code_expands(self) -> None:
+        assert normalize_module.normalize_country("US") == "united states"
+
+    def test_full_name_lowered(self) -> None:
+        assert normalize_module.normalize_country("United States") == "united states"
+
+    def test_case_insensitive(self) -> None:
+        assert normalize_module.normalize_country("us") == "united states"
+        assert normalize_module.normalize_country("Us") == "united states"
+
+    def test_uk_alias(self) -> None:
+        assert normalize_module.normalize_country("UK") == "united kingdom"
+        assert normalize_module.normalize_country("GB") == "united kingdom"
+
+    def test_common_countries(self) -> None:
+        assert normalize_module.normalize_country("DE") == "germany"
+        assert normalize_module.normalize_country("FR") == "france"
+        assert normalize_module.normalize_country("JP") == "japan"
+        assert normalize_module.normalize_country("AU") == "australia"
+        assert normalize_module.normalize_country("BR") == "brazil"
+        assert normalize_module.normalize_country("MX") == "mexico"
+
+    def test_whitespace_stripped(self) -> None:
+        assert normalize_module.normalize_country("  US  ") == "united states"
+
+    def test_unknown_passthrough(self) -> None:
+        assert normalize_module.normalize_country("Wakanda") == "wakanda"
+
+    def test_empty(self) -> None:
+        assert normalize_module.normalize_country("") == ""
+
+
+class TestLocationsMatch:
+    def test_abbreviation_vs_full(self) -> None:
+        assert normalize_module.locations_match(
+            "CA", "US", "California", "United States"
+        )
+
+    def test_same_abbreviations(self) -> None:
+        assert normalize_module.locations_match("CA", "US", "CA", "US")
+
+    def test_same_full_names(self) -> None:
+        assert normalize_module.locations_match(
+            "California", "United States", "California", "United States"
+        )
+
+    def test_different_states(self) -> None:
+        assert not normalize_module.locations_match("CA", "US", "NY", "US")
+
+    def test_different_countries(self) -> None:
+        assert not normalize_module.locations_match("", "US", "", "GB")
+
+    def test_empty_values(self) -> None:
+        assert normalize_module.locations_match("", "", "", "")
