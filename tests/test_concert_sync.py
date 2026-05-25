@@ -58,9 +58,11 @@ class TestUpsertVenue:
         """Creates a new venue when no match exists."""
         session = AsyncMock()
 
-        no_result = MagicMock()
-        no_result.scalar_one_or_none.return_value = None
-        session.execute.return_value = no_result
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = []
+        result_mock = MagicMock()
+        result_mock.scalars.return_value = scalars_mock
+        session.execute.return_value = result_mock
         session.add = MagicMock()
 
         venue_data = _make_venue_data()
@@ -81,9 +83,13 @@ class TestUpsertVenue:
 
         existing_venue = MagicMock()
         existing_venue.name = "The Fillmore"
-        found_result = MagicMock()
-        found_result.scalar_one_or_none.return_value = existing_venue
-        session.execute.return_value = found_result
+        existing_venue.state = "CA"
+        existing_venue.country = "US"
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = [existing_venue]
+        result_mock = MagicMock()
+        result_mock.scalars.return_value = scalars_mock
+        session.execute.return_value = result_mock
 
         venue_data = _make_venue_data()
         venue = await sync_module.upsert_venue(session, venue_data)
@@ -96,9 +102,11 @@ class TestUpsertVenue:
         """Creates venue with None for city/state/country."""
         session = AsyncMock()
 
-        no_result = MagicMock()
-        no_result.scalar_one_or_none.return_value = None
-        session.execute.return_value = no_result
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = []
+        result_mock = MagicMock()
+        result_mock.scalars.return_value = scalars_mock
+        session.execute.return_value = result_mock
         session.add = MagicMock()
 
         venue_data = _make_venue_data(city=None, state=None, country=None)
