@@ -615,6 +615,162 @@ async def reject_candidate_ui(
     )
 
 
+@router.post(
+    "/events/{event_id}/candidates/{candidate_id}/unreject", response_model=None
+)
+async def unreject_candidate_ui(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> fastapi.responses.HTMLResponse:
+    """Move a rejected candidate back to pending status."""
+    candidate = (
+        await db.execute(
+            sa.select(concert_models.EventArtistCandidate).where(
+                concert_models.EventArtistCandidate.id == candidate_id,
+                concert_models.EventArtistCandidate.event_id == event_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if candidate is None:
+        raise fastapi.HTTPException(status_code=404, detail="Candidate not found")
+
+    if candidate.status != types_module.CandidateStatus.REJECTED:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Only rejected candidates can be unrejected"
+        )
+
+    candidate.status = types_module.CandidateStatus.PENDING
+    await db.commit()
+
+    event = (
+        (
+            await db.execute(
+                sa.select(concert_models.Event)
+                .where(concert_models.Event.id == event_id)
+                .options(
+                    sa_orm.joinedload(concert_models.Event.artist_candidates),
+                )
+            )
+        )
+        .unique()
+        .scalar_one()
+    )
+    matched_artist_ids = [
+        c.matched_artist_id
+        for c in event.artist_candidates
+        if c.matched_artist_id is not None
+    ]
+    matched_artists: dict[uuid.UUID, music_models.Artist] = {}
+    if matched_artist_ids:
+        ma_result = await db.execute(
+            sa.select(music_models.Artist).where(
+                music_models.Artist.id.in_(matched_artist_ids)
+            )
+        )
+        for a in ma_result.scalars().all():
+            matched_artists[a.id] = a
+
+    return common.templates.TemplateResponse(
+        request,
+        "partials/event_candidates.html",
+        {"event": event, "matched_artists": matched_artists},
+    )
+
+
+@router.post(
+    "/events/{event_id}/candidates/{candidate_id}/unaccept", response_model=None
+)
+async def unaccept_candidate_ui(
+    request: fastapi.Request,
+    event_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> fastapi.responses.HTMLResponse:
+    """Revert an accepted candidate: remove the EventArtist and return to pending."""
+    candidate = (
+        await db.execute(
+            sa.select(concert_models.EventArtistCandidate).where(
+                concert_models.EventArtistCandidate.id == candidate_id,
+                concert_models.EventArtistCandidate.event_id == event_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if candidate is None:
+        raise fastapi.HTTPException(status_code=404, detail="Candidate not found")
+
+    accepted_statuses = {
+        types_module.CandidateStatus.ACCEPTED,
+        types_module.CandidateStatus.AUTO_ACCEPTED,
+    }
+    if candidate.status not in accepted_statuses:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Only accepted candidates can be unaccepted"
+        )
+
+    # Remove the corresponding EventArtist if one exists
+    if candidate.matched_artist_id is not None:
+        ea = (
+            await db.execute(
+                sa.select(concert_models.EventArtist).where(
+                    concert_models.EventArtist.event_id == event_id,
+                    concert_models.EventArtist.artist_id == candidate.matched_artist_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if ea is not None:
+            await db.delete(ea)
+
+    candidate.status = types_module.CandidateStatus.PENDING
+    await db.flush()
+
+    # Normalize positions on remaining artists
+    event = await _load_event_with_artists(db, event_id)
+    _normalize_positions(list(event.artists))
+    await db.commit()
+
+    # Reload with candidates for the response
+    event = (
+        (
+            await db.execute(
+                sa.select(concert_models.Event)
+                .where(concert_models.Event.id == event_id)
+                .options(
+                    sa_orm.joinedload(concert_models.Event.artist_candidates),
+                )
+            )
+        )
+        .unique()
+        .scalar_one()
+    )
+    matched_artist_ids = [
+        c.matched_artist_id
+        for c in event.artist_candidates
+        if c.matched_artist_id is not None
+    ]
+    matched_artists: dict[uuid.UUID, music_models.Artist] = {}
+    if matched_artist_ids:
+        ma_result = await db.execute(
+            sa.select(music_models.Artist).where(
+                music_models.Artist.id.in_(matched_artist_ids)
+            )
+        )
+        for a in ma_result.scalars().all():
+            matched_artists[a.id] = a
+
+    response = common.templates.TemplateResponse(
+        request,
+        "partials/event_candidates.html",
+        {"event": event, "matched_artists": matched_artists},
+    )
+    return htmx.trigger_event(response, "artistsChanged")
+
+
 # ---------------------------------------------------------------------------
 # Add artist to event (from search)
 # ---------------------------------------------------------------------------

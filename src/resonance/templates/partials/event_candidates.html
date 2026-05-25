@@ -50,12 +50,20 @@
             {"label": "Raw Name"},
             {"label": "Status"},
             {"label": "Confidence"},
+            {"label": "Actions"},
         ]
     ) %}
     <tr>
         <td>{{ candidate.raw_name }}</td>
         <td>{{ candidate.status.value }}</td>
         <td>{{ candidate.confidence_score }}%</td>
+        <td>
+            {% if candidate.status.value == "rejected" %}
+            {{ action_button("Reconsider", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/unreject", hx_target="#event-candidates", hx_swap="innerHTML", css_class="outline btn-sm") }}
+            {% elif candidate.status.value in ("accepted", "auto_accepted") %}
+            {{ action_button("Undo", "/events/" ~ event.id ~ "/candidates/" ~ candidate.id ~ "/unaccept", hx_target="#event-candidates", hx_swap="innerHTML", confirm_message="This will remove the artist from the event. Continue?", css_class="secondary outline btn-sm") }}
+            {% endif %}
+        </td>
     </tr>
     {% endcall %}
 </details>
