@@ -11,6 +11,7 @@ import fastapi.responses
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
+import structlog
 
 import resonance.concerts.sync as concert_sync
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -26,6 +27,8 @@ import resonance.ui.common as common
 import resonance.ui.filters as filters_module
 import resonance.ui.htmx as htmx
 import resonance.ui.view_filters as view_filters_module
+
+logger = structlog.get_logger(__name__)
 
 router = fastapi.APIRouter(tags=["ui"])
 
@@ -786,15 +789,24 @@ async def add_artist_to_event_ui(
     candidate_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
 ) -> fastapi.responses.HTMLResponse:
     """Create a candidate from artist search and return feedback partial."""
+    log = logger.bind(
+        user_id=str(user_id),
+        event_id=str(event_id),
+        artist_id=str(artist_id),
+        candidate_id=str(candidate_id) if candidate_id else None,
+    )
     artist = (
         await db.execute(
             sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
         )
     ).scalar_one_or_none()
     if artist is None:
+        log.warning("add_artist_to_event_not_found")
         return fastapi.responses.HTMLResponse(
             '<small style="color: var(--pico-del-color);">Artist not found</small>'
         )
+
+    log = log.bind(artist_name=artist.name)
 
     already_confirmed = (
         await db.execute(
@@ -819,6 +831,7 @@ async def add_artist_to_event_ui(
             target_candidate.status = types_module.CandidateStatus.ACCEPTED
 
     if already_confirmed is not None:
+        log.info("add_artist_to_event_already_confirmed")
         if candidate_id is not None and target_candidate is not None:
             await db.commit()
         event = (
@@ -892,6 +905,7 @@ async def add_artist_to_event_ui(
     add_event = await _load_event_with_artists(db, event_id)
     _normalize_positions(list(add_event.artists))
     await db.commit()
+    log.info("artist_linked_to_event")
 
     event = (
         (
@@ -1010,19 +1024,28 @@ async def artist_search_external_partial(
     registry = request.app.state.connector_registry
     lb = registry.get_base_connector(types_module.ServiceType.LISTENBRAINZ)
     query = q.strip()
+    log = logger.bind(user_id=str(user_id), query=query)
 
     results: list[dict[str, Any]] = []
     detected_service: str | None = None
 
     url_connector = None
     url_id: str | None = None
-    if query.startswith(("http://", "https://")):
+    is_url_search = query.startswith(("http://", "https://"))
+    if is_url_search:
         for connector in registry.all_base_connectors():
             parsed = connector.parse_url(query)
             if parsed is not None:
                 url_connector = connector
                 url_id = parsed
+                log.info(
+                    "artist_search_url_detected",
+                    service=connector.service_type.value,
+                    parsed_id=url_id,
+                )
                 break
+        if url_connector is None:
+            log.info("artist_search_url_no_match")
 
     if url_connector is not None and url_id is not None:
         detected_service = url_connector.service_type.value
@@ -1031,6 +1054,7 @@ async def artist_search_external_partial(
             mb_artist = await url_connector.get_artist_by_mbid(url_id)
             if mb_artist:
                 results = [mb_artist]
+                log.info("artist_search_url_result", name=mb_artist.get("name"))
         elif isinstance(url_connector, spotify_module.SpotifyConnector):
             conn_result = await db.execute(
                 sa.select(user_models.ServiceConnection).where(
@@ -1066,6 +1090,7 @@ async def artist_search_external_partial(
                             datetime.UTC
                         ) + datetime.timedelta(seconds=tok_resp.expires_in)
                     await db.commit()
+                    log.info("artist_search_token_refreshed", service="spotify")
                 artist_data = await url_connector.get_artist_by_id(token, url_id)
                 if artist_data:
                     results.append(
@@ -1081,11 +1106,14 @@ async def artist_search_external_partial(
                             "spotify_id": artist_data["spotify_id"],
                         }
                     )
+                    log.info("artist_search_url_result", name=artist_data["name"])
     elif len(query) < 2:
         return fastapi.responses.HTMLResponse("")
     elif lb:
+        log.info("artist_search_name_query", service="musicbrainz")
         mb_results = await lb.search_artists(query, limit=10)
         results = mb_results
+        already_imported_count = 0
         for r in mb_results:
             stmt = sa.select(music_models.Artist).where(
                 sa.or_(
@@ -1100,6 +1128,8 @@ async def artist_search_external_partial(
             r["already_imported"] = existing is not None
             r["local_artist_id"] = str(existing.id) if existing else None
             r["already_on_event"] = False
+            if existing is not None:
+                already_imported_count += 1
             if existing is not None and event_id is not None:
                 on_event = await db.execute(
                     sa.select(concert_models.EventArtist.id).where(
@@ -1109,6 +1139,11 @@ async def artist_search_external_partial(
                 )
                 r["already_on_event"] = on_event.scalar_one_or_none() is not None
         results = mb_results
+        log.info(
+            "artist_search_results",
+            result_count=len(results),
+            already_imported=already_imported_count,
+        )
 
     return common.templates.TemplateResponse(
         request,
@@ -1139,6 +1174,14 @@ async def artist_import_partial(
     candidate_id: Annotated[uuid.UUID | None, fastapi.Form()] = None,
 ) -> fastapi.responses.HTMLResponse:
     """Import an artist from external search and return a local result row."""
+    log = logger.bind(
+        user_id=str(user_id),
+        artist_name=name,
+        mbid=mbid or None,
+        spotify_id=spotify_id or None,
+        event_id=str(event_id) if event_id else None,
+        candidate_id=str(candidate_id) if candidate_id else None,
+    )
     artist: music_models.Artist | None = None
 
     dedup_conditions: list[sa.ColumnElement[bool]] = []
@@ -1176,6 +1219,9 @@ async def artist_import_partial(
         )
         db.add(artist)
         await db.flush()
+        log.info("artist_imported", artist_id=str(artist.id), created=True)
+    else:
+        log.info("artist_import_existing", artist_id=str(artist.id))
 
     if event_id:
         already = (
@@ -1187,7 +1233,12 @@ async def artist_import_partial(
             )
         ).scalar_one_or_none()
 
-        if already is None:
+        if already is not None:
+            log.info(
+                "artist_add_to_event_already_confirmed",
+                artist_id=str(artist.id),
+            )
+        else:
             if candidate_id:
                 candidate = (
                     await db.execute(
@@ -1201,6 +1252,11 @@ async def artist_import_partial(
                     candidate.matched_artist_id = artist.id
                     candidate.confidence_score = 100
                     candidate.status = types_module.CandidateStatus.ACCEPTED
+                    log.info(
+                        "artist_candidate_resolved",
+                        candidate_id=str(candidate_id),
+                        artist_id=str(artist.id),
+                    )
 
             if not candidate_id:
                 existing_candidate = (
@@ -1231,6 +1287,10 @@ async def artist_import_partial(
             # Normalize positions to ensure sequential ordering after insert
             import_event = await _load_event_with_artists(db, event_id)
             _normalize_positions(list(import_event.artists))
+            log.info(
+                "artist_added_to_event",
+                artist_id=str(artist.id),
+            )
 
     await db.commit()
 
@@ -1248,6 +1308,10 @@ async def artist_enrich_partial(
     event_id: uuid.UUID | None = None,
 ) -> fastapi.responses.HTMLResponse:
     """Lazily enrich an artist with MusicBrainz metadata."""
+    log = logger.bind(
+        artist_id=str(artist_id),
+        event_id=str(event_id) if event_id else None,
+    )
     result = await db.execute(
         sa.select(music_models.Artist).where(music_models.Artist.id == artist_id)
     )
@@ -1256,8 +1320,13 @@ async def artist_enrich_partial(
         return fastapi.responses.HTMLResponse("")
 
     mbid = artist_utils.get_mbid(artist.service_links)
+    log = log.bind(artist_name=artist.name, mbid=mbid)
 
     if not mbid or artist.disambiguation is not None:
+        log.debug(
+            "artist_enrich_skipped",
+            reason="no_mbid" if not mbid else "already_enriched",
+        )
         return common.templates.TemplateResponse(
             request,
             "partials/artist_row.html",
@@ -1272,6 +1341,11 @@ async def artist_enrich_partial(
         requested_at = datetime.datetime.fromisoformat(requested_at_str)
         elapsed = (datetime.datetime.now(datetime.UTC) - requested_at).total_seconds()
         if elapsed < _ENRICHMENT_STALENESS_SECONDS:
+            log.debug(
+                "artist_enrich_skipped",
+                reason="too_recent",
+                elapsed_seconds=round(elapsed),
+            )
             return common.templates.TemplateResponse(
                 request,
                 "partials/artist_row.html",
@@ -1301,8 +1375,15 @@ async def artist_enrich_partial(
             artist.area = mb_artist.get("area") or None
             artist.begin_year = mb_artist.get("begin_year")
             artist.end_year = mb_artist.get("end_year")
+            log.info(
+                "artist_enriched",
+                disambiguation=artist.disambiguation,
+                artist_type=artist.artist_type,
+                area=artist.area,
+            )
         else:
             artist.disambiguation = ""
+            log.warning("artist_enrich_no_data")
         await db.commit()
 
     return common.templates.TemplateResponse(

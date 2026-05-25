@@ -226,7 +226,13 @@ class ListenBrainzConnector(base_module.BaseConnector):
             f"{self._MUSICBRAINZ_API}/artist/",
             params={"query": query, "fmt": "json", "limit": limit},
         )
-        return [self._parse_mb_artist(a) for a in response.json().get("artists", [])]
+        results = [self._parse_mb_artist(a) for a in response.json().get("artists", [])]
+        logger.info(
+            "musicbrainz_artist_search",
+            query=query,
+            result_count=len(results),
+        )
+        return results
 
     async def get_artist_by_mbid(self, mbid: str) -> dict[str, Any] | None:
         """Fetch a single artist from MusicBrainz by MBID.
@@ -244,8 +250,15 @@ class ListenBrainzConnector(base_module.BaseConnector):
                 params={"fmt": "json"},
             )
         except httpx.HTTPStatusError:
+            logger.warning("musicbrainz_artist_lookup_failed", mbid=mbid)
             return None
-        return self._parse_mb_artist(response.json())
+        result = self._parse_mb_artist(response.json())
+        logger.info(
+            "musicbrainz_artist_lookup",
+            mbid=mbid,
+            name=result.get("name"),
+        )
+        return result
 
     @staticmethod
     def _parse_mb_artist(data: dict[str, Any]) -> dict[str, Any]:

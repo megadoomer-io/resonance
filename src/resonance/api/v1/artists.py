@@ -138,16 +138,24 @@ async def search_external(
 
     registry = request.app.state.connector_registry
     results: list[dict[str, Any]] = []
+    log = logger.bind(user_id=str(user_id))
 
     if url:
+        log.info("artist_search_external_by_url", url=url)
         results = await _search_by_url(url, registry, db, user_id, request)
     else:
         assert q is not None
         service_list = [s.strip() for s in services.split(",")]
+        log.info(
+            "artist_search_external_by_query",
+            query=q,
+            services=service_list,
+        )
         results = await _search_by_query(
             q, service_list, registry, db, user_id, request
         )
 
+    log.info("artist_search_external_complete", result_count=len(results))
     return results
 
 
@@ -180,6 +188,12 @@ async def _search_by_url(
         artist_id_str = connector.parse_url(url)
         if artist_id_str is None:
             continue
+
+        logger.info(
+            "artist_url_detected",
+            service=connector.service_type.value,
+            parsed_id=artist_id_str,
+        )
 
         if connector.service_type == types_module.ServiceType.LISTENBRAINZ:
             # artist_id_str is an MBID
@@ -387,9 +401,15 @@ async def import_artist(
     Returns:
         The created or existing artist as a summary dict.
     """
+    log = logger.bind(
+        user_id=str(user_id),
+        artist_name=body.name,
+        mbid=body.mbid,
+    )
     # Check for existing artist by MBID
     existing = await _find_local_artist_by_mbid(db, body.mbid)
     if existing is not None:
+        log.info("artist_import_existing", artist_id=str(existing.id))
         return _format_artist_summary(existing)
 
     # Build service_links
@@ -412,7 +432,7 @@ async def import_artist(
     await db.flush()
     await db.commit()
 
-    logger.info("artist_imported", artist_id=str(artist.id), mbid=body.mbid)
+    log.info("artist_imported", artist_id=str(artist.id), created=True)
     return _format_artist_summary(artist)
 
 

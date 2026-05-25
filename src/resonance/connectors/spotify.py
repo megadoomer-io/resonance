@@ -379,8 +379,14 @@ class SpotifyConnector(base_module.BaseConnector):
                 high_priority=True,
             )
         except httpx.HTTPStatusError:
+            logger.warning("spotify_artist_lookup_failed", artist_id=artist_id)
             return None
         data: dict[str, Any] = response.json()
+        logger.info(
+            "spotify_artist_lookup",
+            artist_id=data["id"],
+            name=data["name"],
+        )
         return {"spotify_id": data["id"], "name": data["name"]}
 
     async def search_artists(
@@ -416,4 +422,9 @@ class SpotifyConnector(base_module.BaseConnector):
                     "name": artist["name"],
                 }
             )
+        logger.info(
+            "spotify_artist_search",
+            query=query,
+            result_count=len(results),
+        )
         return results
