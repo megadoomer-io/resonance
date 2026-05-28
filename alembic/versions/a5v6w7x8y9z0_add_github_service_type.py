@@ -19,10 +19,6 @@ depends_on: str | None = None
 _TABLES_AND_COLUMNS = [
     ("listening_events", "source_service"),
     ("events", "source_service"),
-    ("event_artist_candidates", "source_service"),
-    ("event_candidates", "source_service"),
-    ("entity_exclusions", "source_service"),
-    ("venue_candidates", "source_service"),
     ("user_event_attendance", "source_service"),
     ("user_artist_relations", "source_service"),
     ("user_track_relations", "source_service"),
