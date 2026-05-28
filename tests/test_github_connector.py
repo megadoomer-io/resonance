@@ -102,7 +102,7 @@ class TestGetCurrentUser:
         with patch.object(c, "_request", return_value=mock_response):
             result = await c.get_current_user("access-token")
 
-        assert result["id"] == "dex-user-abc"
+        assert result["id"] == "miked"
         assert result["display_name"] == "Mike D"
 
     @pytest.mark.anyio

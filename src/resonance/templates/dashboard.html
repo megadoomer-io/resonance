@@ -65,7 +65,7 @@
                         hx-swap="innerHTML"
                     ><i data-lucide="upload" class="icon-inline"></i> Upload CSV</button>
                     <div id="ca-upload-{{ conn.id }}"></div>
-                    {% else %}
+                    {% elif conn.service_type in syncable_services %}
                     <button
                         hx-post="/api/v1/sync/connection/{{ conn.id }}"
                         hx-swap="none"

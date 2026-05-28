@@ -149,6 +149,13 @@ async def dashboard(
         for active_task in active_result.scalars().all():
             active_syncs[str(active_task.service_connection_id)] = active_task
 
+    registry: registry_module.ConnectorRegistry = request.app.state.connector_registry
+    syncable_services = {
+        c.service_type
+        for c in registry.all()
+        if c.connection_config().sync_function is not None
+    }
+
     ctx = common.base_context(request)
     ctx.update(
         artist_count=artist_count,
@@ -157,6 +164,7 @@ async def dashboard(
         connections=connections,
         latest_sync=latest_sync,
         active_syncs=active_syncs,
+        syncable_services=syncable_services,
     )
 
     return common.templates.TemplateResponse(request, "dashboard.html", ctx)

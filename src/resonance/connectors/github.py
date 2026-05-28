@@ -95,7 +95,7 @@ class GitHubConnector(base_module.BaseConnector):
         data = await self._fetch_userinfo(access_token)
         self._last_userinfo = data
         return {
-            "id": str(data.get("sub", "")),
+            "id": str(data.get("preferred_username") or data.get("sub", "")),
             "display_name": str(data.get("name") or data.get("preferred_username", "")),
         }
 
