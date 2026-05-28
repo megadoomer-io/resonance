@@ -32,7 +32,7 @@ class TestListenBrainzConnectorProperties:
         connector = listenbrainz_module.ListenBrainzConnector(settings=_make_settings())
         expected = frozenset(
             {
-                base_module.ConnectorCapability.AUTHENTICATION,
+                base_module.ConnectorCapability.AUTHN,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.TRACK_DISCOVERY,
             }

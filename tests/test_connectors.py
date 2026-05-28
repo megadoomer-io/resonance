@@ -46,7 +46,7 @@ class TestConnectorCapability:
         assert base_module.ConnectorCapability.LISTENING_HISTORY == "listening_history"
 
     def test_authentication_value(self) -> None:
-        assert base_module.ConnectorCapability.AUTHENTICATION == "authentication"
+        assert base_module.ConnectorCapability.AUTHN == "authn"
 
     def test_all_capabilities_are_strings(self) -> None:
         for cap in base_module.ConnectorCapability:

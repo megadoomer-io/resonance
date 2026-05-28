@@ -184,7 +184,7 @@ def _make_lb_connector_mock() -> AsyncMock:
     """Create a mock ListenBrainz connector with get_artist_by_mbid."""
     mock = AsyncMock(spec=base_module.BaseConnector)
     mock.service_type = types_module.ServiceType.LISTENBRAINZ
-    mock.capabilities = frozenset({base_module.ConnectorCapability.AUTHENTICATION})
+    mock.capabilities = frozenset({base_module.ConnectorCapability.AUTHN})
     mock.parse_url = AsyncMock(return_value=None)
     mock.search_artists = AsyncMock(return_value=[])
     mock.get_artist_by_mbid = AsyncMock(return_value=None)

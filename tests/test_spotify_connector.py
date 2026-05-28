@@ -32,7 +32,7 @@ class TestSpotifyConnectorProperties:
         connector = spotify_module.SpotifyConnector(settings=_make_settings())
         expected = frozenset(
             {
-                base_module.ConnectorCapability.AUTHENTICATION,
+                base_module.ConnectorCapability.AUTHN,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.FOLLOWS,
                 base_module.ConnectorCapability.TRACK_RATINGS,

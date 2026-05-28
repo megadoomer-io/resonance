@@ -73,7 +73,7 @@ def _make_mock_spotify_connector() -> MagicMock:
     """Create a mock Spotify connector with auth capability."""
     connector = MagicMock(spec=spotify_module.SpotifyConnector)
     connector.service_type = types_module.ServiceType.SPOTIFY
-    connector.capabilities = frozenset({base_module.ConnectorCapability.AUTHENTICATION})
+    connector.capabilities = frozenset({base_module.ConnectorCapability.AUTHN})
     connector.has_capability = MagicMock(
         side_effect=lambda cap: cap in connector.capabilities
     )
@@ -201,7 +201,7 @@ class TestAuthInitiate:
         assert response.status_code == 404
 
     async def test_service_without_auth_capability_returns_400(self) -> None:
-        """A connector without AUTHENTICATION capability should return 400."""
+        """A connector without AUTHN capability should return 400."""
         connector = MagicMock(spec=base_module.BaseConnector)
         connector.service_type = types_module.ServiceType.LASTFM
         connector.capabilities = frozenset(
