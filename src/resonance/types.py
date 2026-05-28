@@ -15,6 +15,7 @@ class ServiceType(enum.StrEnum):
     SOUNDCLOUD = "soundcloud"
     ICAL = "ical"
     CONCERT_ARCHIVES = "concert_archives"
+    GITHUB = "github"
     MANUAL = "manual"
     TEST = "test"
 

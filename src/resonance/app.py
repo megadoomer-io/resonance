@@ -16,6 +16,7 @@ import structlog
 import resonance.api.v1 as api_v1_module
 import resonance.config as config_module
 import resonance.connectors.concert_archives as concert_archives_module
+import resonance.connectors.github as github_module
 import resonance.connectors.ical as ical_module
 import resonance.connectors.lastfm as lastfm_module
 import resonance.connectors.listenbrainz as listenbrainz_module
@@ -31,6 +32,7 @@ import resonance.types as types_module
 import resonance.ui.account as ui_account_module
 import resonance.ui.admin as ui_admin_module
 import resonance.ui.artists as ui_artists_module
+import resonance.ui.common as ui_common_module
 import resonance.ui.dashboard as ui_dashboard_module
 import resonance.ui.events as ui_events_module
 import resonance.ui.playground as ui_playground_module
@@ -136,7 +138,10 @@ def create_app() -> fastapi.FastAPI:
     connector_registry.register(songkick_module.SongkickConnector())
     connector_registry.register(ical_module.ICalConnector())
     connector_registry.register(concert_archives_module.ConcertArchivesConnector())
+    if settings.dex_client_id:
+        connector_registry.register(github_module.GitHubConnector(settings=settings))
     application.state.connector_registry = connector_registry
+    ui_common_module.set_connector_registry(connector_registry)
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:

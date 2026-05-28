@@ -24,9 +24,9 @@ logger = structlog.get_logger()
 class ConnectionConfig:
     """Declares how a connector authenticates and syncs."""
 
-    auth_type: str  # "oauth", "username", "url"
-    sync_function: str  # arq job name
-    sync_style: str  # "incremental" or "full"
+    auth_type: str  # "oauth", "username", "url", "file_upload"
+    sync_function: str | None = None  # arq job name, None for identity-only connectors
+    sync_style: str | None = None  # "incremental" or "full", None for identity-only
     derive_urls: Callable[[str], list[str]] | None = None
 
 
@@ -45,7 +45,8 @@ class RateLimitExceededError(Exception):
 class ConnectorCapability(enum.StrEnum):
     """Capabilities that a connector can declare support for."""
 
-    AUTHENTICATION = "authentication"
+    AUTHN = "authn"
+    AUTHZ = "authz"
     LISTENING_HISTORY = "listening_history"
     RECOMMENDATIONS = "recommendations"
     PLAYLIST_WRITE = "playlist_write"
@@ -114,6 +115,9 @@ class BaseConnector(abc.ABC):
 
     service_type: types_module.ServiceType
     capabilities: frozenset[ConnectorCapability]
+    display_name: str = ""
+    icon: str = "link"
+    color: str = ""
 
     # Subclasses must set these
     _http_client: httpx.AsyncClient | None
@@ -167,6 +171,14 @@ class BaseConnector(abc.ABC):
     async def get_current_user(self, access_token: str) -> dict[str, str]:
         """Get the current user's profile. Returns dict with 'id' and 'display_name'."""
         ...
+
+    async def get_role(self, access_token: str) -> types_module.UserRole | None:
+        """Derive user role from this connector's authorization source.
+
+        Only connectors with AUTHZ capability should override this.
+        Returns None by default (no role determination).
+        """
+        return None
 
     # Transient errors that should be retried with exponential backoff.
     _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (

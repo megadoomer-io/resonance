@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any
 import fastapi
 import fastapi.templating
 
+import resonance.connectors.registry as registry_module
+import resonance.types as types_module
+
 if TYPE_CHECKING:
     import datetime
     from collections.abc import Sequence
@@ -47,69 +50,50 @@ def _localtime(
 templates.env.filters["localtime"] = _localtime
 
 # ---------------------------------------------------------------------------
-# Service display-name filter
+# Service display metadata filters (backed by connector registry)
 # ---------------------------------------------------------------------------
 
-SERVICE_DISPLAY_NAMES: dict[str, str] = {
-    "spotify": "Spotify",
-    "lastfm": "Last.fm",
-    "listenbrainz": "ListenBrainz",
-    "songkick": "Songkick",
-    "bandsintown": "Bandsintown",
-    "bandcamp": "Bandcamp",
-    "soundcloud": "SoundCloud",
-    "ical": "iCal",
-    "concert_archives": "Concert Archives",
-    "manual": "Manual",
-    "test": "Test",
-}
+_registry: registry_module.ConnectorRegistry | None = None
+
+
+def set_connector_registry(registry: registry_module.ConnectorRegistry) -> None:
+    """Set the connector registry for template filter lookups."""
+    global _registry
+    _registry = registry
 
 
 def _service_name(value: str) -> str:
     """Return the human-friendly display name for a service type value."""
-    return SERVICE_DISPLAY_NAMES.get(value, value.replace("_", " ").title())
-
-
-templates.env.filters["service_name"] = _service_name
-
-# ---------------------------------------------------------------------------
-# Service icon filter (Lucide icon names)
-# ---------------------------------------------------------------------------
-
-SERVICE_ICONS: dict[str, str] = {
-    "spotify": "music",
-    "lastfm": "radio",
-    "listenbrainz": "headphones",
-    "songkick": "ticket",
-    "bandsintown": "map-pin",
-    "bandcamp": "disc",
-    "soundcloud": "cloud",
-    "ical": "calendar",
-    "concert_archives": "archive",
-    "manual": "pen-tool",
-    "test": "flask-conical",
-}
+    if _registry is not None:
+        try:
+            return _registry.display_name(types_module.ServiceType(value))
+        except ValueError:
+            pass
+    return value.replace("_", " ").title()
 
 
 def _service_icon(value: str) -> str:
     """Return the Lucide icon name for a service type value."""
-    return SERVICE_ICONS.get(value, "link")
-
-
-templates.env.filters["service_icon"] = _service_icon
-
-SERVICE_COLORS: dict[str, str] = {
-    "spotify": "var(--color-spotify)",
-    "lastfm": "var(--color-lastfm)",
-    "listenbrainz": "var(--color-listenbrainz)",
-}
+    if _registry is not None:
+        try:
+            return _registry.icon(types_module.ServiceType(value))
+        except ValueError:
+            pass
+    return "link"
 
 
 def _service_color(value: str) -> str:
     """Return the CSS color value for a service, or empty string if none."""
-    return SERVICE_COLORS.get(value, "")
+    if _registry is not None:
+        try:
+            return _registry.color(types_module.ServiceType(value))
+        except ValueError:
+            pass
+    return ""
 
 
+templates.env.filters["service_name"] = _service_name
+templates.env.filters["service_icon"] = _service_icon
 templates.env.filters["service_color"] = _service_color
 
 
@@ -134,6 +118,9 @@ async def require_user(request: fastapi.Request) -> uuid.UUID:
 async def require_admin(request: fastapi.Request) -> uuid.UUID:
     """Return admin/owner user_id, or redirect/forbid.
 
+    Checks effective role (view-as aware): if view_as is set in the
+    session, uses that instead of the actual role.
+
     Use as a FastAPI dependency::
 
         user_id: Annotated[uuid.UUID, Depends(require_admin)]
@@ -141,10 +128,24 @@ async def require_admin(request: fastapi.Request) -> uuid.UUID:
     user_id = request.state.session.get("user_id")
     if not user_id:
         raise fastapi.HTTPException(status_code=307, headers={"Location": "/login"})
-    user_role = request.state.session.get("user_role", "user")
-    if user_role not in ("admin", "owner"):
+    effective = _effective_role(request.state.session)
+    if effective not in ("admin", "owner"):
         raise fastapi.HTTPException(status_code=403, detail="Admin access required")
     return uuid.UUID(user_id)
+
+
+_ROLE_HIERARCHY = {"user": 0, "admin": 1, "owner": 2}
+
+
+def _effective_role(session: Any) -> str:
+    """Return the effective role, accounting for view-as."""
+    actual: str = session.get("user_role", "user")
+    view_as: str | None = session.get("view_as")
+    if not view_as or view_as not in _ROLE_HIERARCHY:
+        return actual
+    if _ROLE_HIERARCHY[view_as] < _ROLE_HIERARCHY.get(actual, 0):
+        return view_as
+    return actual
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +156,14 @@ async def require_admin(request: fastapi.Request) -> uuid.UUID:
 def base_context(request: fastapi.Request) -> dict[str, Any]:
     """Build common template context with auth and timezone info."""
     session = request.state.session
+    actual_role = session.get("user_role", "user")
     return {
         "request": request,
         "user_id": session.get("user_id"),
         "user_tz": session.get("user_tz"),
-        "user_role": session.get("user_role", "user"),
+        "user_role": _effective_role(session),
+        "actual_role": actual_role,
+        "viewing_as": session.get("view_as"),
     }
 
 

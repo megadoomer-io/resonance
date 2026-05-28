@@ -71,7 +71,7 @@ async def auth_initiate(
     service_type = _parse_service_type(service)
     connector = _get_connector(request, service_type)
 
-    if not connector.has_capability(base_module.ConnectorCapability.AUTHENTICATION):
+    if not connector.has_capability(base_module.ConnectorCapability.AUTHN):
         raise fastapi.HTTPException(
             status_code=400,
             detail=f"Service {service} does not support authentication",
@@ -141,6 +141,12 @@ async def auth_callback(
             f"{service}: {exc.response.status_code}"
         )
         raise fastapi.HTTPException(status_code=502, detail=detail) from exc
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        logger.exception("Cannot reach auth service for %s", service)
+        raise fastapi.HTTPException(
+            status_code=503,
+            detail="Authentication service is temporarily unavailable",
+        ) from exc
 
     # Encrypt tokens
     settings = request.app.state.settings
@@ -278,11 +284,38 @@ async def auth_callback(
     # Set session
     session["user_id"] = str(user_id)
 
-    # Load and cache the user's role in the session for template access.
+    # Load the user's current role.
     role_result = await db.execute(
         sa.select(user_models.User.role).where(user_models.User.id == user_id)
     )
     user_role = role_result.scalar_one()
+
+    # AUTHZ: if this connector can determine roles, update accordingly.
+    if connector.has_capability(base_module.ConnectorCapability.AUTHZ):
+        derived_role = await connector.get_role(access_token=tokens.access_token)
+        if (
+            derived_role is not None
+            and user_role != types_module.UserRole.OWNER
+            and derived_role != user_role
+        ):
+            logger.info(
+                "Role changed via AUTHZ",
+                user_id=str(user_id),
+                old_role=user_role.value,
+                new_role=derived_role.value,
+                service=service,
+            )
+            await db.execute(
+                sa.update(user_models.User)
+                .where(user_models.User.id == user_id)
+                .values(role=derived_role)
+            )
+            await db.commit()
+            user_role = derived_role
+            # Invalidate stale sessions that still carry the old role.
+            redis = request.app.state.redis
+            await session_module.invalidate_user_sessions(redis, str(user_id))
+
     session["user_role"] = user_role.value
 
     # Load timezone preference into session for templates.

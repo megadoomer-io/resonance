@@ -54,9 +54,12 @@ class SpotifyConnector(base_module.BaseConnector):
     """Connector for the Spotify Web API."""
 
     service_type = types_module.ServiceType.SPOTIFY
+    display_name = "Spotify"
+    icon = "music"
+    color = "var(--color-spotify)"
     capabilities = frozenset(
         {
-            base_module.ConnectorCapability.AUTHENTICATION,
+            base_module.ConnectorCapability.AUTHN,
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.FOLLOWS,
             base_module.ConnectorCapability.TRACK_RATINGS,

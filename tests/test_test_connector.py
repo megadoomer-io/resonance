@@ -35,6 +35,4 @@ class TestTestConnector:
 
     def test_has_capability_authentication_false(self) -> None:
         connector = test_module.TestConnector()
-        assert not connector.has_capability(
-            base_module.ConnectorCapability.AUTHENTICATION
-        )
+        assert not connector.has_capability(base_module.ConnectorCapability.AUTHN)

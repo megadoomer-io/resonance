@@ -45,7 +45,7 @@ class TestLastFmConnectorProperties:
         connector = _make_connector()
         expected = frozenset(
             {
-                base_module.ConnectorCapability.AUTHENTICATION,
+                base_module.ConnectorCapability.AUTHN,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.TRACK_RATINGS,
             }

@@ -16,6 +16,9 @@ class Connectable(Protocol):
     """
 
     service_type: types_module.ServiceType
+    display_name: str
+    icon: str
+    color: str
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig: ...
@@ -90,3 +93,24 @@ class ConnectorRegistry:
             for c in self._connectors.values()
             if isinstance(c, base_module_rt.BaseConnector)
         ]
+
+    def display_name(self, service_type: types_module.ServiceType) -> str:
+        """Return the human-friendly display name for a service type."""
+        connector = self._connectors.get(service_type)
+        if connector is not None and connector.display_name:
+            return connector.display_name
+        return service_type.value.replace("_", " ").title()
+
+    def icon(self, service_type: types_module.ServiceType) -> str:
+        """Return the Lucide icon name for a service type."""
+        connector = self._connectors.get(service_type)
+        if connector is not None and connector.icon:
+            return connector.icon
+        return "link"
+
+    def color(self, service_type: types_module.ServiceType) -> str:
+        """Return the CSS color for a service type, or empty string."""
+        connector = self._connectors.get(service_type)
+        if connector is not None:
+            return connector.color
+        return ""

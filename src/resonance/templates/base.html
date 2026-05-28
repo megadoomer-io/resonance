@@ -57,6 +57,20 @@
     <main class="container">
         {% block content %}{% endblock %}
     </main>
+    {% if viewing_as %}
+    <div class="view-as-pill">
+        <span>Viewing as <strong>{{ viewing_as }}</strong></span>
+        <form method="post" action="/view-as" style="display:inline">
+            <button type="submit" name="role" value="reset" class="outline contrast" style="margin:0;padding:0.25rem 0.5rem;font-size:0.75rem">Reset</button>
+        </form>
+    </div>
+    {% elif actual_role in ('admin', 'owner') and user_id %}
+    <div class="view-as-pill">
+        <form method="post" action="/view-as" style="display:inline">
+            <button type="submit" name="role" value="user" class="outline contrast" style="margin:0;padding:0.25rem 0.5rem;font-size:0.75rem">View as user</button>
+        </form>
+    </div>
+    {% endif %}
     <div id="modal-container"></div>
     <script>
     function openExternalSearchModal(prefillQuery) {

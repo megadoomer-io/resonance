@@ -10,6 +10,9 @@ class ConcertArchivesConnector:
     """Minimal connector for Concert Archives CSV import connections."""
 
     service_type = types_module.ServiceType.CONCERT_ARCHIVES
+    display_name = "Concert Archives"
+    icon = "archive"
+    color = ""
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig:

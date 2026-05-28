@@ -23,6 +23,9 @@ class SongkickConnector:
     """
 
     service_type = types_module.ServiceType.SONGKICK
+    display_name = "Songkick"
+    icon = "ticket"
+    color = ""
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig:

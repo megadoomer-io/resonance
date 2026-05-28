@@ -248,6 +248,12 @@ async def trigger_sync_by_connection(
             status_code=400, detail="No sync config for this service"
         )
 
+    if config.sync_function is None:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="This service does not support sync",
+        )
+
     if config.auth_type == "file_upload":
         raise fastapi.HTTPException(
             status_code=400,
