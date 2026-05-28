@@ -33,6 +33,23 @@ for details and sync strategy implications.
 2. Note the **API Key** and **Shared Secret**.
 3. No redirect URI is required -- Last.fm uses a web auth token flow.
 
+### GitHub (via Dex)
+
+GitHub login is brokered through [Dex](https://dexidp.io/), an OpenID Connect
+identity provider. Dex must be deployed separately (it is not bundled with
+Resonance).
+
+1. Deploy Dex and configure a GitHub connector. See the
+   [Dex GitHub connector docs](https://dexidp.io/docs/connectors/github/).
+2. In your Dex configuration, register a static client for Resonance:
+   - **Client ID**: any string (e.g., `resonance`)
+   - **Client Secret**: a generated secret
+   - **Redirect URI**: `{BASE_URL}/api/v1/auth/github/callback`
+3. Copy the client ID, client secret, and your Dex issuer URL.
+
+GitHub login is optional. When the Dex env vars are not set, the GitHub
+connector is not registered and no GitHub login button appears.
+
 ### ListenBrainz (via MusicBrainz)
 
 1. Go to [musicbrainz.org/account/applications](https://musicbrainz.org/account/applications)
@@ -101,6 +118,17 @@ non-throwaway environment.
 |----------------------|-----------------------|
 | `LASTFM_API_KEY`     | Last.fm API key       |
 | `LASTFM_SHARED_SECRET` | Last.fm shared secret |
+
+### GitHub (via Dex)
+
+| Variable            | Description                                       |
+|---------------------|---------------------------------------------------|
+| `DEX_CLIENT_ID`     | Dex OIDC client ID (registered in Dex config)     |
+| `DEX_CLIENT_SECRET` | Dex OIDC client secret                            |
+| `DEX_ISSUER_URL`    | Dex issuer URL (e.g., `https://dex.example.com`)  |
+
+All three must be set to enable GitHub login. When any are empty, the GitHub
+connector is not registered and the login button does not appear.
 
 ### Admin
 

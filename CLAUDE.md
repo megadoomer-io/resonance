@@ -202,6 +202,8 @@ App config is loaded via Pydantic `Settings`. Key variables:
 - `MUSICBRAINZ_CLIENT_ID`, `MUSICBRAINZ_CLIENT_SECRET` — MusicBrainz OAuth credentials (for ListenBrainz)
 - `LASTFM_API_KEY`, `LASTFM_SHARED_SECRET` — Last.fm API credentials
 - `ADMIN_API_TOKEN` — Bearer token for admin API access (CLI and programmatic use)
+- `DEX_CLIENT_ID`, `DEX_CLIENT_SECRET` — Dex OIDC credentials (for GitHub login via Dex broker)
+- `DEX_ISSUER_URL` — Dex issuer URL (e.g., `https://dex.megadoomer.io`). When empty, the GitHub connector is not registered and the login button does not appear.
 
 ## Design System
 
