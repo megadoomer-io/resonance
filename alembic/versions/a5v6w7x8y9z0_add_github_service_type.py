@@ -1,7 +1,7 @@
 """add GITHUB to ServiceType enum values
 
 Revision ID: a5v6w7x8y9z0
-Revises: a4u5v6w7x8y9
+Revises: b2c3d4e5f6g7
 Create Date: 2026-05-28
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a5v6w7x8y9z0"
-down_revision: str = "a4u5v6w7x8y9"
+down_revision: str = "b2c3d4e5f6g7"
 branch_labels: str | None = None
 depends_on: str | None = None
 
