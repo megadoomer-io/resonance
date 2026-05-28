@@ -10,6 +10,8 @@ import fastapi.responses
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
+import resonance.connectors.base as base_module
+import resonance.connectors.registry as registry_module
 import resonance.dependencies as deps_module
 import resonance.merge as merge_module
 import resonance.middleware.session as session_module
@@ -49,10 +51,16 @@ async def account_page(
     )
     connections = connections_result.scalars().all()
 
+    registry: registry_module.ConnectorRegistry = request.app.state.connector_registry
+    authn_connectors = registry.get_by_capability(base_module.ConnectorCapability.AUTHN)
+    connected_services = {c.service_type for c in connections}
+
     ctx = common.base_context(request)
     ctx.update(
         user=user,
         connections=connections,
+        authn_connectors=authn_connectors,
+        connected_services=connected_services,
         state="button",
     )
 

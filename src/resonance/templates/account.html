@@ -90,9 +90,11 @@
 
 <h2>Connect Another Service</h2>
 <p>
-    <a href="/api/v1/auth/spotify" role="button"><i data-lucide="music" class="icon-inline" style="color: var(--color-spotify)"></i> Connect Spotify</a>
-    <a href="/api/v1/auth/listenbrainz" role="button" class="outline"><i data-lucide="headphones" class="icon-inline" style="color: var(--color-listenbrainz)"></i> Connect ListenBrainz</a>
-    <a href="/api/v1/auth/lastfm" role="button" class="outline"><i data-lucide="radio" class="icon-inline" style="color: var(--color-lastfm)"></i> Connect Last.fm</a>
+    {% for connector in authn_connectors %}
+    {% if connector.service_type not in connected_services %}
+    <a href="/api/v1/auth/{{ connector.service_type.value }}" role="button"{% if not loop.first %} class="outline"{% endif %}><i data-lucide="{{ connector.icon }}" class="icon-inline"{% if connector.color %} style="color: {{ connector.color }}"{% endif %}></i> Connect {{ connector.display_name }}</a>
+    {% endif %}
+    {% endfor %}
     {% if user_role in ("admin", "owner") %}
     <button
         hx-post="/api/v1/admin/test/connect"
