@@ -72,11 +72,10 @@ class TestRequireAdminViewAs:
         assert str(result) == _TEST_USER_ID
 
     @pytest.mark.anyio
-    async def test_admin_viewing_as_user_is_forbidden(self) -> None:
+    async def test_admin_viewing_as_user_still_passes(self) -> None:
         request = _make_request(user_role="admin", view_as="user")
-        with pytest.raises(fastapi.HTTPException) as exc_info:
-            await common.require_admin(request)
-        assert exc_info.value.status_code == 403
+        result = await common.require_admin(request)
+        assert str(result) == _TEST_USER_ID
 
     @pytest.mark.anyio
     async def test_owner_viewing_as_admin_passes(self) -> None:
@@ -85,11 +84,10 @@ class TestRequireAdminViewAs:
         assert str(result) == _TEST_USER_ID
 
     @pytest.mark.anyio
-    async def test_owner_viewing_as_user_is_forbidden(self) -> None:
+    async def test_owner_viewing_as_user_still_passes(self) -> None:
         request = _make_request(user_role="owner", view_as="user")
-        with pytest.raises(fastapi.HTTPException) as exc_info:
-            await common.require_admin(request)
-        assert exc_info.value.status_code == 403
+        result = await common.require_admin(request)
+        assert str(result) == _TEST_USER_ID
 
 
 class TestBaseContextViewAs:

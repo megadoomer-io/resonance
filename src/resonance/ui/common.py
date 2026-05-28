@@ -118,8 +118,9 @@ async def require_user(request: fastapi.Request) -> uuid.UUID:
 async def require_admin(request: fastapi.Request) -> uuid.UUID:
     """Return admin/owner user_id, or redirect/forbid.
 
-    Checks effective role (view-as aware): if view_as is set in the
-    session, uses that instead of the actual role.
+    Checks the actual role, NOT the view-as effective role. View-as
+    is cosmetic (affects template rendering only), not an authorization
+    gate. Admins viewing-as USER can still access admin endpoints.
 
     Use as a FastAPI dependency::
 
@@ -128,8 +129,8 @@ async def require_admin(request: fastapi.Request) -> uuid.UUID:
     user_id = request.state.session.get("user_id")
     if not user_id:
         raise fastapi.HTTPException(status_code=307, headers={"Location": "/login"})
-    effective = _effective_role(request.state.session)
-    if effective not in ("admin", "owner"):
+    user_role = request.state.session.get("user_role", "user")
+    if user_role not in ("admin", "owner"):
         raise fastapi.HTTPException(status_code=403, detail="Admin access required")
     return uuid.UUID(user_id)
 

@@ -87,7 +87,7 @@ async def set_view_as(
         )
 
     referer = request.headers.get("referer", "/")
-    if not referer.startswith("/"):
+    if not referer.startswith("/") or referer.startswith("//"):
         referer = "/"
     return fastapi.responses.RedirectResponse(url=referer, status_code=303)
 
