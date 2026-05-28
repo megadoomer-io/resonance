@@ -157,6 +157,11 @@
   --color-spotify: #1DB954;
   --color-lastfm: #D51007;
   --color-listenbrainz: #E66000;
+  --color-github: #24292f;
+}
+
+[data-theme="dark"] {
+  --color-github: #c9d1d9;
 }
 
 .service-badge {

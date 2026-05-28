@@ -27,7 +27,7 @@ class GitHubConnector(base_module.BaseConnector):
     service_type = types_module.ServiceType.GITHUB
     display_name = "GitHub"
     icon = "github"
-    color = ""
+    color = "var(--color-github)"
     capabilities = frozenset(
         {
             base_module.ConnectorCapability.AUTHN,

@@ -43,6 +43,7 @@
   - Spotify: `#1DB954`
   - Last.fm: `#D51007`
   - ListenBrainz: `#E66000`
+  - GitHub: `#24292f` (light) / `#c9d1d9` (dark)
 - **Semantic:** success `#16A34A`, warning `#D97706`, error `#DC2626`, info `#2563EB`
 - **Dark mode:**
   - Background: `#121214`
