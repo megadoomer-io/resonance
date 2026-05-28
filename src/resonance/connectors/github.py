@@ -44,6 +44,7 @@ class GitHubConnector(base_module.BaseConnector):
         self._client_secret = settings.dex_client_secret
         self._issuer_url = settings.dex_issuer_url.rstrip("/")
         self._redirect_uri = settings.dex_redirect_uri
+        self._last_userinfo: dict[str, object] | None = None
         self._http_client = None
         self._budget = ratelimit_module.RateLimitBudget(
             default_interval=1.0,
@@ -80,34 +81,34 @@ class GitHubConnector(base_module.BaseConnector):
         logger.info("Dex token exchange successful")
         return base_module.TokenResponse.model_validate(response.json())
 
-    async def get_current_user(self, access_token: str) -> dict[str, str]:
-        logger.info("Fetching user profile from Dex userinfo")
+    async def _fetch_userinfo(self, access_token: str) -> dict[str, object]:
         response = await self._request(
             "GET",
             f"{self._issuer_url}/userinfo",
             high_priority=True,
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        data = response.json()
+        return response.json()  # type: ignore[no-any-return]
+
+    async def get_current_user(self, access_token: str) -> dict[str, str]:
+        logger.info("Fetching user profile from Dex userinfo")
+        data = await self._fetch_userinfo(access_token)
+        self._last_userinfo = data
         return {
-            "id": data.get("sub", ""),
-            "display_name": data.get("name") or data.get("preferred_username", ""),
+            "id": str(data.get("sub", "")),
+            "display_name": str(data.get("name") or data.get("preferred_username", "")),
         }
 
     async def get_role(self, access_token: str) -> types_module.UserRole | None:
         """Derive user role from Dex groups claim (GitHub team membership).
 
-        Returns ADMIN if the user belongs to any admin team, USER otherwise.
-        Returns None on parse failure (defensive fallback).
+        Uses cached userinfo from get_current_user() if available,
+        otherwise fetches fresh.
         """
         try:
-            response = await self._request(
-                "GET",
-                f"{self._issuer_url}/userinfo",
-                high_priority=True,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            data = response.json()
+            data = getattr(self, "_last_userinfo", None)
+            if data is None:
+                data = await self._fetch_userinfo(access_token)
             groups = data.get("groups", [])
 
             if not isinstance(groups, list):
@@ -124,3 +125,5 @@ class GitHubConnector(base_module.BaseConnector):
         except Exception:
             logger.exception("Failed to parse groups claim from Dex")
             return None
+        finally:
+            self._last_userinfo = None

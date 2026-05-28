@@ -141,9 +141,9 @@ def _effective_role(session: Any) -> str:
     """Return the effective role, accounting for view-as."""
     actual: str = session.get("user_role", "user")
     view_as: str | None = session.get("view_as")
-    if not view_as:
+    if not view_as or view_as not in _ROLE_HIERARCHY:
         return actual
-    if _ROLE_HIERARCHY.get(view_as, 0) < _ROLE_HIERARCHY.get(actual, 0):
+    if _ROLE_HIERARCHY[view_as] < _ROLE_HIERARCHY.get(actual, 0):
         return view_as
     return actual
 
