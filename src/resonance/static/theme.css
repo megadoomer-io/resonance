@@ -177,6 +177,24 @@ table {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 24'%3E%3Cpath d='M0 12 Q150 0 300 12 Q450 24 600 12 Q750 0 900 12 Q1050 24 1200 12' fill='none' stroke='%239B9B96' stroke-width='1'/%3E%3C/svg%3E");
 }
 
+/* ── View-as pill ─────────────────────────────────────────── */
+
+.view-as-pill {
+  position: fixed;
+  bottom: var(--space-md);
+  left: var(--space-md);
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
 /* ── Reduced motion ───────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

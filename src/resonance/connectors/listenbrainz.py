@@ -32,9 +32,12 @@ class ListenBrainzConnector(base_module.BaseConnector):
     """Connector for the ListenBrainz API with MusicBrainz OAuth."""
 
     service_type = types_module.ServiceType.LISTENBRAINZ
+    display_name = "ListenBrainz"
+    icon = "headphones"
+    color = "var(--color-listenbrainz)"
     capabilities = frozenset(
         {
-            base_module.ConnectorCapability.AUTHENTICATION,
+            base_module.ConnectorCapability.AUTHN,
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.TRACK_DISCOVERY,
         }

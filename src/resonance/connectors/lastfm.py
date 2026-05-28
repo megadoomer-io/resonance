@@ -31,9 +31,12 @@ class LastFmConnector(base_module.BaseConnector):
     """Connector for the Last.fm API with web authentication."""
 
     service_type = types_module.ServiceType.LASTFM
+    display_name = "Last.fm"
+    icon = "radio"
+    color = "var(--color-lastfm)"
     capabilities = frozenset(
         {
-            base_module.ConnectorCapability.AUTHENTICATION,
+            base_module.ConnectorCapability.AUTHN,
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.TRACK_RATINGS,
         }

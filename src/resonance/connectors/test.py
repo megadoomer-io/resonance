@@ -9,6 +9,9 @@ class TestConnector(base_module.BaseConnector):
     """Fake connector for testing the sync pipeline."""
 
     service_type = types_module.ServiceType.TEST
+    display_name = "Test"
+    icon = "flask-conical"
+    color = ""
     capabilities = frozenset(
         {
             base_module.ConnectorCapability.LISTENING_HISTORY,

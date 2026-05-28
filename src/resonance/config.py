@@ -50,6 +50,17 @@ class Settings(pydantic_settings.BaseSettings):
     # Admin API token (for CLI/programmatic access)
     admin_api_token: str = ""
 
+    # Dex OIDC (GitHub identity via Dex broker)
+    dex_client_id: str = ""
+    dex_client_secret: str = ""
+    dex_issuer_url: str = ""
+    dex_redirect_path: str = "/api/v1/auth/github/callback"
+
+    @property
+    def dex_redirect_uri(self) -> str:
+        """Full Dex OIDC redirect URI."""
+        return f"{self.base_url}{self.dex_redirect_path}"
+
     @property
     def spotify_redirect_uri(self) -> str:
         """Full Spotify OAuth redirect URI."""

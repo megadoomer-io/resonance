@@ -10,6 +10,9 @@ class ICalConnector:
     """Minimal connector for generic iCal feed connections."""
 
     service_type = types_module.ServiceType.ICAL
+    display_name = "iCal"
+    icon = "calendar"
+    color = ""
 
     @staticmethod
     def connection_config() -> base_module.ConnectionConfig:

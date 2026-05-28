@@ -10,6 +10,8 @@ import fastapi.responses
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
+import resonance.connectors.base as base_module
+import resonance.connectors.registry as registry_module
 import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
@@ -19,8 +21,13 @@ import resonance.ui.common as common
 
 router = fastapi.APIRouter(tags=["ui"])
 
-# Services that support OAuth login (auto-redirect targets).
-_AUTH_SERVICES = frozenset({"spotify", "listenbrainz", "lastfm"})
+
+def _get_authn_connectors(
+    request: fastapi.Request,
+) -> list[base_module.BaseConnector]:
+    """Return all connectors with AUTHN capability, ordered for the login page."""
+    registry: registry_module.ConnectorRegistry = request.app.state.connector_registry
+    return registry.get_by_capability(base_module.ConnectorCapability.AUTHN)
 
 
 @router.get("/login", response_class=fastapi.responses.HTMLResponse)
@@ -35,19 +42,52 @@ async def login(
     ``prompt`` is not ``"select"``), redirect to that service's OAuth
     flow so expired sessions re-authenticate automatically.
     """
-    # Already logged in — skip login page entirely.
     if request.state.session.get("user_id"):
         return fastapi.responses.RedirectResponse(url="/", status_code=307)
 
-    # Auto-login unless the user explicitly asked to pick a service.
+    authn_connectors = _get_authn_connectors(request)
+    authn_services = {c.service_type.value for c in authn_connectors}
+
     if prompt != "select":
         last_service = request.cookies.get("last_auth_service")
-        if last_service and last_service in _AUTH_SERVICES:
+        if last_service and last_service in authn_services:
             return fastapi.responses.RedirectResponse(
                 url=f"/api/v1/auth/{last_service}", status_code=307
             )
 
-    return common.templates.TemplateResponse(request, "login.html")
+    return common.templates.TemplateResponse(
+        request,
+        "login.html",
+        {"request": request, "authn_connectors": authn_connectors},
+    )
+
+
+@router.post("/view-as", response_class=fastapi.responses.HTMLResponse)
+async def set_view_as(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    role: str = "",
+) -> fastapi.responses.Response:
+    """Set or clear view-as role impersonation (admin/owner only)."""
+    session = request.state.session
+    actual_role = session.get("user_role", "user")
+
+    if actual_role not in ("admin", "owner"):
+        raise fastapi.HTTPException(status_code=403)
+
+    if not role or role == "reset":
+        session.pop("view_as", None)
+    elif common._ROLE_HIERARCHY.get(role, 0) < common._ROLE_HIERARCHY.get(
+        actual_role, 0
+    ):
+        session["view_as"] = role
+    else:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Can only view as a lower role"
+        )
+
+    referer = request.headers.get("referer", "/")
+    return fastapi.responses.RedirectResponse(url=referer, status_code=303)
 
 
 @router.get("/", response_model=None)
