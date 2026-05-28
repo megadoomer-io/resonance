@@ -53,6 +53,11 @@ COMPONENT_ENTRIES = [
         "description": "Detail page layout block",
         "states": ["default"],
     },
+    {
+        "name": "view_as_pill",
+        "description": "Floating pill for role impersonation",
+        "states": ["inactive", "active"],
+    },
 ]
 
 

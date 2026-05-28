@@ -171,4 +171,27 @@
     {% endcall %}
 </section>
 
+{# ------------------------------------------------------------------ #}
+{# view_as_pill                                                       #}
+{# ------------------------------------------------------------------ #}
+<section id="view_as_pill">
+    <h2>view_as_pill</h2>
+    <p>Floating pill for role impersonation. Fixed-position in production, static here for inspection.</p>
+
+    <h3>Inactive (admin can activate)</h3>
+    <div class="view-as-pill" style="position:static">
+        <form method="post" action="/view-as" style="display:inline">
+            <button type="submit" name="role" value="user" class="outline contrast btn-sm">View as user</button>
+        </form>
+    </div>
+
+    <h3>Active (viewing as user)</h3>
+    <div class="view-as-pill" style="position:static">
+        <span>Viewing as <strong>user</strong></span>
+        <form method="post" action="/view-as" style="display:inline">
+            <button type="submit" name="role" value="reset" class="outline contrast btn-sm">Reset</button>
+        </form>
+    </div>
+</section>
+
 {% endblock %}
