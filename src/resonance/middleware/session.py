@@ -45,6 +45,11 @@ class SessionData:
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
+    def pop(self, key: str, *args: Any) -> Any:
+        value = self.data.pop(key, *args)
+        self.modified = True
+        return value
+
     def clear(self) -> None:
         self.data.clear()
         self.modified = True
