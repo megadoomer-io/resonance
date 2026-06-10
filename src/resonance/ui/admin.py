@@ -805,18 +805,20 @@ async def merge_event_group(
     )
     canonical = events[0]
     canonical_artist_ids = {ea.artist_id for ea in canonical.artists}
-    canonical_candidate_names = {eac.raw_name for eac in canonical.artist_candidates}
+    canonical_candidate_names = {
+        eac.normalized_raw_name for eac in canonical.artist_candidates
+    }
     merged_count = 0
 
     for dup in events[1:]:
         for ec in dup.event_candidates:
             ec.resolved_event_id = canonical.id
         for eac in dup.artist_candidates:
-            if eac.raw_name in canonical_candidate_names:
+            if eac.normalized_raw_name in canonical_candidate_names:
                 await db.delete(eac)
             else:
                 eac.event_id = canonical.id
-                canonical_candidate_names.add(eac.raw_name)
+                canonical_candidate_names.add(eac.normalized_raw_name)
         for confirmed_ea in dup.artists:
             if confirmed_ea.artist_id in canonical_artist_ids:
                 await db.delete(confirmed_ea)

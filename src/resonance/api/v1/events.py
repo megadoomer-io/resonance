@@ -15,6 +15,7 @@ import structlog
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
 import resonance.models.music as music_models
+import resonance.normalize as normalize_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -387,10 +388,10 @@ async def create_candidate(
     if artist is None:
         raise fastapi.HTTPException(status_code=404, detail="Artist not found")
 
-    # Check for duplicate candidate with same raw_name
+    normalized = normalize_module.normalize_name(artist.name)
     dup_stmt = sa.select(concert_models.EventArtistCandidate).where(
         concert_models.EventArtistCandidate.event_id == event_id,
-        concert_models.EventArtistCandidate.raw_name == artist.name,
+        concert_models.EventArtistCandidate.normalized_raw_name == normalized,
     )
     existing = (await db.execute(dup_stmt)).scalar_one_or_none()
     if existing is not None:

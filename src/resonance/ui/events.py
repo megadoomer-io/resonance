@@ -21,6 +21,7 @@ import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
 import resonance.models.music as music_models
 import resonance.models.user as user_models
+import resonance.normalize as normalize_module
 import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 import resonance.ui.common as common
@@ -868,11 +869,12 @@ async def add_artist_to_event_ui(
         )
         return htmx.trigger_event(resp, "artistsChanged")
 
+    normalized = normalize_module.normalize_name(artist.name)
     existing = (
         await db.execute(
             sa.select(concert_models.EventArtistCandidate).where(
                 concert_models.EventArtistCandidate.event_id == event_id,
-                concert_models.EventArtistCandidate.raw_name == artist.name,
+                concert_models.EventArtistCandidate.normalized_raw_name == normalized,
             )
         )
     ).scalar_one_or_none()
@@ -1259,11 +1261,13 @@ async def artist_import_partial(
                     )
 
             if not candidate_id:
+                norm = normalize_module.normalize_name(artist.name)
                 existing_candidate = (
                     await db.execute(
                         sa.select(concert_models.EventArtistCandidate).where(
                             concert_models.EventArtistCandidate.event_id == event_id,
-                            concert_models.EventArtistCandidate.raw_name == artist.name,
+                            concert_models.EventArtistCandidate.normalized_raw_name
+                            == norm,
                             concert_models.EventArtistCandidate.status
                             == types_module.CandidateStatus.PENDING,
                         )

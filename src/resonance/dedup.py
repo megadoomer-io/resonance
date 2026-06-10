@@ -973,12 +973,8 @@ def _artist_overlap_sufficient(
     b: models_module.Event,
 ) -> bool:
     """Check if two events have enough artist name overlap to be duplicates."""
-    a_names = {
-        normalize_module.normalize_name(c.raw_name) for c in (a.artist_candidates or [])
-    }
-    b_names = {
-        normalize_module.normalize_name(c.raw_name) for c in (b.artist_candidates or [])
-    }
+    a_names = {c.normalized_raw_name for c in (a.artist_candidates or [])}
+    b_names = {c.normalized_raw_name for c in (b.artist_candidates or [])}
 
     if not a_names or not b_names:
         return True

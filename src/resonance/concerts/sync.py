@@ -127,9 +127,10 @@ async def upsert_candidates(
     """
     created_count = 0
     for candidate in candidates:
+        normalized = normalize_module.normalize_name(candidate.name)
         stmt = sa.select(concert_models.EventArtistCandidate).where(
             concert_models.EventArtistCandidate.event_id == event.id,
-            concert_models.EventArtistCandidate.raw_name == candidate.name,
+            concert_models.EventArtistCandidate.normalized_raw_name == normalized,
         )
         result = await session.execute(stmt)
         existing = result.scalar_one_or_none()
@@ -227,9 +228,8 @@ async def match_candidates_to_artists(
 
     matched_count = 0
     for candidate in candidates:
-        normalized_raw = normalize_module.normalize_name(candidate.raw_name)
         artist_stmt = sa.select(music_models.Artist).where(
-            sa.func.lower(music_models.Artist.name) == normalized_raw,
+            sa.func.lower(music_models.Artist.name) == candidate.normalized_raw_name,
         )
         artist_result = await session.execute(artist_stmt)
         artist = artist_result.scalar_one_or_none()

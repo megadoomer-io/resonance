@@ -10,6 +10,7 @@ import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
 import resonance.models.base as base_module
+import resonance.normalize as normalize_module
 import resonance.types as types_module
 
 
@@ -106,8 +107,8 @@ class EventArtistCandidate(base_module.TimestampMixin, base_module.Base):
     __table_args__ = (
         sa.UniqueConstraint(
             "event_id",
-            "raw_name",
-            name="uq_event_artist_candidates_event_name",
+            "normalized_raw_name",
+            name="uq_event_artist_candidates_event_normalized_name",
         ),
     )
 
@@ -118,6 +119,9 @@ class EventArtistCandidate(base_module.TimestampMixin, base_module.Base):
         sa.ForeignKey("events.id", ondelete="CASCADE"), nullable=False
     )
     raw_name: orm.Mapped[str] = orm.mapped_column(sa.String(512), nullable=False)
+    normalized_raw_name: orm.Mapped[str] = orm.mapped_column(
+        sa.String(512), nullable=False
+    )
     matched_artist_id: orm.Mapped[uuid.UUID | None] = orm.mapped_column(
         sa.ForeignKey("artists.id", ondelete="SET NULL"), nullable=True
     )
@@ -132,6 +136,11 @@ class EventArtistCandidate(base_module.TimestampMixin, base_module.Base):
     )
 
     event: orm.Mapped[Event] = orm.relationship(back_populates="artist_candidates")
+
+    @orm.validates("raw_name")
+    def _set_normalized_raw_name(self, _key: str, value: str) -> str:
+        self.normalized_raw_name = normalize_module.normalize_name(value)
+        return value
 
 
 class EventArtist(base_module.TimestampMixin, base_module.Base):
