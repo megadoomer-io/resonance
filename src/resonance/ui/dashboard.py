@@ -66,7 +66,7 @@ async def login(
 async def set_view_as(
     request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
-    role: str = "",
+    role: Annotated[str, fastapi.Form()] = "",
 ) -> fastapi.responses.Response:
     """Set or clear view-as role impersonation (admin/owner only)."""
     session = request.state.session
