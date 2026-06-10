@@ -247,6 +247,7 @@ def _make_event_candidate(**overrides: Any) -> SimpleNamespace:
         "id": uuid.uuid4(),
         "event_id": uuid.uuid4(),
         "raw_name": "Unknown Artist",
+        "normalized_raw_name": "unknown artist",
         "matched_artist_id": None,
         "position": 0,
         "confidence_score": 0,

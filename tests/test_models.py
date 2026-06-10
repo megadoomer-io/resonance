@@ -714,7 +714,7 @@ class TestEventArtistCandidateModel:
         uc_col_sets = [
             frozenset(col.name for col in uc.columns) for uc in unique_constraints
         ]
-        expected = frozenset({"event_id", "raw_name"})
+        expected = frozenset({"event_id", "normalized_raw_name"})
         assert expected in uc_col_sets
 
     def test_event_relationship(self) -> None:

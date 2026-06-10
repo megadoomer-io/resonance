@@ -311,12 +311,19 @@ def _make_candidate(**overrides: Any) -> SimpleNamespace:
         "id": uuid.uuid4(),
         "event_id": uuid.uuid4(),
         "raw_name": "Test Artist",
+        "normalized_raw_name": "test artist",
         "matched_artist_id": None,
         "position": 0,
         "confidence_score": 90,
         "status": "PENDING",
     }
     defaults.update(overrides)
+    if "normalized_raw_name" not in overrides and "raw_name" in overrides:
+        import resonance.normalize as normalize_module
+
+        defaults["normalized_raw_name"] = normalize_module.normalize_name(
+            defaults["raw_name"]
+        )
     return SimpleNamespace(**defaults)
 
 
