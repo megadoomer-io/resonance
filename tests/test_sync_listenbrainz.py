@@ -951,10 +951,75 @@ class TestAdaptivePageSize:
             connection = _make_connection()
             await strategy.execute(session, task, connector, connection)
 
-        # Should have tried 1000, 500, 250, 125, 100, then raised at 100
+        # Should have tried 1000, 500, 250, 125, then 100 x4 (1 + 3 retries)
         calls = connector.get_listens.call_args_list
         counts = [c.kwargs["count"] for c in calls]
-        assert counts == [1000, 500, 250, 125, 100]
+        assert counts == [1000, 500, 250, 125, 100, 100, 100, 100]
+
+    @pytest.mark.asyncio
+    async def test_recovers_during_min_size_retries(self) -> None:
+        """API recovery during min-size retries succeeds instead of failing."""
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        task = _make_task(params={"username": "testuser"})
+        connector = _make_lb_connector()
+
+        listen1 = _make_listen(1700000100, "Song A", "Artist A")
+
+        # Fail through all reductions, then succeed on 2nd min-size retry
+        connector.get_listens = AsyncMock(
+            side_effect=[
+                httpx.RemoteProtocolError("Server disconnected"),  # 1000
+                httpx.RemoteProtocolError("Server disconnected"),  # 500
+                httpx.RemoteProtocolError("Server disconnected"),  # 250
+                httpx.RemoteProtocolError("Server disconnected"),  # 125
+                httpx.RemoteProtocolError("Server disconnected"),  # 100 (1st)
+                httpx.RemoteProtocolError("Server disconnected"),  # 100 (retry 1)
+                [listen1],  # 100 (retry 2) — API recovered
+                [],  # pagination done
+            ]
+        )
+
+        with (
+            patch("resonance.sync.listenbrainz.asyncio.sleep", new_callable=AsyncMock),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_listening_event",
+                new_callable=AsyncMock,
+            ),
+        ):
+            connection = _make_connection()
+            await strategy.execute(session, task, connector, connection)
+
+        calls = connector.get_listens.call_args_list
+        counts = [c.kwargs["count"] for c in calls]
+        # 1000, 500, 250, 125, 100, 100 (retry), 100 (success), 200 (grown back)
+        assert counts == [1000, 500, 250, 125, 100, 100, 100, 200]
 
     @pytest.mark.asyncio
     async def test_read_timeout_also_triggers_adaptive(self) -> None:

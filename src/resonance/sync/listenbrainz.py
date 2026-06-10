@@ -27,6 +27,7 @@ MAX_PAGES = 5000
 _DEFAULT_PAGE_SIZE = 1000
 _MIN_PAGE_SIZE = 100
 _ADAPTIVE_BACKOFF_BASE = 5.0  # seconds — scales with reduction depth
+_MAX_MIN_SIZE_RETRIES = 3  # extra retries at min page size before giving up
 _GAP_SKIP_WINDOW = 90 * 86400  # 90 days in seconds
 _GAP_SKIP_LOWER_BOUND = 946684800  # 2000-01-01T00:00:00Z
 
@@ -367,6 +368,7 @@ async def _adaptive_fetch(
     """
     current_size = page_size
     reduction_depth = 0
+    min_size_attempts = 0
 
     while True:
         try:
@@ -379,6 +381,20 @@ async def _adaptive_fetch(
             )
         except (httpx.RemoteProtocolError, httpx.ReadTimeout):  # fmt: skip
             if current_size <= _MIN_PAGE_SIZE:
+                min_size_attempts += 1
+                if min_size_attempts <= _MAX_MIN_SIZE_RETRIES:
+                    depth = reduction_depth + min_size_attempts
+                    backoff = _ADAPTIVE_BACKOFF_BASE * depth
+                    logger.warning(
+                        "adaptive_min_size_retry",
+                        attempt=min_size_attempts,
+                        max_attempts=_MAX_MIN_SIZE_RETRIES,
+                        backoff_seconds=round(backoff, 1),
+                        max_ts=max_ts,
+                        username=username,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
                 if max_ts is None:
                     logger.error(
                         "adaptive_page_size_exhausted",

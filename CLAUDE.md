@@ -130,9 +130,9 @@ Unified CLI for admin operations. Uses bearer token auth for API commands;
 `set-role` connects directly to the database (disaster recovery).
 
 ```bash
-# Set environment variables (or use ADMIN_API_TOKEN in app config)
-export RESONANCE_URL=https://resonance.megadoomer.io
-export RESONANCE_API_TOKEN=<token>   # from 1Password: "Last.fm" item, Private vault
+# RESONANCE_URL and RESONANCE_API_TOKEN are loaded from the user's dotfiles.
+# The token is also in 1Password: "resonance.megadoomer.io" item, Private vault.
+# Alternatively, read it from the k8s secret backing the ADMIN_API_TOKEN env var.
 
 # Available commands
 uv run resonance-api healthz                    # Health + deployed revision
