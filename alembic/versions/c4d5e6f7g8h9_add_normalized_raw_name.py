@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001 — ambiguous unicode characters are intentional (quote map)
 """add normalized_raw_name to event_artist_candidates
 
 Adds a normalized_raw_name column for unicode-safe deduplication.
@@ -76,14 +77,36 @@ def upgrade() -> None:
             {"normalized": normalized, "id": row_id},
         )
 
-    # Step 3: Make column non-nullable after backfill
+    # Step 3: Deduplicate rows that now share (event_id, normalized_raw_name).
+    # Keep the row with the highest confidence (prefer matched over unmatched).
+    conn.execute(
+        sa.text("""
+            DELETE FROM event_artist_candidates
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY event_id, normalized_raw_name
+                        ORDER BY
+                            CASE WHEN matched_artist_id IS NOT NULL
+                                 THEN 0 ELSE 1 END,
+                            confidence_score DESC,
+                            created_at ASC
+                    ) AS rn
+                    FROM event_artist_candidates
+                ) ranked
+                WHERE rn > 1
+            )
+        """)
+    )
+
+    # Step 4: Make column non-nullable after backfill and dedup
     op.alter_column(
         "event_artist_candidates",
         "normalized_raw_name",
         nullable=False,
     )
 
-    # Step 4: Drop old constraint, add new one
+    # Step 5: Drop old constraint, add new one
     op.drop_constraint(
         "uq_event_artist_candidates_event_name",
         "event_artist_candidates",
