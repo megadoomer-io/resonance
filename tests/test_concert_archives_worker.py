@@ -69,6 +69,7 @@ def _make_task(
     task_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     service_connection_id: uuid.UUID | None = None,
+    parent_id: uuid.UUID | None = None,
     status: types_module.SyncStatus = types_module.SyncStatus.PENDING,
 ) -> MagicMock:
     """Create a mock Task."""
@@ -76,6 +77,7 @@ def _make_task(
     task.id = task_id or uuid.uuid4()
     task.user_id = user_id or uuid.uuid4()
     task.service_connection_id = service_connection_id or uuid.uuid4()
+    task.parent_id = parent_id
     task.status = status
     task.started_at = None
     task.completed_at = None
@@ -90,22 +92,31 @@ def _make_ctx(session: AsyncMock) -> dict[str, object]:
     session_factory = MagicMock()
     session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
     session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-    return {"session_factory": session_factory}
+    return {"session_factory": session_factory, "redis": AsyncMock()}
 
 
 def _setup_session_queries(
     session: AsyncMock,
     task: MagicMock | None,
     connection: MagicMock | None,
+    existing_children: list[MagicMock] | None = None,
 ) -> None:
-    """Set up session.execute to return task on first call, connection on second."""
+    """Set up session.execute for the planner flow.
+
+    Query order: (1) load task, (2) check children, (3) load connection.
+    """
     task_result = MagicMock()
     task_result.scalar_one_or_none.return_value = task
+
+    children_result = MagicMock()
+    children_scalars = MagicMock()
+    children_scalars.all.return_value = existing_children or []
+    children_result.scalars.return_value = children_scalars
 
     conn_result = MagicMock()
     conn_result.scalar_one_or_none.return_value = connection
 
-    session.execute.side_effect = [task_result, conn_result]
+    session.execute.side_effect = [task_result, children_result, conn_result]
 
 
 @contextmanager
@@ -233,12 +244,10 @@ class TestSyncConcertArchivesLifecycle:
 
     @pytest.mark.anyio()
     async def test_orphan_recovery_missing_csv_fails_gracefully(self) -> None:
-        """Fails task gracefully when csv_content is None (orphan recovery)."""
+        """Fails task gracefully when csv_content is None and no children."""
         task = _make_task()
         session = AsyncMock()
-        task_result = MagicMock()
-        task_result.scalar_one_or_none.return_value = task
-        session.execute.return_value = task_result
+        _setup_session_queries(session, task, None)
         ctx = _make_ctx(session)
 
         with patch("resonance.concerts.worker.lifecycle_module.fail_task") as mock_fail:
@@ -249,84 +258,47 @@ class TestSyncConcertArchivesLifecycle:
             assert "CSV content unavailable" in error_msg
             assert "re-upload" in error_msg
 
-        # Only one execute call (task lookup) — no connection lookup
-        assert session.execute.await_count == 1
 
-
-class TestSyncConcertArchivesImport:
-    """Tests for successful CSV import processing."""
+class TestSyncConcertArchivesPlanner:
+    """Tests for the planner that creates chunk children."""
 
     @pytest.mark.anyio()
-    async def test_successful_import(self) -> None:
-        """Parses CSV, creates candidates, resolves entities, completes task."""
+    async def test_creates_chunk_children(self) -> None:
+        """Parses CSV and creates chunk children with correct params."""
         connection = _make_connection()
         task = _make_task(
             user_id=connection.user_id,
             service_connection_id=connection.id,
         )
+        task.params = {}
         session = AsyncMock()
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with _patch_candidate_sync() as mocks:
-            await concert_worker.sync_concert_archives(ctx, str(task.id), _SAMPLE_CSV)
+        await concert_worker.sync_concert_archives(ctx, str(task.id), _SAMPLE_CSV)
 
-            # 2 events in CSV → 2 venue candidate + resolve cycles
-            assert mocks["upsert_venue_candidate"].await_count == 2
-            assert mocks["resolve_venue_candidate"].await_count == 2
+        # 2 events in CSV, chunk size 25 → 1 chunk child
+        added_objects = [
+            call.args[0]
+            for call in session.add.call_args_list
+            if hasattr(call.args[0], "task_type")
+            and str(getattr(call.args[0], "task_type", ""))
+            == types_module.TaskType.CONCERT_ARCHIVES_CHUNK.value
+        ]
+        assert len(added_objects) == 1
+        child = added_objects[0]
+        assert child.params["chunk_index"] == 0
 
-            # 2 event candidate + resolve cycles
-            assert mocks["upsert_event_candidate"].await_count == 2
-            assert mocks["resolve_event_candidate"].await_count == 2
+        # Parsed events stored in parent params
+        assert "parsed_events" in task.params
+        assert len(task.params["parsed_events"]) == 2
 
-            # Both events have "Past" status → attendance "going"
-            assert mocks["upsert_attendance"].await_count == 2
+        # Progress total set
+        assert task.progress_total == 2
 
-            # Artist candidates created for each event
-            assert mocks["upsert_candidates"].await_count == 2
-
-            # match_candidates called for each event
-            assert mocks["match_candidates"].await_count == 2
-
-            # Verify task completed
-            mocks["complete_task"].assert_awaited_once()
-            result_arg = mocks["complete_task"].call_args.args[2]
-            assert result_arg["total_events"] == 2
-            assert result_arg["events_created"] == 2
-            assert result_arg["candidates_created"] == 4  # 2 per event call
-            assert result_arg["candidates_matched"] == 2  # 1 per event call
-
-            # Connection last_synced_at updated
-            assert connection.last_synced_at is not None
-
-    @pytest.mark.anyio()
-    async def test_cancelled_event_no_attendance(self) -> None:
-        """Cancelled events do not create attendance records."""
-        connection = _make_connection()
-        task = _make_task(
-            user_id=connection.user_id,
-            service_connection_id=connection.id,
-        )
-        session = AsyncMock()
-        _setup_session_queries(session, task, connection)
-        ctx = _make_ctx(session)
-
-        with _patch_candidate_sync() as mocks:
-            mocks["match_candidates"].return_value = 0
-
-            await concert_worker.sync_concert_archives(
-                ctx, str(task.id), _CANCELLED_CSV
-            )
-
-            # Event candidate should still be created and resolved
-            mocks["upsert_event_candidate"].assert_awaited_once()
-            mocks["resolve_event_candidate"].assert_awaited_once()
-
-            # But no attendance for "Cancelled" status
-            mocks["upsert_attendance"].assert_not_awaited()
-
-            # Task should still complete successfully
-            mocks["complete_task"].assert_awaited_once()
+        # First child enqueued
+        arq_redis = ctx["redis"]
+        arq_redis.enqueue_job.assert_awaited_once()
 
     @pytest.mark.anyio()
     async def test_csv_parse_error_fails_task(self) -> None:
@@ -336,18 +308,18 @@ class TestSyncConcertArchivesImport:
             user_id=connection.user_id,
             service_connection_id=connection.id,
         )
+        task.params = {}
         session = AsyncMock()
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
         with patch("resonance.concerts.worker.lifecycle_module.fail_task") as mock_fail:
             await concert_worker.sync_concert_archives(ctx, str(task.id), _INVALID_CSV)
-
             mock_fail.assert_awaited_once()
 
     @pytest.mark.anyio()
-    async def test_warnings_included_in_result(self) -> None:
-        """Warnings from CSV parsing are included in the task result."""
+    async def test_warnings_stored_in_params(self) -> None:
+        """Warnings from CSV parsing are stored in parent task params."""
         csv_with_warning = """\
 Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location,URL
 ,,Past,Some Show,Band A,,Venue,"City, Country",https://example.com
@@ -357,47 +329,33 @@ Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location
             user_id=connection.user_id,
             service_connection_id=connection.id,
         )
+        task.params = {}
         session = AsyncMock()
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        with _patch_candidate_sync() as mocks:
-            mocks["match_candidates"].return_value = 0
+        await concert_worker.sync_concert_archives(ctx, str(task.id), csv_with_warning)
 
-            await concert_worker.sync_concert_archives(
-                ctx, str(task.id), csv_with_warning
-            )
-
-            mocks["complete_task"].assert_awaited_once()
-            result_arg = mocks["complete_task"].call_args.args[2]
-            assert "warnings" in result_arg
-            assert len(result_arg["warnings"]) > 0
+        assert "warnings" in task.params
+        assert len(task.params["warnings"]) > 0
 
     @pytest.mark.anyio()
-    async def test_event_update_counts_correctly(self) -> None:
-        """Tracks events_updated when resolve_event_candidate returns created=False."""
-        connection = _make_connection()
-        task = _make_task(
-            user_id=connection.user_id,
-            service_connection_id=connection.id,
-        )
+    async def test_orphan_recovery_resumes_pending_child(self) -> None:
+        """Orphan recovery with existing children re-enqueues first pending."""
+        task = _make_task()
+        pending_child = MagicMock()
+        pending_child.id = uuid.uuid4()
+        pending_child.status = types_module.SyncStatus.PENDING
         session = AsyncMock()
-        _setup_session_queries(session, task, connection)
+        _setup_session_queries(session, task, None, [pending_child])
         ctx = _make_ctx(session)
 
-        mock_event = MagicMock()
-        with _patch_candidate_sync(
-            event_results=[
-                (mock_event, True),
-                (mock_event, False),
-            ],
-        ) as mocks:
-            mocks["upsert_candidates"].return_value = 0
-            mocks["match_candidates"].return_value = 0
+        await concert_worker.sync_concert_archives(ctx, str(task.id))
 
-            await concert_worker.sync_concert_archives(ctx, str(task.id), _SAMPLE_CSV)
+        arq_redis = ctx["redis"]
+        arq_redis.enqueue_job.assert_awaited_once()
+        call_args = arq_redis.enqueue_job.call_args
+        assert call_args.args[0] == "sync_concert_archives_chunk"
 
-            mocks["complete_task"].assert_awaited_once()
-            result_arg = mocks["complete_task"].call_args.args[2]
-            assert result_arg["events_created"] == 1
-            assert result_arg["events_updated"] == 1
+
+# Chunk processor tests live in test_concert_archives_chunk.py
