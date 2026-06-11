@@ -89,6 +89,10 @@ _TASK_DISPATCH: dict[
         "sync_concert_archives",
         lambda t: (str(t.id),),
     ),
+    types_module.TaskType.CONCERT_ARCHIVES_CHUNK: (
+        "sync_concert_archives_chunk",
+        lambda t: (str(t.id),),
+    ),
     types_module.TaskType.PLAYLIST_EXPORT: (
         "export_playlist",
         lambda t: (str(t.id),),
@@ -1520,6 +1524,22 @@ async def _check_parent_completion(
             base_result["playlist_id"] = playlist_id
             base_result["tracks_selected"] = tracks_selected
             base_result["sources_summary"] = sources_summary
+    elif parent.task_type == types_module.TaskType.CONCERT_ARCHIVES_IMPORT:
+        totals: dict[str, int] = {
+            "events_created": 0,
+            "events_updated": 0,
+            "candidates_created": 0,
+            "candidates_matched": 0,
+            "total_events": 0,
+        }
+        for child in children:
+            child_result = child.result or {}
+            for key in totals:
+                totals[key] += int(str(child_result.get(key, 0)))
+        base_result.update(totals)
+        parent_params = parent.params or {}
+        if parent_params.get("warnings"):
+            base_result["warnings"] = parent_params["warnings"]
     else:
         total_created = 0
         total_updated = 0
@@ -1557,6 +1577,7 @@ async def _check_parent_completion(
     if parent.status == types_module.SyncStatus.COMPLETED and parent.task_type in (
         types_module.TaskType.SYNC_JOB,
         types_module.TaskType.CALENDAR_SYNC,
+        types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
     ):
         dedup_task = task_module.Task(
             task_type=types_module.TaskType.BULK_JOB,
@@ -1788,8 +1809,11 @@ async def _reenqueue_orphaned_tasks(
 
         enqueued = 0
         for task in all_tasks:
-            if task.task_type == types_module.TaskType.SYNC_JOB:
-                # Skip SYNC_JOBs that already have children — re-planning
+            if task.task_type in (
+                types_module.TaskType.SYNC_JOB,
+                types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
+            ):
+                # Skip parent tasks that already have children — re-planning
                 # would create duplicate child tasks.
                 children_count_result = await session.execute(
                     sa.select(sa.func.count()).where(
@@ -1798,8 +1822,9 @@ async def _reenqueue_orphaned_tasks(
                 )
                 if children_count_result.scalar_one() > 0:
                     logger.info(
-                        "skipped_sync_job_with_children",
+                        "skipped_parent_with_children",
                         task_id=str(task.id),
+                        task_type=task.task_type.value,
                     )
                     continue
 
@@ -1934,6 +1959,10 @@ class WorkerSettings:
         arq.func(
             heartbeat_module.with_heartbeat(concert_worker.sync_concert_archives),
             timeout=3600,
+        ),
+        arq.func(
+            heartbeat_module.with_heartbeat(concert_worker.sync_concert_archives_chunk),
+            timeout=600,
         ),
         arq.func(heartbeat_module.with_heartbeat(generate_playlist), timeout=3600),
         arq.func(
