@@ -61,6 +61,7 @@ class TaskType(enum.StrEnum):
     TRACK_DISCOVERY = "track_discovery"
     TRACK_SCORING = "track_scoring"
     CONCERT_ARCHIVES_IMPORT = "concert_archives_import"
+    CONCERT_ARCHIVES_CHUNK = "concert_archives_chunk"
     PLAYLIST_EXPORT = "playlist_export"
 
 
