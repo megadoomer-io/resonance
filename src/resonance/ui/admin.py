@@ -74,15 +74,6 @@ def _entity_action_response(
     return resp
 
 
-async def _enqueue_bulk_job(
-    request: fastapi.Request,
-    db: sa_async.AsyncSession,
-    operation: str,
-) -> dict[str, str]:
-    """Create a BULK_JOB task and enqueue it to arq."""
-    return await api_admin_module.enqueue_dedup(request, db, operation)
-
-
 # ---------------------------------------------------------------------------
 # Admin dashboard
 # ---------------------------------------------------------------------------
@@ -296,7 +287,7 @@ async def dedup_listening_events(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
     """Admin-only: enqueue cross-service event dedup as a bulk job."""
-    return await _enqueue_bulk_job(request, db, "dedup_events")
+    return await api_admin_module.enqueue_dedup(request, db, "dedup_events")
 
 
 @router.post("/admin/dedup-artists", response_model=None)
@@ -306,7 +297,7 @@ async def dedup_artists(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
     """Admin-only: enqueue artist dedup as a bulk job."""
-    return await _enqueue_bulk_job(request, db, "dedup_artists")
+    return await api_admin_module.enqueue_dedup(request, db, "dedup_artists")
 
 
 @router.post("/admin/dedup-tracks", response_model=None)
@@ -316,7 +307,7 @@ async def dedup_tracks(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
     """Admin-only: enqueue track dedup as a bulk job."""
-    return await _enqueue_bulk_job(request, db, "dedup_tracks")
+    return await api_admin_module.enqueue_dedup(request, db, "dedup_tracks")
 
 
 # ---------------------------------------------------------------------------
@@ -932,8 +923,6 @@ async def admin_track_search(
     q: str = "",
 ) -> dict[str, object]:
     """Admin-only: search tracks by title (fuzzy match)."""
-    if not q.strip():
-        return {"error": "Query parameter 'q' is required."}
     return await api_admin_module.search_tracks(db, q)
 
 

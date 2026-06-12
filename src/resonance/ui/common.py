@@ -12,15 +12,13 @@ import fastapi
 import fastapi.templating
 
 import resonance.connectors.registry as registry_module
+import resonance.database as database_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
     import datetime
     from collections.abc import Sequence
 
-    import sqlalchemy as sa
-    import sqlalchemy.ext.asyncio as sa_async
-    import sqlalchemy.orm as sa_orm
 
 PAGE_SIZE = 50
 
@@ -206,21 +204,5 @@ def page_offset(page: int, page_size: int = PAGE_SIZE) -> int:
 # ---------------------------------------------------------------------------
 
 
-def escape_ilike(q: str) -> str:
-    """Escape ``%`` and ``_`` for safe use in ILIKE patterns."""
-    return q.replace("%", r"\%").replace("_", r"\_")
-
-
-async def count_rows(
-    db: sa_async.AsyncSession,
-    model: type[sa_orm.DeclarativeBase],
-    *filters: sa.ColumnElement[bool],
-) -> int:
-    """Return the row count for *model*, optionally filtered."""
-    import sqlalchemy as sa
-
-    stmt = sa.select(sa.func.count()).select_from(model)
-    for f in filters:
-        stmt = stmt.where(f)
-    result = await db.execute(stmt)
-    return int(result.scalar_one())
+count_rows = database_module.count_rows
+escape_ilike = database_module.escape_ilike

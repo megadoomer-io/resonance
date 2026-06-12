@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import time
+import urllib.parse
 import uuid
 from typing import TYPE_CHECKING
 
@@ -294,7 +295,7 @@ def _cmd_track() -> None:
     if not query.strip():
         print("Usage: resonance-api track <query>")
         sys.exit(1)
-    resp = _api_request("GET", f"/api/v1/admin/tracks?q={query}")
+    resp = _api_request("GET", f"/api/v1/admin/tracks?q={urllib.parse.quote(query)}")
     data = resp.json()
     results = data.get("results", [])
     if not results:

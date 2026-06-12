@@ -11,12 +11,12 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
 import resonance.crypto as crypto_module
+import resonance.database as database_module
 import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.types as types_module
-import resonance.ui.common as common
 
 router = fastapi.APIRouter(
     prefix="/admin",
@@ -83,9 +83,9 @@ async def get_db_stats(
     db: sa_async.AsyncSession,
 ) -> dict[str, object]:
     """Database aggregate counts."""
-    artists = await common.count_rows(db, music_models.Artist)
-    tracks_total = await common.count_rows(db, music_models.Track)
-    events_total = await common.count_rows(db, music_models.ListeningEvent)
+    artists = await database_module.count_rows(db, music_models.Artist)
+    tracks_total = await database_module.count_rows(db, music_models.Track)
+    events_total = await database_module.count_rows(db, music_models.ListeningEvent)
 
     dur_result = await db.execute(
         sa.select(
@@ -158,7 +158,7 @@ async def get_task_detail(
         "operation": task.params.get("operation") if task.params else None,
         "progress_current": task.progress_current,
         "progress_total": task.progress_total,
-        "result": task.result if task.result else None,
+        "result": task.result,
         "error": task.error_message,
         "started_at": (task.started_at.isoformat() if task.started_at else None),
         "completed_at": (task.completed_at.isoformat() if task.completed_at else None),
@@ -178,7 +178,11 @@ async def search_tracks(
     result = await db.execute(
         sa.select(music_models.Track)
         .options(sa_orm.joinedload(music_models.Track.artist))
-        .where(sa.func.lower(music_models.Track.title).contains(query.strip().lower()))
+        .where(
+            music_models.Track.title.ilike(
+                f"%{database_module.escape_ilike(query.strip())}%"
+            )
+        )
         .order_by(music_models.Track.title)
         .limit(20)
     )
