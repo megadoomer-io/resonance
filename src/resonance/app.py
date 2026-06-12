@@ -92,7 +92,7 @@ def create_app() -> fastapi.FastAPI:
     logging_module.configure_logging(settings.log_level)
     application = fastapi.FastAPI(
         title=settings.app_name,
-        docs_url="/docs" if settings.debug else None,
+        docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
     )
