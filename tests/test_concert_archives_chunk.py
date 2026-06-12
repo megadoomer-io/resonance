@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 import pytest
 
@@ -71,6 +76,61 @@ def _build_chunk_ctx(
     return chunk, ctx
 
 
+@contextlib.contextmanager
+def _patch_chunk_sync(
+    *,
+    candidates_created: int = 2,
+    candidates_matched: int = 1,
+) -> Iterator[dict[str, Any]]:
+    """Patch all sync/lifecycle functions used by the chunk processor.
+
+    Yields a dict of mock objects keyed by short name.
+    """
+    mock_event = MagicMock()
+
+    with (
+        patch(
+            f"{_LIFECYCLE_PREFIX}.is_cancelled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as m_cancelled,
+        patch(
+            f"{_LIFECYCLE_PREFIX}.complete_task", new_callable=AsyncMock
+        ) as m_complete,
+        patch(
+            f"{_SYNC_PREFIX}.upsert_venue_candidate", new_callable=AsyncMock
+        ) as m_uvc,
+        patch(f"{_SYNC_PREFIX}.resolve_venue_candidate", new_callable=AsyncMock),
+        patch(
+            f"{_SYNC_PREFIX}.upsert_event_candidate", new_callable=AsyncMock
+        ) as m_uec,
+        patch(
+            f"{_SYNC_PREFIX}.resolve_event_candidate",
+            new_callable=AsyncMock,
+            return_value=(mock_event, True),
+        ),
+        patch(
+            f"{_SYNC_PREFIX}.upsert_candidates",
+            new_callable=AsyncMock,
+            return_value=candidates_created,
+        ),
+        patch(f"{_SYNC_PREFIX}.upsert_attendance", new_callable=AsyncMock) as m_attend,
+        patch(
+            f"{_SYNC_PREFIX}.match_candidates_to_artists",
+            new_callable=AsyncMock,
+            return_value=candidates_matched,
+        ),
+        patch("resonance.worker._check_parent_completion", new_callable=AsyncMock),
+    ):
+        yield {
+            "is_cancelled": m_cancelled,
+            "complete_task": m_complete,
+            "upsert_venue_candidate": m_uvc,
+            "upsert_event_candidate": m_uec,
+            "upsert_attendance": m_attend,
+        }
+
+
 class TestSyncConcertArchivesChunk:
     """Tests for sync_concert_archives_chunk."""
 
@@ -79,44 +139,14 @@ class TestSyncConcertArchivesChunk:
         """Chunk processes all events from the parent's parsed_events."""
         chunk, ctx = _build_chunk_ctx()
 
-        mock_event = MagicMock()
-        with (
-            patch(
-                f"{_LIFECYCLE_PREFIX}.is_cancelled",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(f"{_LIFECYCLE_PREFIX}.complete_task", new_callable=AsyncMock) as mc,
-            patch(
-                f"{_SYNC_PREFIX}.upsert_venue_candidate", new_callable=AsyncMock
-            ) as muvc,
-            patch(f"{_SYNC_PREFIX}.resolve_venue_candidate", new_callable=AsyncMock),
-            patch(f"{_SYNC_PREFIX}.upsert_event_candidate", new_callable=AsyncMock),
-            patch(
-                f"{_SYNC_PREFIX}.resolve_event_candidate",
-                new_callable=AsyncMock,
-                return_value=(mock_event, True),
-            ),
-            patch(
-                f"{_SYNC_PREFIX}.upsert_candidates",
-                new_callable=AsyncMock,
-                return_value=2,
-            ),
-            patch(f"{_SYNC_PREFIX}.upsert_attendance", new_callable=AsyncMock) as matt,
-            patch(
-                f"{_SYNC_PREFIX}.match_candidates_to_artists",
-                new_callable=AsyncMock,
-                return_value=1,
-            ),
-            patch("resonance.worker._check_parent_completion", new_callable=AsyncMock),
-        ):
+        with _patch_chunk_sync() as mocks:
             await concert_worker.sync_concert_archives_chunk(ctx, str(chunk.id))
 
-            assert muvc.await_count == 2
-            assert matt.await_count == 2
+            assert mocks["upsert_venue_candidate"].await_count == 2
+            assert mocks["upsert_attendance"].await_count == 2
 
-            mc.assert_awaited_once()
-            result = mc.call_args.args[2]
+            mocks["complete_task"].assert_awaited_once()
+            result = mocks["complete_task"].call_args.args[2]
             assert result["total_events"] == 2
             assert result["events_created"] == 2
             assert result["candidates_created"] == 4
@@ -127,39 +157,9 @@ class TestSyncConcertArchivesChunk:
         """Cancelled events do not create attendance records."""
         chunk, ctx = _build_chunk_ctx(csv=_CANCELLED_CSV)
 
-        mock_event = MagicMock()
-        with (
-            patch(
-                f"{_LIFECYCLE_PREFIX}.is_cancelled",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(f"{_LIFECYCLE_PREFIX}.complete_task", new_callable=AsyncMock) as mc,
-            patch(f"{_SYNC_PREFIX}.upsert_venue_candidate", new_callable=AsyncMock),
-            patch(f"{_SYNC_PREFIX}.resolve_venue_candidate", new_callable=AsyncMock),
-            patch(
-                f"{_SYNC_PREFIX}.upsert_event_candidate", new_callable=AsyncMock
-            ) as muec,
-            patch(
-                f"{_SYNC_PREFIX}.resolve_event_candidate",
-                new_callable=AsyncMock,
-                return_value=(mock_event, True),
-            ),
-            patch(
-                f"{_SYNC_PREFIX}.upsert_candidates",
-                new_callable=AsyncMock,
-                return_value=0,
-            ),
-            patch(f"{_SYNC_PREFIX}.upsert_attendance", new_callable=AsyncMock) as matt,
-            patch(
-                f"{_SYNC_PREFIX}.match_candidates_to_artists",
-                new_callable=AsyncMock,
-                return_value=0,
-            ),
-            patch("resonance.worker._check_parent_completion", new_callable=AsyncMock),
-        ):
+        with _patch_chunk_sync(candidates_created=0, candidates_matched=0) as mocks:
             await concert_worker.sync_concert_archives_chunk(ctx, str(chunk.id))
 
-            muec.assert_awaited_once()
-            matt.assert_not_awaited()
-            mc.assert_awaited_once()
+            mocks["upsert_event_candidate"].assert_awaited_once()
+            mocks["upsert_attendance"].assert_not_awaited()
+            mocks["complete_task"].assert_awaited_once()
