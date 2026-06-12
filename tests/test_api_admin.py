@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -203,6 +203,69 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         yield c
 
 
+class FakeResult:
+    """Fake DB result supporting scalars().unique().all(), one(), scalar(), all()."""
+
+    def __init__(self, items: list[Any] | None = None) -> None:
+        self._items = items or []
+
+    def unique(self) -> FakeResult:
+        return self
+
+    def scalars(self) -> FakeResult:
+        return self
+
+    def all(self) -> list[Any]:
+        return self._items
+
+    def one(self) -> Any:
+        return self._items[0]
+
+    def scalar(self) -> Any:
+        return self._items[0] if self._items else 0
+
+    def scalar_one(self) -> Any:
+        return self._items[0]
+
+    def scalar_one_or_none(self) -> Any:
+        return self._items[0] if self._items else None
+
+
+def _make_bearer_app(
+    db_session: FakeAsyncSession | None = None,
+    token: str = "test-admin-token",
+) -> Any:
+    """Create a test app that accepts bearer token auth."""
+    import fastapi
+
+    import resonance.api.v1 as api_v1_module
+
+    settings = config_module.Settings(
+        spotify_client_id="test-client-id",
+        spotify_client_secret="test-client-secret",
+        token_encryption_key="y4s2fMagCz79NWhqQfaAPbTBl9vnamqcvlGM6GRH2cQ=",
+        admin_api_token=token,
+    )
+    fake_redis = FakeRedis()
+
+    application = fastapi.FastAPI(title="test", lifespan=None)
+    application.state.settings = settings
+    application.state.session_factory = FakeSessionFactory(db_session)
+
+    application.add_middleware(
+        session_middleware.SessionMiddleware,
+        redis=fake_redis,  # type: ignore[arg-type]
+        secret_key=settings.session_secret_key,
+    )
+
+    application.include_router(api_v1_module.router)
+
+    registry = registry_module.ConnectorRegistry()
+    application.state.connector_registry = registry
+
+    return application
+
+
 class TestAdminTestConnect:
     """Tests for POST /api/v1/admin/test/connect."""
 
@@ -294,3 +357,211 @@ class TestAdminTestConnect:
         assert response.status_code == 200
         assert response.json() == {"status": "already_connected"}
         assert len(db_session._added) == 0
+
+
+class TestAdminAuth:
+    """Auth tests for admin endpoints using router-level verify_admin_access."""
+
+    async def test_bearer_token_auth(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeResult([])])
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/status",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+
+    async def test_invalid_bearer_token(self) -> None:
+        application = _make_bearer_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/status",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+        assert response.status_code == 403
+
+    async def test_unauthenticated(self, client: httpx.AsyncClient) -> None:
+        response = await client.get("/api/v1/admin/status")
+        assert response.status_code == 401
+
+    async def test_non_admin_session(self) -> None:
+        user_id = uuid.uuid4()
+        application, _redis = _create_authenticated_app(user_id, user_role="user")
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            response = await c.get("/api/v1/admin/status")
+        assert response.status_code == 403
+
+
+class TestAdminStatus:
+    """Tests for GET /api/v1/admin/status."""
+
+    async def test_returns_sync_jobs(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeResult([])])
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/status",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert "sync_jobs" in data
+        assert isinstance(data["sync_jobs"], list)
+
+
+class TestAdminStats:
+    """Tests for GET /api/v1/admin/stats."""
+
+    async def test_returns_aggregate_fields(self) -> None:
+        from collections import namedtuple
+
+        DurRow = namedtuple("DurRow", ["with_duration", "without_duration"])
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [
+                FakeResult([10]),  # artists count
+                FakeResult([20]),  # tracks count
+                FakeResult([30]),  # events count
+                FakeResult([DurRow(15, 5)]),  # duration breakdown
+                FakeResult([]),  # events by service
+                FakeResult([3]),  # duplicate artist groups
+                FakeResult([7]),  # duplicate track groups
+            ]
+        )
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/stats",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert "artists" in data
+        assert "tracks" in data
+        assert "events_total" in data
+        assert "tracks_with_duration" in data
+        assert "tracks_without_duration" in data
+        assert "events_by_service" in data
+        assert "duplicate_artist_groups" in data
+        assert "duplicate_track_groups" in data
+
+
+class TestAdminTaskDetail:
+    """Tests for GET /api/v1/admin/tasks/{task_id}."""
+
+    async def test_task_not_found(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeResult([])])
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                f"/api/v1/admin/tasks/{uuid.uuid4()}",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 404
+
+    async def test_returns_task_detail(self) -> None:
+        task = MagicMock()
+        task.id = uuid.uuid4()
+        task.status = types_module.SyncStatus.COMPLETED
+        task.params = {"operation": "dedup_events"}
+        task.progress_current = 100
+        task.progress_total = 100
+        task.result = {"items_deduped": 42}
+        task.error_message = None
+        task.started_at = None
+        task.completed_at = None
+
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeResult([task])])
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                f"/api/v1/admin/tasks/{task.id}",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["task_id"] == str(task.id)
+        assert data["status"] == "completed"
+        assert data["operation"] == "dedup_events"
+        assert data["result"] == {"items_deduped": 42}
+
+
+class TestAdminTrackSearch:
+    """Tests for GET /api/v1/admin/tracks."""
+
+    async def test_empty_query(self) -> None:
+        application = _make_bearer_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/tracks",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 422
+
+    async def test_returns_results(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeResult([])])
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/tracks?q=beatles",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["query"] == "beatles"
+        assert isinstance(data["results"], list)
+
+
+class TestAdminDedup:
+    """Tests for POST /api/v1/admin/dedup/{operation}."""
+
+    async def test_invalid_operation(self) -> None:
+        application = _make_bearer_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/admin/dedup/invalid",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 400
+
+    async def test_enqueues_job(self) -> None:
+        db_session = FakeAsyncSession()
+        application = _make_bearer_app(db_session=db_session)
+
+        fake_arq = MagicMock()
+        fake_arq.enqueue_job = AsyncMock()
+        application.state.arq_redis = fake_arq
+
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/admin/dedup/events",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert "task_id" in data
+        assert data["status"] == "started"
+        assert len(db_session._added) == 1

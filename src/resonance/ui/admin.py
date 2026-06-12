@@ -14,9 +14,9 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.api.v1.admin as api_admin_module
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
-import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.normalize as normalize_module
@@ -80,23 +80,7 @@ async def _enqueue_bulk_job(
     operation: str,
 ) -> dict[str, str]:
     """Create a BULK_JOB task and enqueue it to arq."""
-    task = task_models.Task(
-        task_type=types_module.TaskType.BULK_JOB,
-        status=types_module.SyncStatus.PENDING,
-        params={"operation": operation},
-        description=operation.replace("_", " ").title(),
-    )
-    db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "run_bulk_job",
-        task_id,
-        _job_id=f"bulk:{task_id}",
-    )
-    return {"task_id": task_id, "status": "started"}
+    return await api_admin_module.enqueue_dedup(request, db, operation)
 
 
 # ---------------------------------------------------------------------------
@@ -917,25 +901,7 @@ async def admin_task_status(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     """Admin-only: get status of a bulk/admin task."""
-    result = await db.execute(
-        sa.select(task_models.Task).where(task_models.Task.id == task_id)
-    )
-    task = result.scalar_one_or_none()
-
-    if task is None:
-        raise fastapi.HTTPException(status_code=404, detail="Task not found")
-
-    return {
-        "task_id": str(task.id),
-        "status": task.status.value,
-        "operation": task.params.get("operation"),
-        "progress_current": task.progress_current,
-        "progress_total": task.progress_total,
-        "result": task.result if task.result else None,
-        "error": task.error_message,
-        "started_at": (task.started_at.isoformat() if task.started_at else None),
-        "completed_at": (task.completed_at.isoformat() if task.completed_at else None),
-    }
+    return await api_admin_module.get_task_detail(db, task_id)
 
 
 @router.get("/admin/status", response_model=None)
@@ -945,47 +911,7 @@ async def admin_status(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     """Admin-only: overview of recent sync tasks."""
-    result = await db.execute(
-        sa.select(task_models.Task)
-        .where(task_models.Task.parent_id.is_(None))
-        .order_by(task_models.Task.created_at.desc())
-        .options(
-            sa_orm.joinedload(task_models.Task.service_connection),
-            sa_orm.joinedload(task_models.Task.children),
-        )
-        .limit(10)
-    )
-    jobs = result.scalars().unique().all()
-
-    tasks_list: list[dict[str, object]] = []
-    for job in jobs:
-        conn = job.service_connection
-        service = conn.service_type.value if conn else "unknown"
-        children_summary = [
-            {
-                "type": c.task_type.value,
-                "status": c.status.value,
-                "progress": c.progress_current,
-                "total": c.progress_total,
-                "description": c.description,
-                "error": c.error_message,
-            }
-            for c in sorted(job.children, key=lambda c: c.created_at)
-        ]
-        tasks_list.append(
-            {
-                "id": str(job.id),
-                "service": service,
-                "status": job.status.value,
-                "created_at": job.created_at.isoformat(),
-                "completed_at": (
-                    job.completed_at.isoformat() if job.completed_at else None
-                ),
-                "children": children_summary,
-            }
-        )
-
-    return {"sync_jobs": tasks_list}
+    return await api_admin_module.get_sync_status(db)
 
 
 @router.get("/admin/stats", response_model=None)
@@ -995,60 +921,7 @@ async def admin_stats(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     """Admin-only: database statistics overview."""
-    artists = await common.count_rows(db, music_models.Artist)
-    tracks_total = await common.count_rows(db, music_models.Track)
-    events_total = await common.count_rows(db, music_models.ListeningEvent)
-
-    dur_result = await db.execute(
-        sa.select(
-            sa.func.count()
-            .filter(music_models.Track.duration_ms.isnot(None))
-            .label("with_duration"),
-            sa.func.count()
-            .filter(music_models.Track.duration_ms.is_(None))
-            .label("without_duration"),
-        )
-    )
-    dur_row = dur_result.one()
-
-    events_by_svc = await db.execute(
-        sa.select(
-            music_models.ListeningEvent.source_service,
-            sa.func.count(),
-        ).group_by(music_models.ListeningEvent.source_service)
-    )
-
-    dup_artists_result = await db.execute(
-        sa.text(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT LOWER(name) "
-            "  FROM artists "
-            "  GROUP BY LOWER(name) "
-            "  HAVING COUNT(*) > 1"
-            ") sub"
-        )
-    )
-    dup_tracks_result = await db.execute(
-        sa.text(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT LOWER(title), artist_id "
-            "  FROM tracks "
-            "  GROUP BY LOWER(title), artist_id "
-            "  HAVING COUNT(*) > 1"
-            ") sub"
-        )
-    )
-
-    return {
-        "artists": artists,
-        "tracks": tracks_total,
-        "tracks_with_duration": dur_row.with_duration,
-        "tracks_without_duration": dur_row.without_duration,
-        "events_total": events_total,
-        "events_by_service": {row[0]: row[1] for row in events_by_svc.all()},
-        "duplicate_artist_groups": dup_artists_result.scalar() or 0,
-        "duplicate_track_groups": dup_tracks_result.scalar() or 0,
-    }
+    return await api_admin_module.get_db_stats(db)
 
 
 @router.get("/admin/track", response_model=None)
@@ -1061,64 +934,7 @@ async def admin_track_search(
     """Admin-only: search tracks by title (fuzzy match)."""
     if not q.strip():
         return {"error": "Query parameter 'q' is required."}
-
-    result = await db.execute(
-        sa.select(music_models.Track)
-        .options(sa_orm.joinedload(music_models.Track.artist))
-        .where(sa.func.lower(music_models.Track.title).contains(q.strip().lower()))
-        .order_by(music_models.Track.title)
-        .limit(20)
-    )
-    tracks = result.scalars().unique().all()
-
-    tracks_list: list[dict[str, object]] = []
-    for t in tracks:
-        # Event counts per service
-        ev_result = await db.execute(
-            sa.select(
-                music_models.ListeningEvent.source_service,
-                sa.func.count(),
-            )
-            .where(music_models.ListeningEvent.track_id == t.id)
-            .group_by(music_models.ListeningEvent.source_service)
-        )
-        # Recent events
-        recent = await db.execute(
-            sa.select(
-                music_models.ListeningEvent.listened_at,
-                music_models.ListeningEvent.source_service,
-            )
-            .where(music_models.ListeningEvent.track_id == t.id)
-            .order_by(music_models.ListeningEvent.listened_at.desc())
-            .limit(5)
-        )
-
-        dur_str = None
-        if t.duration_ms:
-            mins = t.duration_ms // 60000
-            secs = (t.duration_ms % 60000) // 1000
-            dur_str = f"{mins}m{secs:02d}s"
-
-        tracks_list.append(
-            {
-                "id": str(t.id),
-                "title": t.title,
-                "artist": t.artist.name if t.artist else None,
-                "duration_ms": t.duration_ms,
-                "duration": dur_str,
-                "service_links": t.service_links,
-                "events_by_service": {row[0]: row[1] for row in ev_result.all()},
-                "recent_events": [
-                    {
-                        "listened_at": row[0].isoformat(),
-                        "service": row[1],
-                    }
-                    for row in recent.all()
-                ],
-            }
-        )
-
-    return {"query": q, "results": tracks_list}
+    return await api_admin_module.search_tracks(db, q)
 
 
 # ---------------------------------------------------------------------------

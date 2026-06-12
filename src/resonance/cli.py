@@ -151,7 +151,7 @@ def _cmd_healthz() -> None:
 
 
 def _cmd_status() -> None:
-    resp = _api_request("GET", "/admin/status")
+    resp = _api_request("GET", "/api/v1/admin/status")
     data = resp.json()
     for job in data.get("sync_jobs", []):
         status = job["status"].upper()
@@ -170,7 +170,7 @@ def _cmd_status() -> None:
 
 
 def _cmd_stats() -> None:
-    resp = _api_request("GET", "/admin/stats")
+    resp = _api_request("GET", "/api/v1/admin/stats")
     data = resp.json()
     print(f"Artists:  {data['artists']}")
     print(f"Tracks:  {data['tracks']}")
@@ -210,7 +210,7 @@ def _poll_task(task_id: str, label: str) -> dict[str, object]:
     poll_interval = 3
 
     while True:
-        resp = _api_request("GET", f"/admin/tasks/{task_id}")
+        resp = _api_request("GET", f"/api/v1/admin/tasks/{task_id}")
         data = resp.json()
         status = data.get("status", "unknown")
 
@@ -249,16 +249,16 @@ def _cmd_dedup() -> None:
 
     targets: list[tuple[str, str]] = []
     if dedup_type == "events":
-        targets = [("events", "/admin/dedup-events")]
+        targets = [("events", "/api/v1/admin/dedup/events")]
     elif dedup_type == "artists":
-        targets = [("artists", "/admin/dedup-artists")]
+        targets = [("artists", "/api/v1/admin/dedup/artists")]
     elif dedup_type == "tracks":
-        targets = [("tracks", "/admin/dedup-tracks")]
+        targets = [("tracks", "/api/v1/admin/dedup/tracks")]
     elif dedup_type == "all":
         targets = [
-            ("artists", "/admin/dedup-artists"),
-            ("tracks", "/admin/dedup-tracks"),
-            ("events", "/admin/dedup-events"),
+            ("artists", "/api/v1/admin/dedup/artists"),
+            ("tracks", "/api/v1/admin/dedup/tracks"),
+            ("events", "/api/v1/admin/dedup/events"),
         ]
     else:
         print(f"Unknown dedup type: {dedup_type}")
@@ -285,7 +285,7 @@ def _cmd_task() -> None:
         print("Usage: resonance-api task <task_id>")
         sys.exit(1)
     task_id = sys.argv[2]
-    resp = _api_request("GET", f"/admin/tasks/{task_id}")
+    resp = _api_request("GET", f"/api/v1/admin/tasks/{task_id}")
     print(json.dumps(resp.json(), indent=2))
 
 
@@ -294,7 +294,7 @@ def _cmd_track() -> None:
     if not query.strip():
         print("Usage: resonance-api track <query>")
         sys.exit(1)
-    resp = _api_request("GET", f"/admin/track?q={query}")
+    resp = _api_request("GET", f"/api/v1/admin/tracks?q={query}")
     data = resp.json()
     results = data.get("results", [])
     if not results:

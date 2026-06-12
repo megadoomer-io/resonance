@@ -169,6 +169,8 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 ## Conventions
 
 - **API-first**: all data must be accessible via JSON API endpoints under `/api/v1/` — the UI is a rendering layer on top of the API, not a separate data path
+- **CLI-to-API mapping**: CLI subcommands map directly to API paths. `resonance-api <command>` hits `/api/v1/<domain>/<command>`. Admin commands use the `/api/v1/admin/` prefix; sync commands use `/api/v1/sync/`; etc. When adding new CLI commands, follow this pattern.
+- **OpenAPI spec**: FastAPI serves Swagger UI at `/docs` and the raw spec at `/openapi.json` when `debug=True`. Both are disabled in production.
 - API versioned under `/api/v1/`
 - Connector classes live in `connectors/` and declare capabilities via `ConnectorCapability` enum
 - Connectors also declare a `ConnectionConfig` (auth type, sync function, sync style) — used for generic sync dispatch, orphan recovery, and UI rendering
