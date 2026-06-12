@@ -46,6 +46,7 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_module
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
+import resonance.services.artist_utils as artist_utils
 import resonance.sync.base as sync_base
 import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
@@ -1277,32 +1278,64 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.info("export_playlist_token_refreshed")
 
-            # Match tracks to Spotify IDs
+            # Get ListenBrainz connector for MB URL relations lookup
+            lb_raw = connector_registry.get_base_connector(
+                types_module.ServiceType.LISTENBRAINZ
+            )
+            lb_connector = (
+                lb_raw
+                if isinstance(lb_raw, listenbrainz_module.ListenBrainzConnector)
+                else None
+            )
+
+            # Match tracks to Spotify IDs (two-pass: MB URL relations, then text search)
             spotify_uris: list[str] = []
             skipped_tracks: list[str] = []
+            mb_matched = 0
+            search_matched = 0
 
             for pt in playlist.tracks:
                 track = pt.track
                 track_links = track.service_links or {}
                 spotify_id = track_links.get("spotify")
 
+                if spotify_id is None and lb_connector is not None:
+                    recording_mbid = artist_utils.get_mbid(track_links)
+                    if recording_mbid:
+                        found_id = await lb_connector.get_recording_spotify_id(
+                            recording_mbid
+                        )
+                        if found_id is not None:
+                            updated_links = dict(track_links)
+                            updated_links["spotify"] = found_id
+                            track.service_links = updated_links
+                            spotify_id = found_id
+                            mb_matched += 1
+
                 if spotify_id is None:
-                    # Search Spotify for the track
                     artist_name = track.artist.name if track.artist else ""
                     found_id = await connector.search_track(
                         access_token, track.title, artist_name
                     )
                     if found_id is not None:
-                        # Persist the match (copy-on-write for JSON column)
                         updated_links = dict(track_links)
                         updated_links["spotify"] = found_id
                         track.service_links = updated_links
                         spotify_id = found_id
+                        search_matched += 1
                     else:
                         skipped_tracks.append(track.title)
                         continue
 
                 spotify_uris.append(f"spotify:track:{spotify_id}")
+
+            log.info(
+                "export_track_matching_summary",
+                mb_matched=mb_matched,
+                search_matched=search_matched,
+                cached=len(spotify_uris) - mb_matched - search_matched,
+                skipped=len(skipped_tracks),
+            )
 
             if not spotify_uris:
                 await lifecycle_module.fail_task(

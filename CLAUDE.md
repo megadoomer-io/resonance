@@ -187,7 +187,7 @@ uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 - Task lifecycle helpers (`sync/lifecycle.py`) provide `complete_task`/`fail_task` — use these instead of setting task status inline
 - Orphan recovery in the worker is type-agnostic — new task types are handled by adding an entry to `_TASK_DISPATCH`
 - Playlist export uses `PLAYLIST_WRITE` capability — connectors declare it to enable export. Export creates a background `PLAYLIST_EXPORT` task per connection, tracked via `playlist.service_links`
-- Track matching: export searches Spotify for tracks missing `service_links["spotify"]` and persists matches for future reuse
+- Track matching: export uses two-pass resolution. First, tracks with MusicBrainz recording MBIDs are resolved via MB URL relations (authoritative, community-curated). Second, unresolved tracks fall back to Spotify text search. Matches from both passes are persisted in `service_links["spotify"]` for future reuse.
 - Sync staleness: compare `playlist.updated_at` vs `service_links[connection].exported_at` — no external API calls needed
 - No deployment manifests in this repo — all K8s config lives in `megadoomer-config`
 

@@ -263,6 +263,47 @@ class ListenBrainzConnector(base_module.BaseConnector):
         )
         return result
 
+    _SPOTIFY_TRACK_PREFIX = "https://open.spotify.com/track/"
+
+    async def get_recording_spotify_id(self, recording_mbid: str) -> str | None:
+        """Look up a recording's Spotify track ID via MusicBrainz URL relations.
+
+        Args:
+            recording_mbid: MusicBrainz recording UUID.
+
+        Returns:
+            Spotify track ID if a URL relation exists, or None.
+        """
+        try:
+            response = await self._request(
+                "GET",
+                f"{self._MUSICBRAINZ_API}/recording/{recording_mbid}",
+                params={"inc": "url-rels", "fmt": "json"},
+                headers={
+                    "User-Agent": "Resonance/1.0 (https://resonance.megadoomer.io)"
+                },
+            )
+        except httpx.HTTPStatusError:
+            logger.warning(
+                "musicbrainz_recording_url_rels_failed",
+                recording_mbid=recording_mbid,
+            )
+            return None
+
+        data: dict[str, Any] = response.json()
+        for rel in data.get("relations", []):
+            url: str = rel.get("url", {}).get("resource", "")
+            if url.startswith(self._SPOTIFY_TRACK_PREFIX):
+                track_id = url[len(self._SPOTIFY_TRACK_PREFIX) :].split("?")[0]
+                logger.info(
+                    "musicbrainz_spotify_id_resolved",
+                    recording_mbid=recording_mbid,
+                    spotify_id=track_id,
+                )
+                return track_id
+
+        return None
+
     @staticmethod
     def _parse_mb_artist(data: dict[str, Any]) -> dict[str, Any]:
         """Parse a MusicBrainz artist response into a structured dict.
