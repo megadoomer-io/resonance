@@ -295,10 +295,12 @@ class SpotifyConnector(base_module.BaseConnector):
         name: str,
         description: str = "",
     ) -> str:
-        """Create a playlist on the user's Spotify account.
+        """Create a private playlist on the user's Spotify account.
 
-        Spotify dev mode ignores ``public=False``, so playlists are always
-        public.  We send ``public=True`` to match the actual behavior.
+        Sends ``public=False`` because the OAuth grant requests
+        ``playlist-modify-private`` (not ``playlist-modify-public``). Creating
+        a public playlist requires the public scope, so ``public=True`` returns
+        403 "Insufficient client scope".
         """
         response = await self._request(
             "POST",
@@ -308,7 +310,7 @@ class SpotifyConnector(base_module.BaseConnector):
             json={
                 "name": name,
                 "description": description,
-                "public": True,
+                "public": False,
             },
         )
         data: dict[str, str] = response.json()
