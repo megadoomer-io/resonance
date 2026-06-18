@@ -56,6 +56,7 @@ class ConnectorCapability(enum.StrEnum):
     TRACK_RATINGS = "track_ratings"
     NEW_RELEASES = "new_releases"
     TRACK_DISCOVERY = "track_discovery"
+    SIMILAR_ARTISTS = "similar_artists"
 
 
 class TokenResponse(pydantic.BaseModel):
