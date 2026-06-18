@@ -47,7 +47,8 @@ class TestCreatePlaylist:
             body = json.loads(request.content)
             assert body["name"] == "My Playlist"
             assert body["description"] == "A test playlist"
-            assert body["public"] is True
+            # Private: the grant has playlist-modify-private, not -public.
+            assert body["public"] is False
             return httpx.Response(
                 201, json={"id": "playlist-abc123", "name": "My Playlist"}
             )
