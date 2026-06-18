@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime
 import traceback
 import typing
@@ -47,6 +48,8 @@ import resonance.models.task as task_module
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.services.artist_utils as artist_utils
+import resonance.services.mbid_mapper as mbid_mapper_module
+import resonance.sync.backfill as backfill_module
 import resonance.sync.base as sync_base
 import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
@@ -96,6 +99,10 @@ _TASK_DISPATCH: dict[
     ),
     types_module.TaskType.PLAYLIST_EXPORT: (
         "export_playlist",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.MBID_BACKFILL: (
+        "backfill_mbids",
         lambda t: (str(t.id),),
     ),
 }
@@ -498,6 +505,119 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
+
+
+async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
+    """Execute an MBID_BACKFILL task (#71): resolve missing MusicBrainz IDs.
+
+    Reads ``params``:
+      - ``entity_types``: subset of ["track", "artist"] (default both).
+      - ``retry``: if true, first clear prior NO_MATCH/BELOW_SIMILARITY markers so
+        those rows are re-attempted (transient rows are already unattempted).
+
+    Runs tracks-first (to harvest artist_mbids) then artists via
+    ``backfill.run_mbid_backfill``, recording per-entity-type counts in the task
+    result. Long-running but resumable (``mb_attempted_at``), so a worker restart
+    re-enters and continues from the unattempted remainder.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the MBID_BACKFILL Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    settings = wctx["settings"]
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    connector = wctx["connector_registry"].get_base_connector(
+        types_module.ServiceType.LISTENBRAINZ
+    )
+    mapper = mbid_mapper_module.MbidMapperClient(settings)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("mbid_backfill_task_not_found")
+                return
+
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                return
+
+            if not isinstance(connector, listenbrainz_module.ListenBrainzConnector):
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    "ListenBrainz connector unavailable for MBID backfill",
+                )
+                await session.commit()
+                log.error("mbid_backfill_no_connector")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            params = task.params or {}
+            raw_types = params.get("entity_types")
+            entity_types = (
+                raw_types if isinstance(raw_types, list) else ["track", "artist"]
+            )
+            do_tracks = "track" in entity_types
+            do_artists = "artist" in entity_types
+            retry = bool(params.get("retry", False))
+
+            if retry:
+                # Re-attempt prior misses (transient rows are already unattempted).
+                # Unrolled per model so the column types stay concrete for mypy.
+                reattempt = [
+                    types_module.MatchStatus.NO_MATCH,
+                    types_module.MatchStatus.BELOW_SIMILARITY,
+                ]
+                await session.execute(
+                    sa.update(music_models.Track)
+                    .where(music_models.Track.mb_match_status.in_(reattempt))
+                    .values(mb_attempted_at=None, mb_match_status=None)
+                )
+                await session.execute(
+                    sa.update(music_models.Artist)
+                    .where(music_models.Artist.mb_match_status.in_(reattempt))
+                    .values(mb_attempted_at=None, mb_match_status=None)
+                )
+                await session.commit()
+
+            log.info(
+                "mbid_backfill_started",
+                do_tracks=do_tracks,
+                do_artists=do_artists,
+                retry=retry,
+            )
+            counts = await backfill_module.run_mbid_backfill(
+                session,
+                settings,
+                mapper=mapper,
+                connector=connector,
+                do_tracks=do_tracks,
+                do_artists=do_artists,
+            )
+            result: dict[str, object] = {
+                etype: dataclasses.asdict(c) for etype, c in counts.items()
+            }
+            await lifecycle_module.complete_task(session, task, result)
+            await session.commit()
+            log.info("mbid_backfill_done", result=result)
+        except Exception:
+            log.exception("mbid_backfill_failed")
+            if task is not None:
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
+                await session.commit()
+        finally:
+            await mapper.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -2094,6 +2214,7 @@ class WorkerSettings:
             heartbeat_module.with_heartbeat(score_and_build_playlist), timeout=600
         ),
         arq.func(heartbeat_module.with_heartbeat(export_playlist), timeout=600),
+        arq.func(heartbeat_module.with_heartbeat(backfill_mbids), timeout=3600),
     ]
     on_startup = startup
     on_shutdown = shutdown

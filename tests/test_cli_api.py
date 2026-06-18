@@ -362,3 +362,64 @@ class TestApiCommandRegistration:
 
     def test_api_in_usage_text(self) -> None:
         assert "api" in cli_module._USAGE
+
+
+class TestBackfillMbidsCommand:
+    """Tests for `resonance-api backfill-mbids` (#71)."""
+
+    def test_registered(self) -> None:
+        assert "backfill-mbids" in cli_module._COMMANDS
+
+    def test_status_does_get(
+        self, monkeypatch: pytest.MonkeyPatch, _mock_config: None
+    ) -> None:
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "backfill-mbids", "--status"]
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_req(method: str, path: str, **_: Any) -> httpx.Response:
+            captured["method"], captured["path"] = method, path
+            return _fake_response(json_body={"track": {"by_status": {"matched": 5}}})
+
+        monkeypatch.setattr(cli_module, "_api_request", fake_req)
+        cli_module._cmd_backfill_mbids()
+        assert captured["method"] == "GET"
+        assert captured["path"] == "/api/v1/admin/backfill-mbids"
+
+    def test_retry_no_wait_posts_with_query(
+        self, monkeypatch: pytest.MonkeyPatch, _mock_config: None
+    ) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["resonance-api", "backfill-mbids", "--retry", "--no-wait"],
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_req(method: str, path: str, **_: Any) -> httpx.Response:
+            captured["method"], captured["path"] = method, path
+            return _fake_response(json_body={"task_id": "T1", "status": "started"})
+
+        monkeypatch.setattr(cli_module, "_api_request", fake_req)
+        cli_module._cmd_backfill_mbids()
+        assert captured["method"] == "POST"
+        assert "retry=true" in captured["path"]
+
+    def test_tracks_only_sets_entity_types(
+        self, monkeypatch: pytest.MonkeyPatch, _mock_config: None
+    ) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["resonance-api", "backfill-mbids", "--tracks", "--no-wait"],
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_req(method: str, path: str, **_: Any) -> httpx.Response:
+            captured["path"] = path
+            return _fake_response(json_body={"task_id": "T1", "status": "started"})
+
+        monkeypatch.setattr(cli_module, "_api_request", fake_req)
+        cli_module._cmd_backfill_mbids()
+        assert "entity_types=track" in captured["path"]

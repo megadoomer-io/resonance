@@ -63,6 +63,7 @@ class TaskType(enum.StrEnum):
     CONCERT_ARCHIVES_IMPORT = "concert_archives_import"
     CONCERT_ARCHIVES_CHUNK = "concert_archives_chunk"
     PLAYLIST_EXPORT = "playlist_export"
+    MBID_BACKFILL = "mbid_backfill"
 
 
 class SyncStatus(enum.StrEnum):
@@ -124,3 +125,22 @@ class TrackSource(enum.StrEnum):
     LIBRARY = "library"
     DISCOVERY = "discovery"
     MANUAL = "manual"
+
+
+class MatchStatus(enum.StrEnum):
+    """Outcome of a MusicBrainz MBID backfill attempt for an artist or track.
+
+    Stored in Artist/Track.mb_match_status. A NULL column (no member) means the
+    entity has not been attempted yet (resume key). MATCHED means an MBID was
+    written; NO_MATCH means the mapper returned nothing; BELOW_SIMILARITY means a
+    candidate was returned but rejected by the name-similarity gate. Transient
+    errors leave mb_attempted_at / mb_match_status NULL so they are retried.
+
+    Note: SQLAlchemy stores the enum .name (UPPERCASE) in the column, so DB-level
+    CHECK constraints and raw SQL must use 'MATCHED' / 'NO_MATCH' /
+    'BELOW_SIMILARITY', not the lowercase values.
+    """
+
+    MATCHED = "matched"
+    NO_MATCH = "no_match"
+    BELOW_SIMILARITY = "below_similarity"

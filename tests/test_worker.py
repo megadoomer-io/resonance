@@ -44,7 +44,7 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 10
+        assert len(funcs) == 11
         names = {f.name for f in funcs}
         assert names == {
             "plan_sync",
@@ -57,6 +57,7 @@ class TestWorkerSettings:
             "discover_tracks_for_artist",
             "score_and_build_playlist",
             "export_playlist",
+            "backfill_mbids",
         }
 
     def test_lifecycle_hooks(self) -> None:

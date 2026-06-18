@@ -33,3 +33,31 @@ Deferred work items with full context. Each entry explains what, why, and where 
 **Where to start:** Add a `_TASK_TYPE_CAPABILITIES` mapping from TaskType to required ConnectorCapability. Add capability checks in `_check_parent_completion()` and `_reenqueue_orphaned_tasks()`. Add runtime validation in `startup()` to verify registered strategies match declared capabilities.
 
 **Source:** /plan-eng-review D12+D17, 2026-05-28. Outside voice caught the call-site audit gap; user requested forward-looking refactor.
+
+## Phase B — local MusicBrainz DB as discovery engine (#71 follow-on)
+
+**Status:** Deferred 2026-06-18. Revisit after Phase A (hosted-mapper MBID backfill) ships and its coverage report is in hand.
+
+**What:** Stand up a local MusicBrainz mirror — the DB-only variant (`docker-compose.alt.db-only-mirror.yml` in metabrainz/musicbrainz-docker, no web/search/API containers). Use it as (1) a discovery engine for deep cuts, unheard tracks by known artists, and never-before-seen related artists, and (2) an alternate, rate-limit-free matching source if the hosted mapper's coverage disappoints.
+
+**Why:** The hosted MetaBrainz mapper (Phase A) can backfill MBIDs but cannot power discovery (querying recordings/relationships at will), and may have a low match ceiling on a concert-discovery library skewed to live/bootleg/long-tail recordings. A local mirror removes both limits. Deployed nowhere — laptop-only, one-time-ish tool.
+
+**Depends on / blocked by:** Phase A coverage report (the match-rate gate, T3-A) telling us whether the hosted ceiling actually justifies the mirror. The Phase A matcher is built source-agnostic (adapter pattern) so the local DB slots in as a third adapter.
+
+**Where to start:** When ready to download, see https://musicbrainz.org/doc/MusicBrainz_Database/Download (and the db-only-mirror compose file). Needs Docker (colima on macOS). Expect a multi-GB download + import taking hours. Then add a local-DB adapter behind the Phase A backfill core, and a query layer for discovery.
+
+**Source:** /plan-eng-review 2026-06-18, #71. Hosted-mapper-first sequencing (D1); local DB deferred per coverage gate.
+
+## Surface MBID collisions as merge candidates (#71 follow-on)
+
+**Status:** Deferred 2026-06-18. Revisit once Phase A produces collision logs worth acting on.
+
+**What:** Turn logged MBID collisions (two library rows resolving to the same MusicBrainz id, recorded by the Phase A backfill per T5-A) into an actionable merge-candidate queue.
+
+**Why:** `dedup.py` finds name-based duplicates, but an identical MBID is a stronger, higher-precision dedup signal that Phase A currently only logs and skips. Acting on it would catch duplicates name-matching misses.
+
+**Depends on / blocked by:** Phase A backfill emitting collision logs (counted in the coverage report).
+
+**Where to start:** Add a merge-candidate store (a small candidates table, or reuse `EventArtistCandidate`-style storage) that the backfill writes collisions into, surfaced through the existing `api/v1/matching.py` pairwise merge preview/confirm. No auto-merge.
+
+**Source:** /plan-eng-review 2026-06-18, #71, Tension 4 (T5-A). Outside voice flagged that the merge endpoints are pairwise/UI-only with no ingest path.

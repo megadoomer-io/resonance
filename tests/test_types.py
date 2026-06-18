@@ -94,6 +94,9 @@ class TestTaskTypeNewValues:
         assert types_module.TaskType.BULK_JOB == "bulk_job"
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
-    def test_tasktype_has_eleven_members(self) -> None:
-        """TaskType should have 11 members."""
-        assert len(types_module.TaskType) == 11
+    def test_tasktype_member_count(self) -> None:
+        """TaskType members (bump when adding a task type)."""
+        assert len(types_module.TaskType) == 12
+
+    def test_mbid_backfill_value(self) -> None:
+        assert types_module.TaskType.MBID_BACKFILL == "mbid_backfill"

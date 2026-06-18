@@ -565,3 +565,64 @@ class TestAdminDedup:
         assert "task_id" in data
         assert data["status"] == "started"
         assert len(db_session._added) == 1
+
+
+class TestAdminBackfillMbids:
+    """Tests for the MBID backfill admin endpoints (#71)."""
+
+    async def test_enqueues_with_retry_param(self) -> None:
+        db_session = FakeAsyncSession()
+        application = _make_bearer_app(db_session=db_session)
+        fake_arq = MagicMock()
+        fake_arq.enqueue_job = AsyncMock()
+        application.state.arq_redis = fake_arq
+
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/admin/backfill-mbids?retry=true",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        assert response.json()["status"] == "started"
+        assert len(db_session._added) == 1
+        task = db_session._added[0]
+        assert task.task_type == types_module.TaskType.MBID_BACKFILL
+        assert task.params.get("retry") is True
+        fake_arq.enqueue_job.assert_awaited_once()
+
+    async def test_entity_types_param(self) -> None:
+        db_session = FakeAsyncSession()
+        application = _make_bearer_app(db_session=db_session)
+        application.state.arq_redis = MagicMock(enqueue_job=AsyncMock())
+
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/admin/backfill-mbids?entity_types=track",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        assert db_session._added[0].params.get("entity_types") == ["track"]
+
+    async def test_coverage_report(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [
+                FakeResult([(types_module.MatchStatus.MATCHED, 5), (None, 10)]),
+                FakeResult([(types_module.MatchStatus.NO_MATCH, 2)]),
+            ]
+        )
+        application = _make_bearer_app(db_session=db_session)
+
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/backfill-mbids",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["track"]["by_status"]["matched"] == 5
+        assert data["track"]["by_status"]["unattempted"] == 10
+        assert data["artist"]["by_status"]["no_match"] == 2

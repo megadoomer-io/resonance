@@ -99,7 +99,7 @@ class TestTaskType:
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
     def test_task_type_count(self) -> None:
-        assert len(types_module.TaskType) == 11
+        assert len(types_module.TaskType) == 12
 
 
 class TestAttendanceStatus:
@@ -124,6 +124,26 @@ class TestCandidateStatus:
 
     def test_candidate_status_count(self) -> None:
         assert len(types_module.CandidateStatus) == 4
+
+
+class TestMatchStatus:
+    """Verify MatchStatus enum values (MBID backfill outcomes, #71)."""
+
+    def test_values(self) -> None:
+        assert types_module.MatchStatus.MATCHED == "matched"
+        assert types_module.MatchStatus.NO_MATCH == "no_match"
+        assert types_module.MatchStatus.BELOW_SIMILARITY == "below_similarity"
+
+    def test_match_status_count(self) -> None:
+        assert len(types_module.MatchStatus) == 3
+
+    def test_names_are_uppercase_for_db_storage(self) -> None:
+        # SQLAlchemy stores the .name; the migration CHECK depends on these.
+        assert {m.name for m in types_module.MatchStatus} == {
+            "MATCHED",
+            "NO_MATCH",
+            "BELOW_SIMILARITY",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +355,20 @@ class TestArtistModel:
             "id",
             "name",
             "service_links",
+            "mb_attempted_at",
+            "mb_match_status",
             "created_at",
             "updated_at",
         }
+
+    def test_mb_match_status_is_enum(self) -> None:
+        col = _get_column(music_module.Artist.__table__, "mb_match_status")  # type: ignore[arg-type]
+        assert isinstance(col.type, sa.Enum)
+        assert col.nullable is True
+
+    def test_mb_attempted_at_nullable(self) -> None:
+        col = _get_column(music_module.Artist.__table__, "mb_attempted_at")  # type: ignore[arg-type]
+        assert col.nullable is True
 
     def test_tracks_relationship(self) -> None:
         mapper: orm.Mapper[music_module.Artist] = orm.class_mapper(music_module.Artist)
@@ -358,9 +389,16 @@ class TestTrackModel:
             "title",
             "artist_id",
             "service_links",
+            "mb_attempted_at",
+            "mb_match_status",
             "created_at",
             "updated_at",
         }
+
+    def test_mb_match_status_is_enum(self) -> None:
+        col = _get_column(music_module.Track.__table__, "mb_match_status")  # type: ignore[arg-type]
+        assert isinstance(col.type, sa.Enum)
+        assert col.nullable is True
 
     def test_artist_fk(self) -> None:
         col = _get_column(music_module.Track.__table__, "artist_id")  # type: ignore[arg-type]
