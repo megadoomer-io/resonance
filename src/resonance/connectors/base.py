@@ -190,6 +190,7 @@ class BaseConnector(abc.ABC):
     _MAX_TRANSIENT_RETRIES = 5
     _TRANSIENT_BACKOFF_BASE = 2.0  # seconds — doubles each retry
     _MAX_RATE_LIMIT_WAIT = 120.0  # seconds — fail instead of sleeping longer
+    _MAX_FORBIDDEN_RETRIES = 3  # Spotify dev mode returns transient 403s
 
     async def _request(
         self,
@@ -198,20 +199,27 @@ class BaseConnector(abc.ABC):
         *,
         high_priority: bool = False,
         max_retries: int | None = None,
+        retry_forbidden: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
         """Make an HTTP request with rate limit pacing and automatic retry.
 
-        Handles two retry scenarios:
+        Handles three retry scenarios:
         - **429 rate limits**: Respects Retry-After headers, retries
           indefinitely until the request succeeds.
         - **Transient errors** (timeouts, disconnects, connection errors):
           Retries with exponential backoff up to _MAX_TRANSIENT_RETRIES.
+        - **Transient 403s** (opt-in via ``retry_forbidden``): Spotify dev mode
+          intermittently returns 403 on writes that succeed on retry. Retries
+          with backoff up to _MAX_FORBIDDEN_RETRIES; a genuine permission error
+          still fails once retries are exhausted.
 
         Args:
             method: HTTP method (GET, POST, etc.).
             url: Request URL.
             high_priority: If True, skip pacing when budget is available.
+            max_retries: Override the transient-retry cap for this request.
+            retry_forbidden: If True, retry transient 403 responses with backoff.
             **kwargs: Additional arguments passed to httpx request.
 
         Returns:
@@ -227,6 +235,7 @@ class BaseConnector(abc.ABC):
             max_retries if max_retries is not None else self._MAX_TRANSIENT_RETRIES
         )
         transient_attempt = 0
+        forbidden_attempt = 0  # never reset mid-loop; bounds total 403 retries
 
         while True:
             interval = self._budget.paced_interval(high_priority=high_priority)
@@ -313,6 +322,28 @@ class BaseConnector(abc.ABC):
                     status_code=response.status_code,
                     attempt=transient_attempt,
                     max_attempts=effective_max_retries,
+                    backoff_seconds=round(backoff, 1),
+                )
+                await asyncio.sleep(backoff)
+                continue
+
+            if response.status_code == 403 and retry_forbidden:
+                forbidden_attempt += 1
+                if forbidden_attempt > self._MAX_FORBIDDEN_RETRIES:
+                    logger.error(
+                        "forbidden_retries_exhausted",
+                        method=method,
+                        url=url,
+                        attempts=forbidden_attempt,
+                    )
+                    response.raise_for_status()
+                backoff = self._TRANSIENT_BACKOFF_BASE**forbidden_attempt
+                logger.warning(
+                    "forbidden_retry",
+                    method=method,
+                    url=url,
+                    attempt=forbidden_attempt,
+                    max_attempts=self._MAX_FORBIDDEN_RETRIES,
                     backoff_seconds=round(backoff, 1),
                 )
                 await asyncio.sleep(backoff)

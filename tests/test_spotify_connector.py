@@ -1,6 +1,7 @@
 """Tests for the Spotify connector."""
 
 import urllib.parse
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -601,3 +602,66 @@ class TestSavedTrackPage:
         assert page.items == []
         assert page.total == 0
         assert page.next_url is None
+
+
+class TestForbiddenRetry:
+    """Tests for transient 403 retry on Spotify write operations."""
+
+    @staticmethod
+    def _connector(handler: httpx.MockTransport) -> spotify_module.SpotifyConnector:
+        connector = spotify_module.SpotifyConnector(settings=_make_settings())
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+        connector._http_client = httpx.AsyncClient(transport=handler)
+        return connector
+
+    @pytest.mark.anyio()
+    async def test_create_playlist_retries_transient_403(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(403, json={"error": {"status": 403}})
+            return httpx.Response(201, json={"id": "pl-123"})
+
+        connector = self._connector(httpx.MockTransport(handler))
+        with patch("resonance.connectors.base.asyncio.sleep", new=AsyncMock()):
+            playlist_id = await connector.create_playlist("tok", "My Playlist", "")
+
+        assert playlist_id == "pl-123"
+        assert calls["n"] == 2  # one 403, then success
+
+    @pytest.mark.anyio()
+    async def test_create_playlist_exhausts_403_then_raises(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(403, json={"error": {"status": 403}})
+
+        connector = self._connector(httpx.MockTransport(handler))
+        with (
+            patch("resonance.connectors.base.asyncio.sleep", new=AsyncMock()),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await connector.create_playlist("tok", "My Playlist", "")
+
+        # initial attempt + _MAX_FORBIDDEN_RETRIES retries
+        assert calls["n"] == base_module.BaseConnector._MAX_FORBIDDEN_RETRIES + 1
+
+    @pytest.mark.anyio()
+    async def test_non_write_403_fails_fast(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(403, json={"error": {"status": 403}})
+
+        connector = self._connector(httpx.MockTransport(handler))
+        with (
+            patch("resonance.connectors.base.asyncio.sleep", new=AsyncMock()),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await connector.get_current_user("tok")
+
+        assert calls["n"] == 1  # no retry without retry_forbidden
