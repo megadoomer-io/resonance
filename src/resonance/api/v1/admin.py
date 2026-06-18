@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 import fastapi
 import sqlalchemy as sa
@@ -136,6 +136,41 @@ async def get_db_stats(
         "events_by_service": {row[0]: row[1] for row in events_by_svc.all()},
         "duplicate_artist_groups": dup_artists_result.scalar() or 0,
         "duplicate_track_groups": dup_tracks_result.scalar() or 0,
+    }
+
+
+async def _mb_status_counts(
+    db: sa_async.AsyncSession, status_col: Any
+) -> dict[str, int]:
+    """Count rows grouped by an mb_match_status column (None -> 'unattempted')."""
+    rows = (
+        await db.execute(sa.select(status_col, sa.func.count()).group_by(status_col))
+    ).all()
+    return {
+        (status.value if status is not None else "unattempted"): count
+        for status, count in rows
+    }
+
+
+async def get_backfill_coverage(db: sa_async.AsyncSession) -> dict[str, object]:
+    """MBID-backfill coverage by entity type and outcome (#71, the T3-A gate).
+
+    For tracks and artists, counts rows by ``mb_match_status``. The None bucket
+    (not yet attempted, or left for retry after a transient error) is reported as
+    ``"unattempted"``. This is the decision input for whether hosted-mapper
+    coverage is good enough or the local MB DB (Phase B) is worth standing up.
+    """
+    return {
+        "track": {
+            "by_status": await _mb_status_counts(
+                db, music_models.Track.mb_match_status
+            ),
+        },
+        "artist": {
+            "by_status": await _mb_status_counts(
+                db, music_models.Artist.mb_match_status
+            ),
+        },
     }
 
 
@@ -326,6 +361,55 @@ async def admin_dedup_endpoint(
             ),
         )
     return await enqueue_dedup(request, db, f"dedup_{operation}")
+
+
+@router.post(
+    "/backfill-mbids",
+    summary="Enqueue MusicBrainz MBID backfill",
+)
+async def admin_backfill_mbids_endpoint(
+    request: fastapi.Request,
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    retry: bool = False,
+    entity_types: Annotated[list[str] | None, fastapi.Query()] = None,
+) -> dict[str, str]:
+    """Enqueue an MBID_BACKFILL task (#71).
+
+    Query params: ``retry`` re-attempts prior no_match/below_similarity rows;
+    ``entity_types`` (repeatable) limits to "track" and/or "artist" (default both).
+    """
+    params: dict[str, object] = {}
+    if entity_types:
+        params["entity_types"] = entity_types
+    if retry:
+        params["retry"] = True
+    task = task_models.Task(
+        task_type=types_module.TaskType.MBID_BACKFILL,
+        status=types_module.SyncStatus.PENDING,
+        params=params,
+        description="MBID Backfill",
+    )
+    db.add(task)
+    await db.commit()
+    task_id = str(task.id)
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "backfill_mbids",
+        task_id,
+        _job_id=f"mbid-backfill:{task_id}",
+    )
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.get(
+    "/backfill-mbids",
+    summary="MusicBrainz MBID backfill coverage",
+)
+async def admin_backfill_coverage_endpoint(
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_backfill_coverage(db)
 
 
 # ---------------------------------------------------------------------------

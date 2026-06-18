@@ -43,6 +43,12 @@ class Settings(pydantic_settings.BaseSettings):
     musicbrainz_client_secret: str = ""
     musicbrainz_redirect_path: str = "/api/v1/auth/listenbrainz/callback"
 
+    # ListenBrainz user token + MBID backfill (#71)
+    # lb_user_token authenticates the /1/metadata/lookup mapper endpoint.
+    lb_user_token: str = ""
+    mbid_mapper_batch_size: int = 50
+    mbid_match_min_similarity: float = 0.85
+
     # Last.fm API
     lastfm_api_key: str = ""
     lastfm_shared_secret: str = ""

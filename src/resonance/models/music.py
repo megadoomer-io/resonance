@@ -43,6 +43,17 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     end_year: orm.Mapped[int | None] = orm.mapped_column(
         sa.Integer, nullable=True, default=None
     )
+    # MusicBrainz MBID-backfill bookkeeping (#71). mb_attempted_at IS NULL means
+    # "not yet attempted" and is the resume key for the backfill task; the MBID
+    # itself lives in service_links["musicbrainz"]["id"], not here.
+    mb_attempted_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
+    mb_match_status: orm.Mapped[types_module.MatchStatus | None] = orm.mapped_column(
+        sa.Enum(types_module.MatchStatus, native_enum=False),
+        nullable=True,
+        default=None,
+    )
 
     tracks: orm.Mapped[list[Track]] = orm.relationship(
         back_populates="artist", cascade="all, delete-orphan"
@@ -66,6 +77,16 @@ class Track(base_module.TimestampMixin, base_module.Base):
     )
     service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
         sa.JSON, nullable=True, default=None
+    )
+    # MusicBrainz MBID-backfill bookkeeping (#71). See Artist for semantics; the
+    # recording MBID lives in service_links["musicbrainz"]["id"].
+    mb_attempted_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
+    mb_match_status: orm.Mapped[types_module.MatchStatus | None] = orm.mapped_column(
+        sa.Enum(types_module.MatchStatus, native_enum=False),
+        nullable=True,
+        default=None,
     )
 
     artist: orm.Mapped[Artist] = orm.relationship(back_populates="tracks")

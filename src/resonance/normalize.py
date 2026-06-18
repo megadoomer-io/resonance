@@ -8,6 +8,7 @@ are preserved elsewhere — this module is for comparison only.
 
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
 
@@ -63,6 +64,27 @@ def normalize_name(value: str) -> str:
 def names_match(a: str, b: str) -> bool:
     """Check whether two names refer to the same entity after normalization."""
     return normalize_name(a) == normalize_name(b)
+
+
+def name_similarity(a: str, b: str) -> float:
+    """Return a 0..1 similarity ratio between two names after normalization.
+
+    Runs ``difflib.SequenceMatcher`` over ``normalize_name``-d strings, so it is
+    tolerant of case, accents, smart quotes, and whitespace (like
+    ``names_match``) while also scoring partial differences such as punctuation
+    or a missing "The" prefix. A ratio of 1.0 means the normalized names are
+    identical (``names_match`` would return True). Used as the MBID-backfill
+    similarity gate (#71), where the mapper returns no confidence score of its
+    own.
+
+    Args:
+        a: First name.
+        b: Second name.
+
+    Returns:
+        Similarity ratio in the range 0.0 (no overlap) to 1.0 (identical).
+    """
+    return difflib.SequenceMatcher(None, normalize_name(a), normalize_name(b)).ratio()
 
 
 # ---------------------------------------------------------------------------

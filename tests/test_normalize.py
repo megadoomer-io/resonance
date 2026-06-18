@@ -93,6 +93,32 @@ class TestNamesMatch:
         assert not normalize_module.names_match("", "Iron Maiden")
 
 
+class TestNameSimilarity:
+    def test_identical_normalized_is_one(self) -> None:
+        assert normalize_module.name_similarity("Iron Maiden", "iron maiden") == 1.0
+
+    def test_diacritics_and_quotes_are_one(self) -> None:
+        # Same normalization as names_match -> ratio 1.0.
+        assert normalize_module.name_similarity("Motörhead", "Motorhead") == 1.0
+        assert normalize_module.name_similarity("KK’s Priest", "KK's Priest") == 1.0
+
+    def test_punctuation_variant_scores_between_exact_and_different(self) -> None:
+        # "Jay-Z" vs "Jay Z" fails exact names_match but scores ~0.8 here —
+        # higher than a different artist, yet below the conservative 0.85
+        # default gate (so it would land as below_similarity). The coverage
+        # gate (T3-A) exists to reveal whether 0.85 is too strict.
+        assert not normalize_module.names_match("Jay-Z", "Jay Z")
+        ratio = normalize_module.name_similarity("Jay-Z", "Jay Z")
+        assert 0.75 <= ratio < 0.85
+
+    def test_different_names_score_low(self) -> None:
+        assert normalize_module.name_similarity("Iron Maiden", "Judas Priest") < 0.5
+
+    def test_range_is_zero_to_one(self) -> None:
+        assert normalize_module.name_similarity("", "") == 1.0
+        assert normalize_module.name_similarity("abc", "") == 0.0
+
+
 class TestNormalizeState:
     def test_abbreviation_expands(self) -> None:
         assert normalize_module.normalize_state("CA") == "california"

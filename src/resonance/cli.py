@@ -78,6 +78,7 @@ Commands:
   feed-add ical <url> [--label] Add generic iCal connection
   feed-sync <conn_id|all>      Sync a calendar connection (or all)
   dedup <type> [--no-wait]     Run deduplication
+  backfill-mbids [opts]        Backfill MusicBrainz MBIDs (#71)
   task <task_id>               Check task status
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
@@ -962,6 +963,54 @@ def _cmd_watermark() -> None:
     asyncio.run(_watermark(service, reset=reset))
 
 
+_BACKFILL_USAGE = """\
+Usage: resonance-api backfill-mbids [opts]
+
+Options:
+  --status       Show coverage (counts by match status), do not enqueue
+  --retry        Re-attempt prior no-match / below-similarity rows
+  --tracks       Only backfill track recording MBIDs
+  --artists      Only backfill artist MBIDs
+  --no-wait      Enqueue and return immediately (don't poll)
+
+With no --tracks/--artists flag, both passes run (tracks first, to harvest
+artist MBIDs). Default polls the task to completion and prints per-type counts.
+"""
+
+
+def _cmd_backfill_mbids() -> None:
+    args = sys.argv[2:]
+    if "--help" in args or "-h" in args:
+        print(_BACKFILL_USAGE)
+        return
+    if "--status" in args:
+        resp = _api_request("GET", "/api/v1/admin/backfill-mbids")
+        print(json.dumps(resp.json(), indent=2))
+        return
+
+    query: list[str] = []
+    if "--retry" in args:
+        query.append("retry=true")
+    want_tracks = "--tracks" in args
+    want_artists = "--artists" in args
+    if want_tracks and not want_artists:
+        query.append("entity_types=track")
+    elif want_artists and not want_tracks:
+        query.append("entity_types=artist")
+
+    path = "/api/v1/admin/backfill-mbids"
+    if query:
+        path += "?" + "&".join(query)
+    resp = _api_request("POST", path)
+    task_id = resp.json().get("task_id", "")
+
+    if "--no-wait" in args:
+        print(f"backfill-mbids: task {task_id}")
+        return
+    result = _poll_task(task_id, "Backfilling MBIDs")
+    print(json.dumps(result, indent=2))
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -971,6 +1020,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "feed-add": ("Add calendar connection", _cmd_feed_add),
     "feed-sync": ("Sync a calendar connection", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
+    "backfill-mbids": ("Backfill MusicBrainz MBIDs", _cmd_backfill_mbids),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
     "profile": ("Manage generator profiles", _cmd_profile),
