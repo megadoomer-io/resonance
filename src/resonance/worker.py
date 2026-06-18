@@ -863,7 +863,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
 
 async def _resolve_similar_library_artists(
     session: sa_async.AsyncSession,
-    connector: Any,
+    connectors: collections.abc.Sequence[Any],
     target_artists: collections.abc.Sequence[music_models.Artist],
     exclude_ids: set[uuid.UUID],
     *,
@@ -871,15 +871,21 @@ async def _resolve_similar_library_artists(
 ) -> set[uuid.UUID]:
     """Resolve library artists similar to the targets (issue #103, Mode 1).
 
-    For each target artist, ask the connector for similar artists, then match
-    those names against artists already in the library. Returns the matching
-    local artist IDs, excluding ``exclude_ids`` (the target set). Similar
-    artists not already in the library are ignored — importing their tracks is
-    out of scope (that is track discovery, a separate feature).
+    For each target artist, ask every similar-artist provider for neighbors and
+    union their names, then match those names against artists already in the
+    library. Returns the matching local artist IDs, excluding ``exclude_ids``
+    (the target set). Similar artists not already in the library are ignored —
+    importing their tracks is out of scope (that is track discovery, a separate
+    feature).
+
+    Multiple providers are complementary: a name-based provider (Last.fm) covers
+    artists by name, while an MBID-keyed provider (ListenBrainz) only resolves
+    artists carrying a MusicBrainz ID. Unioning the results widens recall
+    without needing to rank across providers, since Mode 1 only uses names.
 
     Args:
         session: Async DB session.
-        connector: A connector exposing ``get_similar_artists``.
+        connectors: Connectors exposing ``get_similar_artists``.
         target_artists: The event's target (lineup) artists.
         exclude_ids: Artist IDs to exclude from the result (the target set).
         per_artist_limit: Max similar artists to request per target artist.
@@ -895,13 +901,14 @@ async def _resolve_similar_library_artists(
         if isinstance(mb, dict):
             raw_id = mb.get("id")
             mbid = str(raw_id) if raw_id else None
-        neighbors = await connector.get_similar_artists(
-            artist.name, mbid=mbid, limit=per_artist_limit
-        )
-        for neighbor in neighbors:
-            name = neighbor.get("name")
-            if name:
-                similar_names.add(name.lower())
+        for connector in connectors:
+            neighbors = await connector.get_similar_artists(
+                artist.name, mbid=mbid, limit=per_artist_limit
+            )
+            for neighbor in neighbors:
+                name = neighbor.get("name")
+                if name:
+                    similar_names.add(name.lower())
 
     if not similar_names:
         return set()
@@ -1020,7 +1027,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     )
                     adjacent_ids = await _resolve_similar_library_artists(
                         session,
-                        similar_connectors[0],
+                        similar_connectors,
                         list(target_artists_result.scalars().all()),
                         artist_ids,
                     )
@@ -1028,6 +1035,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     log.info(
                         "similar_artists_resolved",
                         adjacent_count=len(adjacent_ids),
+                        provider_count=len(similar_connectors),
                     )
 
             # Query all tracks by these artists (target + any adjacent)

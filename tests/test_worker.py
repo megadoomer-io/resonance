@@ -2896,7 +2896,7 @@ class TestResolveSimilarLibraryArtists:
         session.execute.return_value = result
 
         matched = await worker_module._resolve_similar_library_artists(
-            session, connector, [target], {target_id}
+            session, [connector], [target], {target_id}
         )
 
         assert matched == {elder_id}
@@ -2915,7 +2915,7 @@ class TestResolveSimilarLibraryArtists:
         session = AsyncMock()
 
         matched = await worker_module._resolve_similar_library_artists(
-            session, connector, [target], set()
+            session, [connector], [target], set()
         )
 
         assert matched == set()
@@ -2923,3 +2923,42 @@ class TestResolveSimilarLibraryArtists:
         connector.get_similar_artists.assert_awaited_once_with(
             "Obscure Band", mbid=None, limit=30
         )
+
+    @pytest.mark.anyio()
+    async def test_unions_neighbors_across_providers(self) -> None:
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = {"musicbrainz": {"id": "mbid-kb"}}
+
+        # Two providers each contribute a distinct neighbor; both should be
+        # queried and their results unioned.
+        lastfm = AsyncMock()
+        lastfm.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": None, "match": 0.9},
+        ]
+        listenbrainz = AsyncMock()
+        listenbrainz.get_similar_artists.return_value = [
+            {"name": "Pallbearer", "mbid": "mbid-pb", "match": 0.8},
+        ]
+
+        elder_id = uuid.uuid4()
+        pallbearer_id = uuid.uuid4()
+        result = MagicMock()
+        result.all.return_value = [(elder_id,), (pallbearer_id,)]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        matched = await worker_module._resolve_similar_library_artists(
+            session, [lastfm, listenbrainz], [target], set()
+        )
+
+        assert matched == {elder_id, pallbearer_id}
+        # Both providers are consulted...
+        lastfm.get_similar_artists.assert_awaited_once_with(
+            "King Buffalo", mbid="mbid-kb", limit=30
+        )
+        listenbrainz.get_similar_artists.assert_awaited_once_with(
+            "King Buffalo", mbid="mbid-kb", limit=30
+        )
+        # ...and their neighbors are unioned into a single library query.
+        session.execute.assert_awaited_once()

@@ -35,6 +35,7 @@ class TestListenBrainzConnectorProperties:
                 base_module.ConnectorCapability.AUTHN,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.TRACK_DISCOVERY,
+                base_module.ConnectorCapability.SIMILAR_ARTISTS,
             }
         )
         assert connector.capabilities == expected
@@ -400,3 +401,78 @@ class TestDiscoverTracks:
         assert result[0].popularity_score == 100
         assert result[1].popularity_score == 95
         assert result[2].popularity_score == 90
+
+
+class TestGetSimilarArtists:
+    """Tests for get_similar_artists via the ListenBrainz labs endpoint."""
+
+    def _connector_with_handler(
+        self, handler: object
+    ) -> listenbrainz_module.ListenBrainzConnector:
+        transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
+        connector = listenbrainz_module.ListenBrainzConnector(settings=_make_settings())
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+        return connector
+
+    @pytest.mark.anyio()
+    async def test_parses_and_normalizes_scores(self) -> None:
+        labs_response = [
+            {"artist_mbid": "mbid-nirvana", "name": "Nirvana", "score": 10000},
+            {"artist_mbid": "mbid-muse", "name": "Muse", "score": 5000},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "labs.api.listenbrainz.org/similar-artists/json" in str(request.url)
+            assert "artist_mbids=mbid-radiohead" in str(request.url)
+            return httpx.Response(200, json=labs_response)
+
+        connector = self._connector_with_handler(handler)
+
+        result = await connector.get_similar_artists("Radiohead", mbid="mbid-radiohead")
+
+        assert result == [
+            {"name": "Nirvana", "mbid": "mbid-nirvana", "match": 1.0},
+            {"name": "Muse", "mbid": "mbid-muse", "match": 0.5},
+        ]
+
+    @pytest.mark.anyio()
+    async def test_requires_mbid(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError("endpoint should not be called without an mbid")
+
+        connector = self._connector_with_handler(handler)
+
+        result = await connector.get_similar_artists("Radiohead")
+
+        assert result == []
+
+    @pytest.mark.anyio()
+    async def test_truncates_to_limit(self) -> None:
+        labs_response = [
+            {"artist_mbid": f"mbid-{i}", "name": f"Artist {i}", "score": 100 - i}
+            for i in range(10)
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=labs_response)
+
+        connector = self._connector_with_handler(handler)
+
+        result = await connector.get_similar_artists(
+            "Radiohead", mbid="mbid-radiohead", limit=3
+        )
+
+        assert len(result) == 3
+        assert [r["name"] for r in result] == ["Artist 0", "Artist 1", "Artist 2"]
+
+    @pytest.mark.anyio()
+    async def test_returns_empty_on_http_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404)
+
+        connector = self._connector_with_handler(handler)
+
+        result = await connector.get_similar_artists("Radiohead", mbid="mbid-radiohead")
+
+        assert result == []
