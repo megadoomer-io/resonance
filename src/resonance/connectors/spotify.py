@@ -304,6 +304,7 @@ class SpotifyConnector(base_module.BaseConnector):
             "POST",
             f"{SPOTIFY_API_BASE}/me/playlists",
             headers={"Authorization": f"Bearer {access_token}"},
+            retry_forbidden=True,
             json={
                 "name": name,
                 "description": description,
@@ -328,6 +329,7 @@ class SpotifyConnector(base_module.BaseConnector):
                 "POST",
                 f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/items",
                 headers=headers,
+                retry_forbidden=True,
                 json={"uris": batch},
             )
         logger.info("spotify_tracks_added", playlist_id=playlist_id, count=len(uris))
@@ -343,6 +345,7 @@ class SpotifyConnector(base_module.BaseConnector):
             "PUT",
             f"{SPOTIFY_API_BASE}/playlists/{playlist_id}/items",
             headers={"Authorization": f"Bearer {access_token}"},
+            retry_forbidden=True,
             json={"uris": uris},
         )
         logger.info("spotify_tracks_replaced", playlist_id=playlist_id, count=len(uris))
