@@ -61,3 +61,17 @@ Deferred work items with full context. Each entry explains what, why, and where 
 **Where to start:** Add a merge-candidate store (a small candidates table, or reuse `EventArtistCandidate`-style storage) that the backfill writes collisions into, surfaced through the existing `api/v1/matching.py` pairwise merge preview/confirm. No auto-merge.
 
 **Source:** /plan-eng-review 2026-06-18, #71, Tension 4 (T5-A). Outside voice flagged that the merge endpoints are pairwise/UI-only with no ingest path.
+
+## Ensure DB migrations always run on the deployed image
+
+**Status:** Observed 2026-06-18 during the #71 deploy. Worth fixing before the next schema change.
+
+**What:** Make the migrations step run with the same image revision that the app/worker end up running, regardless of what triggered the ArgoCD sync.
+
+**Why:** During the #71 rollout, merging the megadoomer-config secret PR (#829) made ArgoCD re-run the resonance migrations hook Job on the *old* image (pre-merge tag), which applied nothing. The later image-tag bump from the resonance build deployed the new app/worker, but the migrations Job did not re-run on the new image — so the app ran new code against a schema missing the new columns (coverage endpoint 500'd until I ran `alembic upgrade heads` by hand in the live pod). Any deploy where an unrelated config change syncs between the code merge and the image bump can hit this.
+
+**Where to start:** Options — (a) make the migrations a Helm pre-upgrade hook keyed to the image digest so it re-runs whenever the image changes; (b) gate app/worker rollout on a migrations Job that uses the *new* image (init container on the app pod already uses the right image — consider relying on that and dropping the separate hook Job, or making the hook image-pinned); (c) add a startup check that fails fast if `alembic current` != head. Confirm how app-template wires the migrations Job vs the app image tag.
+
+**Also:** adding a new `TaskType` value requires a migration updating the `sync_tasks.task_type` CHECK constraint (hit this in #71 — `MBID_BACKFILL` was rejected until `f7g8h9i0j1k2`). Consider a test that asserts every `TaskType` member is present in the latest constraint migration so this can't silently regress.
+
+**Source:** #71 deploy, 2026-06-18.
