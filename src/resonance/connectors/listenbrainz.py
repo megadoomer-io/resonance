@@ -19,6 +19,15 @@ MUSICBRAINZ_AUTH_URL = "https://musicbrainz.org/oauth2/authorize"
 MUSICBRAINZ_TOKEN_URL = "https://musicbrainz.org/oauth2/token"
 MUSICBRAINZ_USERINFO_URL = "https://musicbrainz.org/oauth2/userinfo"
 LISTENBRAINZ_API_BASE = "https://api.listenbrainz.org/1"
+LISTENBRAINZ_LABS_BASE = "https://labs.api.listenbrainz.org"
+
+# The labs similar-artists endpoint bakes its result limit into the algorithm
+# name (limit_100). There is no separate limit query param, so the caller's
+# limit is applied client-side after fetching.
+LISTENBRAINZ_SIMILAR_ALGORITHM = (
+    "session_based_days_7500_session_300_contribution_5_"
+    "threshold_10_limit_100_filter_True_skip_30"
+)
 
 
 class ListenBrainzListenItem(pydantic.BaseModel):
@@ -40,6 +49,7 @@ class ListenBrainzConnector(base_module.BaseConnector):
             base_module.ConnectorCapability.AUTHN,
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.TRACK_DISCOVERY,
+            base_module.ConnectorCapability.SIMILAR_ARTISTS,
         }
     )
 
@@ -303,6 +313,83 @@ class ListenBrainzConnector(base_module.BaseConnector):
                 return track_id
 
         return None
+
+    async def get_similar_artists(
+        self,
+        artist_name: str,
+        *,
+        mbid: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Fetch artists similar to the given artist via the ListenBrainz labs.
+
+        Uses the MBID-keyed similar-artists labs endpoint, whose similarity
+        signal is derived from listening data. This is a complement to a
+        name-based provider (e.g. Last.fm): an ``mbid`` is required, so artists
+        without a MusicBrainz ID yield no neighbors here.
+
+        Args:
+            artist_name: The artist name (used only for logging; matching is by
+                MBID).
+            mbid: MusicBrainz artist ID. Required — when absent, returns an
+                empty list.
+            limit: Maximum number of similar artists to return.
+
+        Returns:
+            A list of ``{"name", "mbid", "match"}`` dicts ordered by similarity
+            (descending). ``match`` is the raw labs score normalized to 0-1
+            against the top result, matching the shape used by other
+            similar-artist providers. Returns an empty list when ``mbid`` is
+            missing or the endpoint has no data for the artist.
+        """
+        if not mbid:
+            logger.debug("listenbrainz_similar_skipped_no_mbid", artist=artist_name)
+            return []
+
+        try:
+            response = await self._request(
+                "GET",
+                f"{LISTENBRAINZ_LABS_BASE}/similar-artists/json",
+                params={
+                    "artist_mbids": mbid,
+                    "algorithm": LISTENBRAINZ_SIMILAR_ALGORITHM,
+                },
+            )
+        except httpx.HTTPStatusError:
+            logger.warning("listenbrainz_similar_failed", artist=artist_name, mbid=mbid)
+            return []
+
+        raw: list[dict[str, Any]] = response.json()
+        # Scores are unbounded co-occurrence counts; normalize against the top
+        # result so ``match`` lands in 0-1, comparable across providers.
+        scores = [s for item in raw if (s := item.get("score")) is not None and s > 0]
+        max_score = float(max(scores)) if scores else 0.0
+
+        results: list[dict[str, Any]] = []
+        for item in raw[:limit]:
+            name = item.get("name")
+            if not name:
+                continue
+            raw_score = item.get("score")
+            match = (
+                float(raw_score) / max_score
+                if max_score > 0 and raw_score is not None
+                else 0.0
+            )
+            results.append(
+                {
+                    "name": name,
+                    "mbid": item.get("artist_mbid") or None,
+                    "match": match,
+                }
+            )
+        logger.info(
+            "listenbrainz_similar_resolved",
+            artist=artist_name,
+            mbid=mbid,
+            result_count=len(results),
+        )
+        return results
 
     @staticmethod
     def _parse_mb_artist(data: dict[str, Any]) -> dict[str, Any]:
