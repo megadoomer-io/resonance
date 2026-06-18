@@ -2869,3 +2869,57 @@ class TestExportPlaylist:
             types_module.TaskType.PLAYLIST_EXPORT
         ]
         assert job_name == "export_playlist"
+
+
+class TestResolveSimilarLibraryArtists:
+    """Tests for _resolve_similar_library_artists (issue #103, Mode 1)."""
+
+    @pytest.mark.anyio()
+    async def test_matches_library_artists_excluding_targets(self) -> None:
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = {"musicbrainz": {"id": "mbid-kb"}}
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": None, "match": 0.9},
+            {"name": "Pallbearer", "mbid": None, "match": 0.5},
+        ]
+
+        elder_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        # The library query returns a similar artist and a target artist;
+        # the target must be filtered out via exclude_ids.
+        result = MagicMock()
+        result.all.return_value = [(elder_id,), (target_id,)]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        matched = await worker_module._resolve_similar_library_artists(
+            session, connector, [target], {target_id}
+        )
+
+        assert matched == {elder_id}
+        connector.get_similar_artists.assert_awaited_once_with(
+            "King Buffalo", mbid="mbid-kb", limit=30
+        )
+
+    @pytest.mark.anyio()
+    async def test_no_similar_names_skips_query(self) -> None:
+        target = MagicMock()
+        target.name = "Obscure Band"
+        target.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = []
+        session = AsyncMock()
+
+        matched = await worker_module._resolve_similar_library_artists(
+            session, connector, [target], set()
+        )
+
+        assert matched == set()
+        session.execute.assert_not_called()
+        connector.get_similar_artists.assert_awaited_once_with(
+            "Obscure Band", mbid=None, limit=30
+        )

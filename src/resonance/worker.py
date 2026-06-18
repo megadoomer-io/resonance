@@ -861,6 +861,59 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             await _check_parent_completion(session, task, arq_redis, log)
 
 
+async def _resolve_similar_library_artists(
+    session: sa_async.AsyncSession,
+    connector: Any,
+    target_artists: collections.abc.Sequence[music_models.Artist],
+    exclude_ids: set[uuid.UUID],
+    *,
+    per_artist_limit: int = 30,
+) -> set[uuid.UUID]:
+    """Resolve library artists similar to the targets (issue #103, Mode 1).
+
+    For each target artist, ask the connector for similar artists, then match
+    those names against artists already in the library. Returns the matching
+    local artist IDs, excluding ``exclude_ids`` (the target set). Similar
+    artists not already in the library are ignored — importing their tracks is
+    out of scope (that is track discovery, a separate feature).
+
+    Args:
+        session: Async DB session.
+        connector: A connector exposing ``get_similar_artists``.
+        target_artists: The event's target (lineup) artists.
+        exclude_ids: Artist IDs to exclude from the result (the target set).
+        per_artist_limit: Max similar artists to request per target artist.
+
+    Returns:
+        Set of local artist IDs that are similar to the target artists.
+    """
+    similar_names: set[str] = set()
+    for artist in target_artists:
+        mbid: str | None = None
+        links = artist.service_links or {}
+        mb = links.get("musicbrainz")
+        if isinstance(mb, dict):
+            raw_id = mb.get("id")
+            mbid = str(raw_id) if raw_id else None
+        neighbors = await connector.get_similar_artists(
+            artist.name, mbid=mbid, limit=per_artist_limit
+        )
+        for neighbor in neighbors:
+            name = neighbor.get("name")
+            if name:
+                similar_names.add(name.lower())
+
+    if not similar_names:
+        return set()
+
+    result = await session.execute(
+        sa.select(music_models.Artist.id).where(
+            sa.func.lower(music_models.Artist.name).in_(similar_names)
+        )
+    )
+    return {row[0] for row in result.all()} - exclude_ids
+
+
 async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
     """Score tracks and build the final playlist.
 
@@ -946,10 +999,41 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 if cand.matched_artist_id is not None:
                     artist_ids.add(cand.matched_artist_id)
 
-            # Query all tracks by these artists
+            # Apply parameter defaults early — adjacent-artist expansion below
+            # is gated on similar_artist_ratio.
+            params = params_module.apply_defaults(dict(profile.parameter_values))
+
+            # Expand the candidate pool with adjacent (similar) artists that are
+            # already in the library when similar_artist_ratio > 0 (issue #103).
+            # Their tracks enter as is_target_artist=False candidates, which the
+            # scoring engine scales by similar_artist_ratio.
+            query_artist_ids: set[uuid.UUID] = set(artist_ids)
+            if params.get("similar_artist_ratio", 0) > 0:
+                similar_connectors = wctx["connector_registry"].get_by_capability(
+                    base_module.ConnectorCapability.SIMILAR_ARTISTS
+                )
+                if similar_connectors:
+                    target_artists_result = await session.execute(
+                        sa.select(music_models.Artist).where(
+                            music_models.Artist.id.in_(artist_ids)
+                        )
+                    )
+                    adjacent_ids = await _resolve_similar_library_artists(
+                        session,
+                        similar_connectors[0],
+                        list(target_artists_result.scalars().all()),
+                        artist_ids,
+                    )
+                    query_artist_ids |= adjacent_ids
+                    log.info(
+                        "similar_artists_resolved",
+                        adjacent_count=len(adjacent_ids),
+                    )
+
+            # Query all tracks by these artists (target + any adjacent)
             tracks_result = await session.execute(
                 sa.select(music_models.Track)
-                .where(music_models.Track.artist_id.in_(artist_ids))
+                .where(music_models.Track.artist_id.in_(query_artist_ids))
                 .options(sa_orm.joinedload(music_models.Track.artist))
             )
             all_tracks = tracks_result.scalars().all()
@@ -1029,9 +1113,6 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         ),
                     )
                 )
-
-            # Apply parameter defaults
-            params = params_module.apply_defaults(dict(profile.parameter_values))
 
             # max_tracks and freshness_target are generation-time options
             # stored on the parent PLAYLIST_GENERATION task, not the profile
