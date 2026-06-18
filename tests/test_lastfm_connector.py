@@ -48,6 +48,7 @@ class TestLastFmConnectorProperties:
                 base_module.ConnectorCapability.AUTHN,
                 base_module.ConnectorCapability.LISTENING_HISTORY,
                 base_module.ConnectorCapability.TRACK_RATINGS,
+                base_module.ConnectorCapability.SIMILAR_ARTISTS,
             }
         )
         assert connector.capabilities == expected
@@ -294,3 +295,83 @@ class TestApiCallErrorHandling:
 
         with pytest.raises(lastfm_module.LastFmApiError, match="Invalid API key"):
             await connector._api_call("user.getInfo")
+
+
+class TestGetSimilarArtists:
+    """Tests for get_similar_artists (artist.getSimilar)."""
+
+    @pytest.mark.anyio()
+    async def test_parses_results(self) -> None:
+        api_response = {
+            "similarartists": {
+                "artist": [
+                    {"name": "Elder", "mbid": "mbid-elder", "match": "1.0"},
+                    {"name": "Pallbearer", "mbid": "mbid-pb", "match": "0.42"},
+                ],
+                "@attr": {"artist": "King Buffalo"},
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["method"] == "artist.getSimilar"
+            assert request.url.params["artist"] == "King Buffalo"
+            return httpx.Response(200, json=api_response)
+
+        connector = _make_connector(httpx.MockTransport(handler))
+        results = await connector.get_similar_artists("King Buffalo")
+
+        assert results == [
+            {"name": "Elder", "mbid": "mbid-elder", "match": 1.0},
+            {"name": "Pallbearer", "mbid": "mbid-pb", "match": 0.42},
+        ]
+
+    @pytest.mark.anyio()
+    async def test_prefers_mbid_lookup(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mbid"] == "mbid-kb"
+            assert "artist" not in request.url.params
+            return httpx.Response(200, json={"similarartists": {"artist": []}})
+
+        connector = _make_connector(httpx.MockTransport(handler))
+        results = await connector.get_similar_artists("King Buffalo", mbid="mbid-kb")
+
+        assert results == []
+
+    @pytest.mark.anyio()
+    async def test_unknown_artist_returns_empty(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "error": 6,
+                    "message": "The artist you supplied could not be found",
+                },
+            )
+
+        connector = _make_connector(httpx.MockTransport(handler))
+        results = await connector.get_similar_artists("Nonexistent Band Xyz")
+
+        assert results == []
+
+    @pytest.mark.anyio()
+    async def test_handles_missing_or_invalid_match(self) -> None:
+        api_response = {
+            "similarartists": {
+                "artist": [
+                    {"name": "NoMatch"},
+                    {"name": "BadMatch", "match": "not-a-number"},
+                    {"mbid": "no-name-skip", "match": "0.9"},
+                ]
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=api_response)
+
+        connector = _make_connector(httpx.MockTransport(handler))
+        results = await connector.get_similar_artists("Whoever")
+
+        assert results == [
+            {"name": "NoMatch", "mbid": None, "match": 0.0},
+            {"name": "BadMatch", "mbid": None, "match": 0.0},
+        ]

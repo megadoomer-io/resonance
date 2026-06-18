@@ -39,6 +39,7 @@ class LastFmConnector(base_module.BaseConnector):
             base_module.ConnectorCapability.AUTHN,
             base_module.ConnectorCapability.LISTENING_HISTORY,
             base_module.ConnectorCapability.TRACK_RATINGS,
+            base_module.ConnectorCapability.SIMILAR_ARTISTS,
         }
     )
 
@@ -291,3 +292,57 @@ class LastFmConnector(base_module.BaseConnector):
             "limit": limit,
         }
         return await self._api_call("user.getLovedTracks", params=params)
+
+    async def get_similar_artists(
+        self,
+        artist_name: str,
+        *,
+        mbid: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Fetch artists similar to the given artist via ``artist.getSimilar``.
+
+        Uses API-key auth (no user session required). Prefers an ``mbid``
+        lookup when provided, otherwise searches by name with autocorrect.
+
+        Args:
+            artist_name: The artist name to find neighbors for.
+            mbid: Optional MusicBrainz ID for an exact lookup.
+            limit: Maximum number of similar artists to return.
+
+        Returns:
+            A list of ``{"name", "mbid", "match"}`` dicts ordered by match
+            score (descending, as returned by Last.fm). Returns an empty
+            list if the artist is unknown to Last.fm.
+        """
+        params: dict[str, Any] = {"limit": limit, "autocorrect": 1}
+        if mbid:
+            params["mbid"] = mbid
+        else:
+            params["artist"] = artist_name
+
+        try:
+            data = await self._api_call("artist.getSimilar", params=params)
+        except LastFmApiError:
+            # Unknown artist (error 6) or similar — no neighbors to return.
+            return []
+
+        raw = data.get("similarartists", {}).get("artist", [])
+        results: list[dict[str, Any]] = []
+        for item in raw:
+            name = item.get("name")
+            if not name:
+                continue
+            match_raw = item.get("match")
+            try:
+                match = float(match_raw) if match_raw is not None else 0.0
+            except TypeError, ValueError:
+                match = 0.0
+            results.append(
+                {
+                    "name": name,
+                    "mbid": item.get("mbid") or None,
+                    "match": match,
+                }
+            )
+        return results
