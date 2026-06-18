@@ -29,6 +29,18 @@ def artist_relevance_signal(*, is_target_artist: bool) -> float:
     return 1.0 if is_target_artist else 0.0
 
 
+def adjacent_multiplier(*, is_target_artist: bool, similar_artist_ratio: int) -> float:
+    """Score multiplier from artist relevance, scaled by similar_artist_ratio.
+
+    Target artists always score at full weight (1.0). Adjacent artists are
+    scaled by similar_artist_ratio (a 0-100 unipolar parameter): 0 excludes
+    them entirely, 100 applies no penalty, 50 halves their score.
+    """
+    relevance = artist_relevance_signal(is_target_artist=is_target_artist)
+    ratio = max(0.0, min(1.0, similar_artist_ratio / 100.0))
+    return relevance + (1.0 - relevance) * ratio
+
+
 def bipolar_weight(param_value: int) -> float:
     """Convert a 0-100 bipolar parameter to a -1.0 to 1.0 weight.
 
@@ -53,11 +65,12 @@ def composite_score(
     fam_weight = bipolar_weight(params.get("familiarity", 50))
     hit_weight = bipolar_weight(params.get("hit_depth", 50))
 
-    relevance = artist_relevance_signal(is_target_artist=is_target_artist)
-
     score = base
     score += fam_weight * (familiarity_val - 0.5)
     score += hit_weight * (popularity_val - 0.5)
-    score *= 0.5 + 0.5 * relevance
+    score *= adjacent_multiplier(
+        is_target_artist=is_target_artist,
+        similar_artist_ratio=params.get("similar_artist_ratio", 0),
+    )
 
     return max(0.0, min(1.0, score))
