@@ -29,51 +29,41 @@ Jinja2 + HTMX, structlog.
 
 ## System Components
 
-```
-                        +------------------+
-                        |   Browser / CLI  |
-                        +--------+---------+
-                                 |
-                    HTTP (session cookies / bearer token)
-                                 |
-                        +--------v---------+
-                        |  FastAPI Server   |
-                        |  (uvicorn)        |
-                        |                   |
-                        |  API routes       |
-                        |  UI routes        |
-                        |  /healthz         |
-                        +--+------+------+--+
-                           |      |      |
-              +------------+      |      +-------------+
-              |                   |                     |
-     +--------v-------+  +-------v--------+   +--------v-----------+
-     |   PostgreSQL    |  |     Redis      |   |  arq Worker        |
-     |                 |  |                |   |                     |
-     |  users          |  |  sessions      |   |  plan_sync          |
-     |  service_conns  |  |  task queue    |   |  sync_range         |
-     |  artists        |  |  rate limit    |   |  sync_cal_feed      |
-     |  tracks         |  |  coordination  |   |  run_bulk_job       |
-     |  events         |  +----------------+   |  generate_playlist  |
-     |  relations      |                       |  discover_tracks    |
-     |  sync_tasks     |                       |  score_and_build    |
-     |  playlists      |                       +---+------------+---+
-     |  gen_profiles   |                           |            |
-     +-----------------+                  +--------v---+  +-----v---------+
-                                          | PostgreSQL |  | External APIs |
-                                          | (read/write)|  |               |
-                                          +------------+  | Spotify       |
-                                                          | Last.fm       |
-                                                          | ListenBrainz  |
-                                                          | Songkick      |
-                                                          +---------------+
+```mermaid
+flowchart TB
+    subgraph clients[Clients]
+        UI["Browser UI<br/>Jinja2 + HTMX"]
+        CLI["resonance-api CLI"]
+    end
+    subgraph app["Resonance app -- megadoomer-do K8s"]
+        WEB["FastAPI web<br/>UI routes + /api/v1"]
+        WORKER["arq worker<br/>background tasks"]
+    end
+    subgraph data[Stateful backends]
+        PG[("PostgreSQL")]
+        REDIS[("Redis<br/>arq queue + sessions")]
+    end
+    subgraph ext[External services]
+        SPOT["Spotify"]
+        LFM["Last.fm"]
+        LBZ["ListenBrainz"]
+        MB["MusicBrainz"]
+        SK["Songkick / iCal"]
+        DEX["Dex OIDC (GitHub login)"]
+    end
 
-                                                          +---------------+
-                                                          | File Uploads  |
-                                                          |               |
-                                                          | Concert       |
-                                                          |  Archives CSV |
-                                                          +---------------+
+    UI -->|HTTP| WEB
+    CLI -->|/api/v1 bearer| WEB
+    WEB -->|enqueue jobs| REDIS
+    REDIS -->|consume jobs| WORKER
+    WEB --> PG
+    WORKER --> PG
+    WORKER -->|sync / export| SPOT
+    WORKER -->|sync / enrich| LFM
+    WORKER -->|sync / enrich| LBZ
+    WORKER -->|MBID lookup| MB
+    WORKER -->|feed fetch| SK
+    WEB -->|login| DEX
 ```
 
 **FastAPI web server** serves both the REST API (`/api/v1/`) and the
@@ -98,6 +88,33 @@ and task tracking.
 ---
 
 ## Data Model
+
+```mermaid
+erDiagram
+    users ||--o{ service_connections : "has"
+    users ||--o{ listening_events : "logs"
+    users ||--o{ user_artist_relations : "follows"
+    users ||--o{ user_track_relations : "rates"
+    users ||--o{ playlists : "owns"
+    users ||--o{ generator_profiles : "owns"
+    users ||--o{ sync_tasks : "runs"
+    artists ||--o{ tracks : "by"
+    tracks ||--o{ listening_events : "played in"
+    tracks ||--o{ playlist_tracks : "appears in"
+    artists ||--o{ user_artist_relations : "target of"
+    tracks ||--o{ user_track_relations : "target of"
+    service_connections ||--o{ user_artist_relations : "sourced from"
+    service_connections ||--o{ user_track_relations : "sourced from"
+    service_connections ||--o{ sync_tasks : "scoped to"
+    playlists ||--o{ playlist_tracks : "contains"
+    generator_profiles ||--o{ generation_records : "produces"
+    playlists ||--o{ generation_records : "result of"
+    sync_tasks ||--o{ sync_tasks : "parent of"
+```
+
+The diagram above shows the core music, taste, playlist, and task tables. The
+concert / entity-resolution tables are shown separately under
+[Cross-Service Entity Resolution](#cross-service-entity-resolution).
 
 All models use UUID primary keys and include `created_at`/`updated_at`
 timestamps (via `TimestampMixin`). Enum columns use `native_enum=False`
@@ -208,7 +225,7 @@ operations, and other async work. Tasks form a hierarchy via `parent_id`.
 | user_id | UUID FK | Nullable (bulk jobs may have no user) |
 | service_connection_id | UUID FK | Nullable |
 | parent_id | UUID FK | Self-referential, nullable |
-| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync`, `concert_archives_import`, `playlist_generation`, `track_discovery`, `track_scoring`, `playlist_export` |
+| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync`, `concert_archives_import`, `concert_archives_chunk`, `playlist_generation`, `track_discovery`, `track_scoring`, `playlist_export`, `mbid_backfill` |
 | status | SyncStatus enum | `pending`, `running`, `completed`, `failed`, `deferred` |
 | params | JSON | Task-specific parameters |
 | result | JSON | Task output on completion |
@@ -279,6 +296,25 @@ the parameters used so the playlist is reproducible.
 
 ### Cross-Service Entity Resolution
 
+```mermaid
+erDiagram
+    venues ||--o{ events : "hosts"
+    venues ||--o{ venue_candidates : "resolved from"
+    events ||--o{ event_artists : "lineup"
+    events ||--o{ event_artist_candidates : "raw lineup"
+    events ||--o{ event_candidates : "resolved from"
+    events ||--o{ user_event_attendance : "attended"
+    artists ||--o{ event_artists : "performs at"
+    artists ||--o{ event_artist_candidates : "matched to"
+    venue_candidates ||--o{ event_candidates : "venue of"
+    users ||--o{ user_event_attendance : "attends"
+```
+
+Imports land as `*_candidate` rows (raw, per-source) that are resolved into
+canonical `venues` / `events` / `event_artists`. `entity_exclusions` is a
+polymorphic "never-merge" table (keyed by `entity_type` + two entity IDs, no
+foreign keys) that records pairs the dedup process must keep separate.
+
 Artists and tracks use `service_links` (a JSON column) to map between external
 service identifiers. The structure is `{service_type_value: external_id}`, e.g.:
 
@@ -298,6 +334,52 @@ identified as the same artist or track.
 ---
 
 ## Connector System
+
+```mermaid
+classDiagram
+    class BaseConnector {
+        <<abstract>>
+        +get_auth_url(state)
+        +exchange_code(code)
+        +get_current_user(token)
+        +connection_config()
+    }
+    class Connectable {
+        <<protocol>>
+        +service_type
+        +connection_config()
+    }
+    BaseConnector <|-- SpotifyConnector
+    BaseConnector <|-- LastFmConnector
+    BaseConnector <|-- ListenBrainzConnector
+    BaseConnector <|-- GitHubConnector
+    BaseConnector <|-- TestConnector
+    Connectable <|.. SongkickConnector
+    Connectable <|.. ICalConnector
+    Connectable <|.. ConcertArchivesConnector
+    class SpotifyConnector {
+        AUTHN LISTENING_HISTORY
+        FOLLOWS TRACK_RATINGS
+        PLAYLIST_WRITE
+    }
+    class LastFmConnector {
+        AUTHN LISTENING_HISTORY
+        SIMILAR_ARTISTS TRACK_RATINGS
+    }
+    class ListenBrainzConnector {
+        AUTHN LISTENING_HISTORY
+        SIMILAR_ARTISTS TRACK_DISCOVERY
+    }
+    class GitHubConnector {
+        AUTHN AUTHZ
+    }
+```
+
+Full connectors extend `BaseConnector` (OAuth + HTTP client). Lightweight
+connectors (Songkick, iCal, Concert Archives) satisfy the `Connectable`
+Protocol instead -- they declare a `service_type` and `connection_config()` but
+have no OAuth or HTTP client. Both kinds expose a `ConnectionConfig`, which
+drives generic sync dispatch.
 
 Connectors are pluggable adapters for external music services. Each connector
 declares its capabilities and handles authentication, API communication, and
@@ -319,32 +401,35 @@ The base class provides `_request()`, which handles:
 
 ### ConnectorCapability Enum
 
-Ten capabilities that connectors can declare:
+Twelve capabilities that connectors can declare:
 
 | Capability | Description |
 |------------|-------------|
-| `AUTHENTICATION` | OAuth login flow |
+| `AUTHN` | OAuth login / authentication flow |
+| `AUTHZ` | Authorization / identity for access control (e.g. GitHub via Dex) |
 | `LISTENING_HISTORY` | Fetch scrobbles / recently played |
 | `RECOMMENDATIONS` | Get recommended tracks |
-| `PLAYLIST_WRITE` | Create or modify playlists |
+| `PLAYLIST_WRITE` | Create or modify playlists (used by export) |
 | `ARTIST_DATA` | Fetch artist metadata |
 | `EVENTS` | Live event / concert data |
 | `FOLLOWS` | Artist follows / subscriptions |
 | `TRACK_RATINGS` | Likes, loves, saved tracks |
 | `NEW_RELEASES` | New album / single releases |
 | `TRACK_DISCOVERY` | Discover tracks for an artist via external APIs |
+| `SIMILAR_ARTISTS` | Resolve similar/adjacent artists |
 
 ### Current Connectors
 
 | Connector | Service | Auth Type | Capabilities |
 |-----------|---------|-----------|-------------|
-| `SpotifyConnector` | Spotify | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `FOLLOWS`, `TRACK_RATINGS` |
-| `LastFmConnector` | Last.fm | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_RATINGS` |
-| `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHENTICATION`, `LISTENING_HISTORY`, `TRACK_DISCOVERY` |
+| `SpotifyConnector` | Spotify | OAuth | `AUTHN`, `LISTENING_HISTORY`, `FOLLOWS`, `TRACK_RATINGS`, `PLAYLIST_WRITE` |
+| `LastFmConnector` | Last.fm | OAuth | `AUTHN`, `LISTENING_HISTORY`, `SIMILAR_ARTISTS`, `TRACK_RATINGS` |
+| `ListenBrainzConnector` | ListenBrainz | OAuth | `AUTHN`, `LISTENING_HISTORY`, `SIMILAR_ARTISTS`, `TRACK_DISCOVERY` |
+| `GitHubConnector` | GitHub (via Dex) | OAuth | `AUTHN`, `AUTHZ` |
 | `SongkickConnector` | Songkick | Username | Lightweight — calendar feed sync only |
 | `ICalConnector` | iCal | URL | Lightweight — calendar feed sync only |
 | `ConcertArchivesConnector` | Concert Archives | File upload | Lightweight — CSV import only |
-| `TestConnector` | Test (mock) | OAuth | `LISTENING_HISTORY` |
+| `TestConnector` | Test (mock) | OAuth | `AUTHN`, `LISTENING_HISTORY` |
 
 ### ConnectorRegistry
 
@@ -425,37 +510,18 @@ arq job to enqueue (`plan_sync` for incremental, `sync_calendar_feed` for full).
 
 ### Flow
 
-```
-API/CLI
-  |
-  v
-Create SYNC_JOB task (PENDING)
-  |
-  v
-Enqueue plan_sync to arq
-  |
-  v
-plan_sync (worker):
-  - Mark SYNC_JOB as RUNNING
-  - Load ServiceConnection and SyncStrategy
-  - Call strategy.plan() -> list of SyncTaskDescriptors
-  - Create TIME_RANGE child tasks
-  - Enqueue children (parallel or sequential per strategy)
-  |
-  v
-sync_range (worker, per TIME_RANGE):
-  - Mark task RUNNING
-  - Call strategy.execute() -> fetches pages, upserts data
-  - On success: mark COMPLETED, write watermark
-  - On 429 exceeding max wait: mark DEFERRED, re-enqueue with delay
-  - On shutdown signal: checkpoint progress, mark PENDING
-  - Check parent completion -> enqueue next sibling or cascade
-  |
-  v
-Parent completion:
-  - Aggregate results from all children
-  - Mark parent COMPLETED or FAILED
-  - On success: auto-enqueue post-sync event dedup (BULK_JOB)
+```mermaid
+flowchart TB
+    trig["API / CLI / orphan recovery"] --> sj["Create SYNC_JOB (PENDING)"]
+    sj --> enq["enqueue plan_sync"] --> redis[("Redis / arq")]
+    redis --> plan["plan_sync (worker)<br/>strategy.plan() -> TIME_RANGE children"]
+    plan --> tr["sync_range (per TIME_RANGE)<br/>strategy.execute()"]
+    tr --> conn["Connector.fetch() pages<br/>Spotify / Last.fm / ListenBrainz"]
+    conn --> upsert["upsert artists + tracks<br/>insert listening_events"]
+    upsert --> wm["advance sync_watermark"]
+    wm --> pg[("PostgreSQL")]
+    tr --> done{"all children<br/>complete?"}
+    done -->|yes| dedup["auto-enqueue post-sync<br/>event dedup (BULK_JOB)"]
 ```
 
 ### Incremental vs Full Sync
@@ -636,37 +702,17 @@ parameters relevant to that generator) and **required inputs** via
 Playlist generation uses the same task infrastructure as sync jobs, with three
 task types dispatched sequentially:
 
-```
-API/CLI
-  |
-  v
-Create PLAYLIST_GENERATION task (PENDING)
-  |
-  v
-Enqueue generate_playlist to arq
-  |
-  v
-generate_playlist (worker):
-  - Resolve event artists (EventArtist + accepted EventArtistCandidate)
-  - Check library coverage per artist
-  - Create TRACK_DISCOVERY child for each artist with < 5 library tracks
-  - Create TRACK_SCORING child (always, runs last)
-  - Enqueue first child (sequential dispatch)
-  |
-  v
-discover_tracks_for_artist (worker, per TRACK_DISCOVERY):
-  - Call connector with TRACK_DISCOVERY capability (ListenBrainz/MusicBrainz)
-  - Upsert discovered tracks and service links
-  - On completion: enqueue next sibling or TRACK_SCORING
-  |
-  v
-score_and_build_playlist (worker, TRACK_SCORING):
-  - Load all candidate tracks (library + discovered)
-  - Score each track via composite_score()
-  - Apply freshness filtering (if previous generation exists)
-  - Create Playlist + PlaylistTrack rows
-  - Create GenerationRecord linking profile to playlist
-  - Mark parent PLAYLIST_GENERATION complete
+```mermaid
+flowchart TB
+    prof["GeneratorProfile<br/>type + params + inputs"] --> gen["Create PLAYLIST_GENERATION"]
+    gen --> disc["TRACK_DISCOVERY (per artist < 5 library tracks)<br/>connector w/ TRACK_DISCOVERY -> MusicBrainz"]
+    disc --> score["TRACK_SCORING<br/>load library + discovered candidates"]
+    score --> comp["composite_score() per track<br/>+ freshness filter"]
+    comp --> pl["Playlist + PlaylistTrack<br/>+ GenerationRecord"]
+    pl --> exp["PLAYLIST_EXPORT (per Spotify connection)"]
+    exp --> m1["pass 1: MusicBrainz MBID<br/>via MB URL relations"]
+    m1 --> m2["pass 2: Spotify text search<br/>(unresolved tracks)"]
+    m2 --> spot["Spotify playlist<br/>+ service_links"]
 ```
 
 Children are dispatched **sequentially** (one at a time) to respect MusicBrainz
@@ -675,17 +721,25 @@ discovery is complete.
 
 ### Scoring
 
-The scoring engine (`generators/scoring.py`) computes a composite score for
-each candidate track based on three signals:
+The scoring engine (`generators/scoring.py`) starts each candidate at a base
+of 0.5, shifts it by two bipolar signals, and scales the result by artist
+adjacency:
 
-1. **Familiarity** -- logarithmic curve over listen count + library membership.
-   Higher value = more familiar track.
-2. **Popularity** -- linear mapping from the external 0-100 popularity score.
-   Higher value = more popular track.
-3. **Artist relevance** -- 1.0 for target artists, 0.0 for adjacent artists.
+1. **Familiarity** -- logarithmic curve over the user's listen count for the
+   track (plus library / liked membership). The `familiarity` parameter shifts
+   the score: low values favor unheard or least-played tracks, high values favor
+   well-known ones. This signal is live and ranks tracks by play count today.
+2. **Popularity** -- linear mapping from an external 0-100 popularity score,
+   shifted by `hit_depth`. **Currently inert:** candidates are built with
+   `popularity_score = 0` (no popularity source is wired yet), so `hit_depth`
+   has no effect on ranking until one is added (issue #57).
+3. **Artist adjacency** -- the score is multiplied by an adjacency factor: 1.0
+   for target artists, and `similar_artist_ratio / 100` for adjacent (similar)
+   artists. At `similar_artist_ratio = 0`, adjacent artists are excluded.
 
-Bipolar parameters shift the score: a `familiarity` value of 80 favors known
-tracks, while 20 favors discovery. The composite score is clamped to [0.0, 1.0].
+The composite score is clamped to [0.0, 1.0]. Because adjacency is a multiplier
+on the whole score, a familiar target-artist track can outrank an unheard
+adjacent track even at maximum-discovery `familiarity` (issue #111).
 
 ### Concert Prep Data Flow
 
@@ -702,6 +756,25 @@ The concert prep generator (`generators/concert_prep.py`) follows this flow:
 5. **Playlist creation** -- take the top N scored tracks, create a Playlist
    with PlaylistTrack rows, and record a GenerationRecord.
 
+
+### Playlist Export
+
+Playlists export to connected Spotify accounts via the `PLAYLIST_WRITE`
+capability. `POST /api/v1/playlists/{id}/export` creates one `PLAYLIST_EXPORT`
+task per Spotify connection; the worker resolves each track to a Spotify URI
+with a two-pass match:
+
+1. **MusicBrainz MBID** -- tracks carrying a MusicBrainz recording MBID resolve
+   through MusicBrainz URL relations (authoritative).
+2. **Spotify text search** -- unresolved tracks fall back to Spotify search by
+   title / artist.
+
+Matches from both passes are persisted in the playlist's `service_links` for
+reuse. The task result reports `exported`, `skipped`, and `skipped_tracks`.
+Export staleness is detected by comparing `playlist.updated_at` against the
+per-connection `exported_at` recorded in `service_links` -- no external API
+call needed.
+
 ---
 
 ## API Layer
@@ -717,7 +790,15 @@ All API routes are versioned under `/api/v1/`:
 | `/api/v1/sync` | `sync.py` | Trigger syncs, check status, dedup, stats |
 | `/api/v1/admin` | `admin.py` | Admin operations (test service connect) |
 | `/api/v1/generator-profiles` | `generators.py` | CRUD profiles, trigger generation |
-| `/api/v1/playlists` | `playlists.py` | List, detail, diff playlists |
+| `/api/v1/playlists` | `playlists.py` | List, detail, diff, export playlists |
+| `/api/v1/artists` | `artists.py` | Artist list / detail |
+| `/api/v1/tracks` | `tracks.py` | Track list / detail |
+| `/api/v1/events` | `events.py` | Event list / detail, artist candidates |
+| `/api/v1/venues` | `venues.py` | Venue list / detail |
+| `/api/v1/history` | `history.py` | Listening history |
+| `/api/v1/matching` | `matching.py` | Candidate resolution (venues / events / artists) |
+| `/api/v1/calendar-feeds` | `calendar_feeds.py` | Calendar feed connections |
+| `/api/v1/concert-archives` | `concert_archives.py` | Concert Archives CSV import |
 
 ### Authentication
 
@@ -728,8 +809,9 @@ All API routes are versioned under `/api/v1/`:
 
 ### Interactive Docs
 
-FastAPI auto-generates OpenAPI docs at `/docs` (Swagger UI). This is only
-enabled when `DEBUG=true` in the application settings.
+FastAPI serves Swagger UI at `/docs` and the raw OpenAPI spec at
+`/openapi.json`. These are currently enabled in all environments; they will be
+gated behind `debug=true` once the API is feature-complete.
 
 ### Health Check
 
