@@ -181,6 +181,37 @@ chronological order (most recent first). Each row includes:
 History is also paginated. All pages use fast in-page navigation, so flipping
 between pages does not require a full page reload.
 
+## Playlists
+
+Resonance generates curated playlists from your library and can export them to
+Spotify.
+
+### Generating a playlist
+
+Playlists come from **generator profiles** -- saved recipes that describe what
+to build. The current generator is **concert prep**: pick a concert from your
+calendar and it assembles a set list from the performing artists, weighted by
+how you set its parameters.
+
+Two parameters shape the result:
+
+- **Familiarity** -- slide toward *discovery* to surface tracks you've barely
+  played, or toward *known* for your most-played tracks by those artists.
+- **Similar artists** -- pull in tracks from artists adjacent to the lineup
+  (ones already in your library), not just the headliners.
+
+Generation runs in the background. The finished playlist appears on the
+**Playlists** page (`/playlists`).
+
+### Exporting to Spotify
+
+From a playlist's detail page, **Export to Spotify** creates the playlist in
+your connected Spotify account. Resonance matches each track in two passes --
+first by MusicBrainz ID (most accurate), then by text search for anything left
+over. When it finishes, it reports how many tracks were exported and lists any
+it couldn't match. Re-exporting updates the same Spotify playlist rather than
+creating a new one.
+
 ## Account Management
 
 The **Account** page (`/account`) is where you manage your profile and
