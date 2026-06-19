@@ -27,6 +27,7 @@ import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
 import resonance.logging as logging_module
 import resonance.middleware.session as session_middleware
+import resonance.migrations as migrations_module
 import resonance.models.task as task_models
 import resonance.types as types_module
 import resonance.ui.account as ui_account_module
@@ -49,6 +50,11 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     settings: config_module.Settings = application.state.settings
     engine = database_module.create_async_engine(settings)
     session_factory = database_module.create_session_factory(engine)
+
+    # Fail fast if the DB schema is behind this image's migrations, rather than
+    # serving new code against an old schema (see resonance.migrations).
+    await migrations_module.assert_schema_current(engine)
+
     redis_pool = aioredis.from_url(settings.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]  # redis 5.x lacks stubs
 
     arq_redis = await arq_connections.create_pool(

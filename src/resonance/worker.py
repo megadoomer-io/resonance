@@ -40,6 +40,7 @@ import resonance.generators.concert_prep as concert_prep_module
 import resonance.generators.parameters as params_module
 import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
+import resonance.migrations as migrations_module
 import resonance.models.concert as concert_models
 import resonance.models.generator as generator_models
 import resonance.models.music as music_models
@@ -2110,6 +2111,10 @@ async def startup(ctx: dict[str, Any]) -> None:
 
     engine = database_module.create_async_engine(settings)
     session_factory = database_module.create_session_factory(engine)
+
+    # Fail fast if the DB schema is behind this image's migrations, rather than
+    # running new code against an old schema (see resonance.migrations).
+    await migrations_module.assert_schema_current(engine)
 
     connector_registry = registry_module.ConnectorRegistry()
     connector_registry.register(spotify_module.SpotifyConnector(settings=settings))
