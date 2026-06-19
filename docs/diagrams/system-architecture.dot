@@ -1,41 +1,58 @@
-// System architecture — components and their runtime interactions.
-// Render: make diagrams  (dot -Tsvg)
+// System Architecture
+// Components and their runtime interactions: clients, the app processes,
+// stateful backends, and the external services the worker talks to.
+//
+// Render: dot -Tsvg system-architecture.dot -o system-architecture.svg
+
 digraph system_architecture {
     rankdir=TB;
-    graph [fontname="Helvetica", fontsize=11, labelloc=t, compound=true, nodesep=0.4, ranksep=0.6];
-    node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#3730a3"];
-    edge  [fontname="Helvetica", fontsize=9, color="#475569"];
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#f5f5f5"];
+    edge [fontname="Helvetica", fontsize=9];
+    compound=true;
 
     subgraph cluster_clients {
         label="Clients";
-        style="rounded,filled"; fillcolor="#f8fafc"; color="#cbd5e1";
+        style=filled;
+        color="#e8f0fe";
+        fillcolor="#f8faff";
+
         UI  [label="Browser UI\nJinja2 + HTMX"];
         CLI [label="resonance-api CLI"];
     }
 
     subgraph cluster_app {
         label="Resonance app — megadoomer-do K8s";
-        style="rounded,filled"; fillcolor="#f8fafc"; color="#cbd5e1";
+        style=filled;
+        color="#fff9c4";
+        fillcolor="#fffde7";
+
         WEB    [label="FastAPI web\nUI routes + /api/v1"];
         WORKER [label="arq worker\nbackground tasks"];
     }
 
     subgraph cluster_data {
         label="Stateful backends";
-        style="rounded,filled"; fillcolor="#f8fafc"; color="#cbd5e1";
-        PG    [label="PostgreSQL", shape=cylinder, fillcolor="#dcfce7", color="#15803d"];
-        REDIS [label="Redis\narq queue + sessions", shape=cylinder, fillcolor="#fee2e2", color="#b91c1c"];
+        style=filled;
+        color="#fce8e6";
+        fillcolor="#fef6f5";
+
+        PG    [label="PostgreSQL", shape=cylinder, fillcolor="#e8f0fe"];
+        REDIS [label="Redis\narq queue + sessions", shape=cylinder, fillcolor="#fce8e6"];
     }
 
     subgraph cluster_ext {
         label="External services";
-        style="rounded,filled"; fillcolor="#f8fafc"; color="#cbd5e1";
-        SPOT [label="Spotify"];
-        LFM  [label="Last.fm"];
-        LBZ  [label="ListenBrainz"];
-        MB   [label="MusicBrainz"];
-        SK   [label="Songkick / iCal"];
-        DEX  [label="Dex OIDC\n(GitHub login)"];
+        style=dashed;
+        color="#999999";
+        fontcolor="#999999";
+
+        SPOT [label="Spotify", shape=oval, fillcolor="#e8f0fe"];
+        LFM  [label="Last.fm", shape=oval, fillcolor="#e8f0fe"];
+        LBZ  [label="ListenBrainz", shape=oval, fillcolor="#e8f0fe"];
+        MB   [label="MusicBrainz", shape=oval, fillcolor="#e8f0fe"];
+        SK   [label="Songkick / iCal", shape=oval, fillcolor="#e8f0fe"];
+        DEX  [label="Dex OIDC\n(GitHub login)", shape=oval, fillcolor="#fce8e6"];
     }
 
     UI     -> WEB    [label="HTTP"];

@@ -21,15 +21,9 @@ check: lint typecheck test
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache dist
 
-# Architecture diagrams: render Graphviz .dot sources to checked-in .svg.
-# Commit both the .dot (reviewable source) and .svg (rendered output).
-DIAGRAM_SRC := $(wildcard docs/diagrams/*.dot)
-DIAGRAM_SVG := $(DIAGRAM_SRC:.dot=.svg)
-
-diagrams: $(DIAGRAM_SVG)
-
-docs/diagrams/%.svg: docs/diagrams/%.dot
-	dot -Tsvg $< -o $@
+diagrams: ## Render dot diagrams to SVG
+	@find docs/diagrams -name '*.dot' -exec sh -c 'dot -Tsvg "$$1" -o "$${1%.dot}.svg"' _ {} \;
+	@echo "Rendered $$(find docs/diagrams -name '*.svg' | wc -l | tr -d ' ') diagrams"
 
 # Local development environment
 dev-up:

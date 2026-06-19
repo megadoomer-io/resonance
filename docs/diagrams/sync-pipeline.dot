@@ -1,22 +1,26 @@
-// Sync pipeline flow — from trigger through worker fetch/upsert to auto-dedup.
-// Render: make diagrams  (dot -Tsvg)
+// Sync Pipeline Flow
+// From trigger (API / CLI / orphan recovery) through worker fetch + upsert to
+// the auto-enqueued post-sync dedup.
+//
+// Render: dot -Tsvg sync-pipeline.dot -o sync-pipeline.svg
+
 digraph sync_pipeline {
     rankdir=TB;
-    graph [fontname="Helvetica", fontsize=11, nodesep=0.4, ranksep=0.55];
-    node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#3730a3"];
-    edge  [fontname="Helvetica", fontsize=9, color="#475569"];
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#f5f5f5"];
+    edge [fontname="Helvetica", fontsize=9];
 
     trig   [label="API / CLI / orphan recovery"];
     sj     [label="Create SYNC_JOB (PENDING)"];
     enq    [label="enqueue plan_sync"];
-    redis  [label="Redis / arq", shape=cylinder, fillcolor="#fee2e2", color="#b91c1c"];
+    redis  [label="Redis / arq", shape=cylinder, fillcolor="#fce8e6"];
     plan   [label="plan_sync (worker)\nstrategy.plan() → TIME_RANGE children"];
     tr     [label="sync_range (per TIME_RANGE)\nstrategy.execute()"];
     conn   [label="Connector.fetch() pages\nSpotify / Last.fm / ListenBrainz"];
     upsert [label="upsert artists + tracks\ninsert listening_events"];
     wm     [label="advance sync_watermark"];
-    pg     [label="PostgreSQL", shape=cylinder, fillcolor="#dcfce7", color="#15803d"];
-    done   [label="all children\ncomplete?", shape=diamond, fillcolor="#fef3c7", color="#b45309"];
+    pg     [label="PostgreSQL", shape=cylinder, fillcolor="#e8f0fe"];
+    done   [label="all children\ncomplete?", shape=diamond, fillcolor="#fffde7"];
     dedup  [label="auto-enqueue post-sync\nevent dedup (BULK_JOB)"];
 
     trig -> sj -> enq -> redis -> plan -> tr -> conn -> upsert -> wm -> pg;
