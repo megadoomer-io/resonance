@@ -1,0 +1,35 @@
+// Connector class hierarchy — full connectors extend BaseConnector (solid,
+// inheritance); lightweight connectors realize the Connectable protocol (dashed).
+// Render: make diagrams  (dot -Tsvg)
+digraph connector_system {
+    rankdir=BT;
+    graph [fontname="Helvetica", fontsize=11, nodesep=0.4, ranksep=0.7];
+    node  [fontname="Helvetica", fontsize=9, shape=record, style=filled, fillcolor="#eef2ff", color="#3730a3"];
+    edge  [fontname="Helvetica", fontsize=8, color="#475569"];
+
+    BaseConnector [label="{«abstract» BaseConnector|+ get_auth_url(state)\l+ exchange_code(code)\l+ get_current_user(token)\l+ connection_config()\l}"];
+    Connectable   [label="{«protocol» Connectable|+ service_type\l+ connection_config()\l}", fillcolor="#fef3c7", color="#b45309"];
+
+    SpotifyConnector      [label="{SpotifyConnector|AUTHN, LISTENING_HISTORY\lFOLLOWS, TRACK_RATINGS\lPLAYLIST_WRITE\l}"];
+    LastFmConnector       [label="{LastFmConnector|AUTHN, LISTENING_HISTORY\lSIMILAR_ARTISTS, TRACK_RATINGS\l}"];
+    ListenBrainzConnector [label="{ListenBrainzConnector|AUTHN, LISTENING_HISTORY\lSIMILAR_ARTISTS, TRACK_DISCOVERY\l}"];
+    GitHubConnector       [label="{GitHubConnector|AUTHN, AUTHZ\l}"];
+    TestConnector         [label="TestConnector"];
+    SongkickConnector        [label="SongkickConnector"];
+    ICalConnector            [label="ICalConnector"];
+    ConcertArchivesConnector [label="ConcertArchivesConnector"];
+
+    // Inheritance: solid line, open triangle pointing at the base class.
+    edge [arrowhead=empty, style=solid];
+    SpotifyConnector      -> BaseConnector;
+    LastFmConnector       -> BaseConnector;
+    ListenBrainzConnector -> BaseConnector;
+    GitHubConnector       -> BaseConnector;
+    TestConnector         -> BaseConnector;
+
+    // Realization: dashed line, open triangle pointing at the protocol.
+    edge [arrowhead=empty, style=dashed];
+    SongkickConnector        -> Connectable;
+    ICalConnector            -> Connectable;
+    ConcertArchivesConnector -> Connectable;
+}

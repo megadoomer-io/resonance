@@ -29,42 +29,10 @@ Jinja2 + HTMX, structlog.
 
 ## System Components
 
-```mermaid
-flowchart TB
-    subgraph clients[Clients]
-        UI["Browser UI<br/>Jinja2 + HTMX"]
-        CLI["resonance-api CLI"]
-    end
-    subgraph app["Resonance app -- megadoomer-do K8s"]
-        WEB["FastAPI web<br/>UI routes + /api/v1"]
-        WORKER["arq worker<br/>background tasks"]
-    end
-    subgraph data[Stateful backends]
-        PG[("PostgreSQL")]
-        REDIS[("Redis<br/>arq queue + sessions")]
-    end
-    subgraph ext[External services]
-        SPOT["Spotify"]
-        LFM["Last.fm"]
-        LBZ["ListenBrainz"]
-        MB["MusicBrainz"]
-        SK["Songkick / iCal"]
-        DEX["Dex OIDC (GitHub login)"]
-    end
+![System architecture](diagrams/system-architecture.svg)
 
-    UI -->|HTTP| WEB
-    CLI -->|/api/v1 bearer| WEB
-    WEB -->|enqueue jobs| REDIS
-    REDIS -->|consume jobs| WORKER
-    WEB --> PG
-    WORKER --> PG
-    WORKER -->|sync / export| SPOT
-    WORKER -->|sync / enrich| LFM
-    WORKER -->|sync / enrich| LBZ
-    WORKER -->|MBID lookup| MB
-    WORKER -->|feed fetch| SK
-    WEB -->|login| DEX
-```
+<!-- Source: diagrams/system-architecture.dot — regenerate with `make diagrams` -->
+
 
 **FastAPI web server** serves both the REST API (`/api/v1/`) and the
 server-rendered UI (Jinja2 + HTMX). It handles authentication, enqueues
@@ -89,28 +57,10 @@ and task tracking.
 
 ## Data Model
 
-```mermaid
-erDiagram
-    users ||--o{ service_connections : "has"
-    users ||--o{ listening_events : "logs"
-    users ||--o{ user_artist_relations : "follows"
-    users ||--o{ user_track_relations : "rates"
-    users ||--o{ playlists : "owns"
-    users ||--o{ generator_profiles : "owns"
-    users ||--o{ sync_tasks : "runs"
-    artists ||--o{ tracks : "by"
-    tracks ||--o{ listening_events : "played in"
-    tracks ||--o{ playlist_tracks : "appears in"
-    artists ||--o{ user_artist_relations : "target of"
-    tracks ||--o{ user_track_relations : "target of"
-    service_connections ||--o{ user_artist_relations : "sourced from"
-    service_connections ||--o{ user_track_relations : "sourced from"
-    service_connections ||--o{ sync_tasks : "scoped to"
-    playlists ||--o{ playlist_tracks : "contains"
-    generator_profiles ||--o{ generation_records : "produces"
-    playlists ||--o{ generation_records : "result of"
-    sync_tasks ||--o{ sync_tasks : "parent of"
-```
+![Core data model](diagrams/data-model.svg)
+
+<!-- Source: diagrams/data-model.dot — regenerate with `make diagrams` -->
+
 
 The diagram above shows the core music, taste, playlist, and task tables. The
 concert / entity-resolution tables are shown separately under
@@ -296,19 +246,10 @@ the parameters used so the playlist is reproducible.
 
 ### Cross-Service Entity Resolution
 
-```mermaid
-erDiagram
-    venues ||--o{ events : "hosts"
-    venues ||--o{ venue_candidates : "resolved from"
-    events ||--o{ event_artists : "lineup"
-    events ||--o{ event_artist_candidates : "raw lineup"
-    events ||--o{ event_candidates : "resolved from"
-    events ||--o{ user_event_attendance : "attended"
-    artists ||--o{ event_artists : "performs at"
-    artists ||--o{ event_artist_candidates : "matched to"
-    venue_candidates ||--o{ event_candidates : "venue of"
-    users ||--o{ user_event_attendance : "attends"
-```
+![Cross-service entity resolution](diagrams/entity-resolution.svg)
+
+<!-- Source: diagrams/entity-resolution.dot — regenerate with `make diagrams` -->
+
 
 Imports land as `*_candidate` rows (raw, per-source) that are resolved into
 canonical `venues` / `events` / `event_artists`. `entity_exclusions` is a
@@ -335,45 +276,10 @@ identified as the same artist or track.
 
 ## Connector System
 
-```mermaid
-classDiagram
-    class BaseConnector {
-        <<abstract>>
-        +get_auth_url(state)
-        +exchange_code(code)
-        +get_current_user(token)
-        +connection_config()
-    }
-    class Connectable {
-        <<protocol>>
-        +service_type
-        +connection_config()
-    }
-    BaseConnector <|-- SpotifyConnector
-    BaseConnector <|-- LastFmConnector
-    BaseConnector <|-- ListenBrainzConnector
-    BaseConnector <|-- GitHubConnector
-    BaseConnector <|-- TestConnector
-    Connectable <|.. SongkickConnector
-    Connectable <|.. ICalConnector
-    Connectable <|.. ConcertArchivesConnector
-    class SpotifyConnector {
-        AUTHN LISTENING_HISTORY
-        FOLLOWS TRACK_RATINGS
-        PLAYLIST_WRITE
-    }
-    class LastFmConnector {
-        AUTHN LISTENING_HISTORY
-        SIMILAR_ARTISTS TRACK_RATINGS
-    }
-    class ListenBrainzConnector {
-        AUTHN LISTENING_HISTORY
-        SIMILAR_ARTISTS TRACK_DISCOVERY
-    }
-    class GitHubConnector {
-        AUTHN AUTHZ
-    }
-```
+![Connector class hierarchy](diagrams/connector-system.svg)
+
+<!-- Source: diagrams/connector-system.dot — regenerate with `make diagrams` -->
+
 
 Full connectors extend `BaseConnector` (OAuth + HTTP client). Lightweight
 connectors (Songkick, iCal, Concert Archives) satisfy the `Connectable`
@@ -510,19 +416,10 @@ arq job to enqueue (`plan_sync` for incremental, `sync_calendar_feed` for full).
 
 ### Flow
 
-```mermaid
-flowchart TB
-    trig["API / CLI / orphan recovery"] --> sj["Create SYNC_JOB (PENDING)"]
-    sj --> enq["enqueue plan_sync"] --> redis[("Redis / arq")]
-    redis --> plan["plan_sync (worker)<br/>strategy.plan() -> TIME_RANGE children"]
-    plan --> tr["sync_range (per TIME_RANGE)<br/>strategy.execute()"]
-    tr --> conn["Connector.fetch() pages<br/>Spotify / Last.fm / ListenBrainz"]
-    conn --> upsert["upsert artists + tracks<br/>insert listening_events"]
-    upsert --> wm["advance sync_watermark"]
-    wm --> pg[("PostgreSQL")]
-    tr --> done{"all children<br/>complete?"}
-    done -->|yes| dedup["auto-enqueue post-sync<br/>event dedup (BULK_JOB)"]
-```
+![Sync pipeline flow](diagrams/sync-pipeline.svg)
+
+<!-- Source: diagrams/sync-pipeline.dot — regenerate with `make diagrams` -->
+
 
 ### Incremental vs Full Sync
 
@@ -702,18 +599,10 @@ parameters relevant to that generator) and **required inputs** via
 Playlist generation uses the same task infrastructure as sync jobs, with three
 task types dispatched sequentially:
 
-```mermaid
-flowchart TB
-    prof["GeneratorProfile<br/>type + params + inputs"] --> gen["Create PLAYLIST_GENERATION"]
-    gen --> disc["TRACK_DISCOVERY (per artist < 5 library tracks)<br/>connector w/ TRACK_DISCOVERY -> MusicBrainz"]
-    disc --> score["TRACK_SCORING<br/>load library + discovered candidates"]
-    score --> comp["composite_score() per track<br/>+ freshness filter"]
-    comp --> pl["Playlist + PlaylistTrack<br/>+ GenerationRecord"]
-    pl --> exp["PLAYLIST_EXPORT (per Spotify connection)"]
-    exp --> m1["pass 1: MusicBrainz MBID<br/>via MB URL relations"]
-    m1 --> m2["pass 2: Spotify text search<br/>(unresolved tracks)"]
-    m2 --> spot["Spotify playlist<br/>+ service_links"]
-```
+![Playlist generation and export flow](diagrams/generation-export.svg)
+
+<!-- Source: diagrams/generation-export.dot — regenerate with `make diagrams` -->
+
 
 Children are dispatched **sequentially** (one at a time) to respect MusicBrainz
 rate limits. The TRACK_SCORING task is always created last so it runs after all

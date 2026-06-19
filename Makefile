@@ -1,4 +1,4 @@
-.PHONY: run test lint format typecheck check clean \
+.PHONY: run test lint format typecheck check clean diagrams \
 	dev dev-up dev-down dev-reset dev-migrate
 
 run:
@@ -20,6 +20,16 @@ check: lint typecheck test
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache dist
+
+# Architecture diagrams: render Graphviz .dot sources to checked-in .svg.
+# Commit both the .dot (reviewable source) and .svg (rendered output).
+DIAGRAM_SRC := $(wildcard docs/diagrams/*.dot)
+DIAGRAM_SVG := $(DIAGRAM_SRC:.dot=.svg)
+
+diagrams: $(DIAGRAM_SVG)
+
+docs/diagrams/%.svg: docs/diagrams/%.dot
+	dot -Tsvg $< -o $@
 
 # Local development environment
 dev-up:

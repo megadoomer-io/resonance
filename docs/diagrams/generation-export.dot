@@ -1,0 +1,21 @@
+// Playlist generation + export flow — profile through scoring to Spotify export.
+// Render: make diagrams  (dot -Tsvg)
+digraph generation_export {
+    rankdir=TB;
+    graph [fontname="Helvetica", fontsize=11, nodesep=0.4, ranksep=0.55];
+    node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#3730a3"];
+    edge  [fontname="Helvetica", fontsize=9, color="#475569"];
+
+    prof  [label="GeneratorProfile\ntype + params + inputs"];
+    gen   [label="Create PLAYLIST_GENERATION"];
+    disc  [label="TRACK_DISCOVERY (per artist < 5 library tracks)\nconnector w/ TRACK_DISCOVERY → MusicBrainz"];
+    score [label="TRACK_SCORING\nload library + discovered candidates"];
+    comp  [label="composite_score() per track\n+ freshness filter"];
+    pl    [label="Playlist + PlaylistTrack\n+ GenerationRecord"];
+    exp   [label="PLAYLIST_EXPORT (per Spotify connection)"];
+    m1    [label="pass 1: MusicBrainz MBID\nvia MB URL relations"];
+    m2    [label="pass 2: Spotify text search\n(unresolved tracks)"];
+    spot  [label="Spotify playlist\n+ service_links", fillcolor="#dcfce7", color="#15803d"];
+
+    prof -> gen -> disc -> score -> comp -> pl -> exp -> m1 -> m2 -> spot;
+}

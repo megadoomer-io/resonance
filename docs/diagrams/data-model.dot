@@ -1,0 +1,29 @@
+// Core data model — music, taste, playlist, and task tables.
+// Crow's-foot notation: tail "exactly one" (||), head "zero or many" (o{).
+// Render: make diagrams  (dot -Tsvg)
+digraph data_model {
+    rankdir=LR;
+    graph [fontname="Helvetica", fontsize=11, nodesep=0.45, ranksep=0.9];
+    node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#eef2ff", color="#3730a3"];
+    edge  [fontname="Helvetica", fontsize=8, color="#475569", dir=both, arrowtail=teetee, arrowhead=crowodot];
+
+    users -> service_connections   [label="has"];
+    users -> listening_events      [label="logs"];
+    users -> user_artist_relations [label="follows"];
+    users -> user_track_relations  [label="rates"];
+    users -> playlists             [label="owns"];
+    users -> generator_profiles    [label="owns"];
+    users -> sync_tasks            [label="runs"];
+    artists -> tracks              [label="by"];
+    tracks -> listening_events     [label="played in"];
+    tracks -> playlist_tracks      [label="appears in"];
+    artists -> user_artist_relations [label="target of"];
+    tracks  -> user_track_relations  [label="target of"];
+    service_connections -> user_artist_relations [label="sourced from"];
+    service_connections -> user_track_relations  [label="sourced from"];
+    service_connections -> sync_tasks            [label="scoped to"];
+    playlists -> playlist_tracks   [label="contains"];
+    generator_profiles -> generation_records [label="produces"];
+    playlists -> generation_records [label="result of"];
+    sync_tasks -> sync_tasks        [label="parent of"];
+}
