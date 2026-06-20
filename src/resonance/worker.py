@@ -983,6 +983,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                             artist_id=artist_uuid,
                             duration_ms=dt.duration_ms,
                             service_links={dt.service.value: dt.external_id},
+                            popularity_score=dt.popularity_score,
                         )
                         session.add(new_track)
                         tracks_found += 1
@@ -993,6 +994,11 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                     updated_links = dict(existing.service_links)
                     updated_links[dt.service.value] = dt.external_id
                     existing.service_links = updated_links
+                    # Seed popularity from discovery only when unknown; an
+                    # authoritative source (Spotify) must not be clobbered by a
+                    # discovery connector's synthetic rank.
+                    if existing.popularity_score is None:
+                        existing.popularity_score = dt.popularity_score
                     tracks_found += 1
 
             await lifecycle_module.complete_task(
@@ -1269,7 +1275,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         is_target_artist=track.artist_id in artist_ids,
                         listen_count=lc,
                         in_library=in_library,
-                        popularity_score=0,
+                        popularity_score=track.popularity_score or 0,
                         source=(
                             types_module.TrackSource.LIBRARY
                             if in_library

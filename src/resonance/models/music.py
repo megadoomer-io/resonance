@@ -88,6 +88,12 @@ class Track(base_module.TimestampMixin, base_module.Base):
         nullable=True,
         default=None,
     )
+    # Track popularity (0-100) feeding the hit_depth generator parameter (#114).
+    # NULL = unknown (treated as 0 at scoring time). Populated by track discovery
+    # and, later, by Spotify's authoritative popularity.
+    popularity_score: orm.Mapped[int | None] = orm.mapped_column(
+        sa.Integer, nullable=True, default=None
+    )
 
     artist: orm.Mapped[Artist] = orm.relationship(back_populates="tracks")
 

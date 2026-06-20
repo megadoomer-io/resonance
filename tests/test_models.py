@@ -400,6 +400,15 @@ class TestTrackModel:
         assert isinstance(col.type, sa.Enum)
         assert col.nullable is True
 
+    def test_popularity_score_is_nullable_integer(self) -> None:
+        col = _get_column(music_module.Track.__table__, "popularity_score")  # type: ignore[arg-type]
+        assert isinstance(col.type, sa.Integer)
+        assert col.nullable is True
+
+    def test_popularity_score_defaults_to_none(self) -> None:
+        track = music_module.Track(title="Song", artist_id=uuid.uuid4())
+        assert track.popularity_score is None
+
     def test_artist_fk(self) -> None:
         col = _get_column(music_module.Track.__table__, "artist_id")  # type: ignore[arg-type]
         fk_targets = {fk.target_fullname for fk in col.foreign_keys}
