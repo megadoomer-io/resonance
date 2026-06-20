@@ -2631,6 +2631,7 @@ class TestScoreAndBuildPlaylist:
         mock_track.id = track_id
         mock_track.title = "Test Song"
         mock_track.artist_id = artist_id
+        mock_track.popularity_score = None
         mock_artist = MagicMock(spec=music_models.Artist)
         mock_artist.id = artist_id
         mock_artist.name = "Concert Artist"
