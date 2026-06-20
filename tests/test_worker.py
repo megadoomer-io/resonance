@@ -2963,3 +2963,51 @@ class TestResolveSimilarLibraryArtists:
         )
         # ...and their neighbors are unioned into a single library query.
         session.execute.assert_awaited_once()
+
+
+class TestArtistsNeedingDiscovery:
+    """Gating for which target artists get an external catalog fetch (#110)."""
+
+    def test_under_covered_artist_always_included(self) -> None:
+        aid = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [aid], {aid: 2}, discovery_wanted=False
+        )
+        assert result == [aid]
+
+    def test_well_covered_artist_excluded_when_not_discovery(self) -> None:
+        aid = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [aid], {aid: 50}, discovery_wanted=False
+        )
+        assert result == []
+
+    def test_well_covered_artist_included_when_discovery_wanted(self) -> None:
+        aid = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [aid], {aid: 50}, discovery_wanted=True
+        )
+        assert result == [aid]
+
+    def test_missing_coverage_treated_as_zero(self) -> None:
+        aid = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [aid], {}, discovery_wanted=False
+        )
+        assert result == [aid]
+
+    def test_boundary_at_min_library_tracks(self) -> None:
+        # coverage == _MIN_LIBRARY_TRACKS is "covered" (gate is strictly less-than)
+        aid = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [aid], {aid: worker_module._MIN_LIBRARY_TRACKS}, discovery_wanted=False
+        )
+        assert result == []
+
+    def test_discovery_wanted_includes_all(self) -> None:
+        covered = uuid.uuid4()
+        under = uuid.uuid4()
+        result = worker_module._artists_needing_discovery(
+            [covered, under], {covered: 50, under: 1}, discovery_wanted=True
+        )
+        assert set(result) == {covered, under}

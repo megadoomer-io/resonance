@@ -352,3 +352,141 @@ class TestSelectionResult:
         )
         scores = [t.score for t in result.tracks]
         assert scores == sorted(scores, reverse=True)
+
+
+def _candidate(*, is_target: bool) -> concert_prep_module.CandidateTrack:
+    """Build a candidate track with a unique id for blend-quota tests."""
+    return concert_prep_module.CandidateTrack(
+        track_id=uuid.uuid4(),
+        title="Song",
+        artist_name="Target" if is_target else "Adjacent",
+        artist_id=uuid.uuid4(),
+        is_target_artist=is_target,
+        listen_count=10,
+        in_library=True,
+        popularity_score=0,
+        source=types_module.TrackSource.LIBRARY,
+    )
+
+
+class TestBlendQuota:
+    """similar_artist_ratio sets the fraction of slots from the adjacent pool.
+
+    Familiarity/hit_depth rank within a pool; the ratio picks the mix. The two
+    are orthogonal (issue #111/#57).
+    """
+
+    def test_ratio_zero_excludes_adjacent(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(10)]
+        adjacent = [_candidate(is_target=False) for _ in range(10)]
+        target_ids = {t.track_id for t in target}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 10
+        assert all(t.track_id in target_ids for t in result.tracks)
+
+    def test_ratio_hundred_excludes_target(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(10)]
+        adjacent = [_candidate(is_target=False) for _ in range(10)]
+        adjacent_ids = {t.track_id for t in adjacent}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 100},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 10
+        assert all(t.track_id in adjacent_ids for t in result.tracks)
+
+    def test_ratio_thirty_splits_pools(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(20)]
+        adjacent = [_candidate(is_target=False) for _ in range(20)]
+        adjacent_ids = {t.track_id for t in adjacent}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 30},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 10
+        adj_count = sum(1 for t in result.tracks if t.track_id in adjacent_ids)
+        # round_half_up(10 * 30 / 100) = 3 adjacent, 7 target
+        assert adj_count == 3
+
+    def test_ratio_rounds_half_up(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(20)]
+        adjacent = [_candidate(is_target=False) for _ in range(20)]
+        adjacent_ids = {t.track_id for t in adjacent}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 35},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        adj_count = sum(1 for t in result.tracks if t.track_id in adjacent_ids)
+        # round_half_up(10 * 35 / 100) = round_half_up(3.5) = 4 adjacent
+        assert adj_count == 4
+
+    def test_adjacent_underflow_backfills_from_target(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(20)]
+        adjacent = [_candidate(is_target=False) for _ in range(2)]
+        adjacent_ids = {t.track_id for t in adjacent}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 50},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        # quota is 5 adjacent, but only 2 exist => 2 adjacent + 8 target = 10
+        assert len(result.tracks) == 10
+        adj_count = sum(1 for t in result.tracks if t.track_id in adjacent_ids)
+        assert adj_count == 2
+
+    def test_target_underflow_backfills_from_adjacent(self) -> None:
+        target = [_candidate(is_target=True) for _ in range(2)]
+        adjacent = [_candidate(is_target=False) for _ in range(20)]
+        target_ids = {t.track_id for t in target}
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 50},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        # quota is 5 target, but only 2 exist => 2 target + 8 adjacent = 10
+        assert len(result.tracks) == 10
+        tgt_count = sum(1 for t in result.tracks if t.track_id in target_ids)
+        assert tgt_count == 2
+
+    def test_ratio_zero_no_target_yields_empty(self) -> None:
+        # ratio=0 is target-only; with no target tracks, no adjacent backfill.
+        adjacent = [_candidate(is_target=False) for _ in range(10)]
+        result = concert_prep_module.score_and_select(
+            candidates=adjacent,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 0
+
+    def test_ratio_hundred_no_adjacent_yields_empty(self) -> None:
+        # ratio=100 is adjacent-only; with no adjacent tracks, no target backfill.
+        target = [_candidate(is_target=True) for _ in range(10)]
+        result = concert_prep_module.score_and_select(
+            candidates=target,
+            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 100},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 0
