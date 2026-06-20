@@ -79,6 +79,7 @@ Commands:
   feed-sync <conn_id|all>      Sync a calendar connection (or all)
   dedup <type> [--no-wait]     Run deduplication
   backfill-mbids [opts]        Backfill MusicBrainz MBIDs (#71)
+  backfill-popularity [opts]   Backfill Spotify popularity (#117)
   task <task_id>               Check task status
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
@@ -1011,6 +1012,39 @@ def _cmd_backfill_mbids() -> None:
     print(json.dumps(result, indent=2))
 
 
+_POPULARITY_BACKFILL_USAGE = """\
+Usage: resonance-api backfill-popularity [opts]
+
+Options:
+  --status       Show coverage (spotify-linked vs scored), do not enqueue
+  --no-wait      Enqueue and return immediately (don't poll)
+
+Refreshes Track.popularity_score from Spotify's authoritative 0-100 popularity for
+every Spotify-linked track, overwriting discovery-sourced synthetic values. Default
+polls the task to completion and prints the updated/no-popularity counts.
+"""
+
+
+def _cmd_backfill_popularity() -> None:
+    args = sys.argv[2:]
+    if "--help" in args or "-h" in args:
+        print(_POPULARITY_BACKFILL_USAGE)
+        return
+    if "--status" in args:
+        resp = _api_request("GET", "/api/v1/admin/backfill-popularity")
+        print(json.dumps(resp.json(), indent=2))
+        return
+
+    resp = _api_request("POST", "/api/v1/admin/backfill-popularity")
+    task_id = resp.json().get("task_id", "")
+
+    if "--no-wait" in args:
+        print(f"backfill-popularity: task {task_id}")
+        return
+    result = _poll_task(task_id, "Backfilling popularity")
+    print(json.dumps(result, indent=2))
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -1021,6 +1055,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "feed-sync": ("Sync a calendar connection", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
     "backfill-mbids": ("Backfill MusicBrainz MBIDs", _cmd_backfill_mbids),
+    "backfill-popularity": ("Backfill Spotify popularity", _cmd_backfill_popularity),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
     "profile": ("Manage generator profiles", _cmd_profile),

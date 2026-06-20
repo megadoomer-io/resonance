@@ -106,6 +106,10 @@ _TASK_DISPATCH: dict[
         "backfill_mbids",
         lambda t: (str(t.id),),
     ),
+    types_module.TaskType.POPULARITY_BACKFILL: (
+        "backfill_popularity",
+        lambda t: (str(t.id),),
+    ),
 }
 
 
@@ -619,6 +623,135 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
         finally:
             await mapper.aclose()
+
+
+async def _get_spotify_access_token(
+    session: sa_async.AsyncSession,
+    connector: spotify_module.SpotifyConnector,
+    settings: config_module.Settings,
+) -> str | None:
+    """Find a Spotify connection and return a valid (refreshed) access token.
+
+    Returns None when no Spotify connection has a usable access token. Picks the
+    most-recently-created connection so a re-auth supersedes a stale one. Mirrors
+    the token decrypt+refresh dance the export task does inline.
+    """
+    conn_result = await session.execute(
+        sa.select(user_models.ServiceConnection)
+        .where(
+            user_models.ServiceConnection.service_type
+            == types_module.ServiceType.SPOTIFY,
+            user_models.ServiceConnection.encrypted_access_token.isnot(None),
+        )
+        .order_by(user_models.ServiceConnection.created_at.desc())
+        .limit(1)
+    )
+    connection = conn_result.scalar_one_or_none()
+    if connection is None or connection.encrypted_access_token is None:
+        return None
+
+    access_token = crypto_module.decrypt_token(
+        connection.encrypted_access_token, settings.token_encryption_key
+    )
+    if (
+        connection.token_expires_at is not None
+        and connection.token_expires_at <= datetime.datetime.now(datetime.UTC)
+        and connection.encrypted_refresh_token is not None
+    ):
+        refresh_token = crypto_module.decrypt_token(
+            connection.encrypted_refresh_token, settings.token_encryption_key
+        )
+        token_response = await connector.refresh_access_token(refresh_token)
+        access_token = token_response.access_token
+        connection.encrypted_access_token = crypto_module.encrypt_token(
+            access_token, settings.token_encryption_key
+        )
+        if token_response.expires_in is not None:
+            connection.token_expires_at = datetime.datetime.now(
+                datetime.UTC
+            ) + datetime.timedelta(seconds=token_response.expires_in)
+        await session.commit()
+        logger.info("popularity_backfill_token_refreshed")
+
+    return access_token
+
+
+async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
+    """Execute a POPULARITY_BACKFILL task (#117): refresh Track.popularity_score.
+
+    Fetches Spotify's authoritative 0-100 popularity for every track linked to
+    Spotify (``service_links["spotify"]``) and overwrites ``popularity_score``.
+    Spotify is authoritative, so this supersedes the discovery-sourced synthetic
+    values seeded in #116. Sequential + batched (like the Spotify sync strategy)
+    to stay within rate limits; resumable across worker restarts because the scan
+    is idempotent.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the POPULARITY_BACKFILL Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    settings = wctx["settings"]
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    connector = wctx["connector_registry"].get_base_connector(
+        types_module.ServiceType.SPOTIFY
+    )
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("popularity_backfill_task_not_found")
+                return
+
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                return
+
+            if not isinstance(connector, spotify_module.SpotifyConnector):
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    "Spotify connector unavailable for popularity backfill",
+                )
+                await session.commit()
+                log.error("popularity_backfill_no_connector")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            access_token = await _get_spotify_access_token(session, connector, settings)
+            if access_token is None:
+                await lifecycle_module.fail_task(
+                    session,
+                    task,
+                    "No Spotify connection with an access token",
+                )
+                await session.commit()
+                log.error("popularity_backfill_no_connection")
+                return
+
+            log.info("popularity_backfill_started")
+            counts = await backfill_module.run_popularity_backfill(
+                session, settings, connector, access_token
+            )
+            result: dict[str, object] = dataclasses.asdict(counts)
+            await lifecycle_module.complete_task(session, task, result)
+            await session.commit()
+            log.info("popularity_backfill_done", result=result)
+        except Exception:
+            log.exception("popularity_backfill_failed")
+            if task is not None:
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
+                await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1565,15 +1698,19 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
                 if spotify_id is None:
                     artist_name = track.artist.name if track.artist else ""
-                    found_id = await connector.search_track(
+                    search_result = await connector.search_track(
                         access_token, track.title, artist_name
                     )
-                    if found_id is not None:
+                    if search_result is not None:
                         updated_links = dict(track_links)
-                        updated_links["spotify"] = found_id
+                        updated_links["spotify"] = search_result.track_id
                         track.service_links = updated_links
-                        spotify_id = found_id
+                        spotify_id = search_result.track_id
                         search_matched += 1
+                        # Spotify is authoritative for popularity — overwrite any
+                        # discovery-sourced synthetic value (#117).
+                        if search_result.popularity is not None:
+                            track.popularity_score = search_result.popularity
                     else:
                         skipped_tracks.append(track.title)
                         continue
@@ -2261,6 +2398,7 @@ class WorkerSettings:
         ),
         arq.func(heartbeat_module.with_heartbeat(export_playlist), timeout=600),
         arq.func(heartbeat_module.with_heartbeat(backfill_mbids), timeout=3600),
+        arq.func(heartbeat_module.with_heartbeat(backfill_popularity), timeout=3600),
     ]
     on_startup = startup
     on_shutdown = shutdown

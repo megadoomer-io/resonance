@@ -99,7 +99,7 @@ class TestTaskType:
         assert types_module.TaskType.CALENDAR_SYNC == "calendar_sync"
 
     def test_task_type_count(self) -> None:
-        assert len(types_module.TaskType) == 12
+        assert len(types_module.TaskType) == 13
 
 
 class TestAttendanceStatus:

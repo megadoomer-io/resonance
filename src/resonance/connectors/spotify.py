@@ -50,6 +50,17 @@ class SavedTrackPage(pydantic.BaseModel):
     next_url: str | None
 
 
+class TrackSearchResult(pydantic.BaseModel):
+    """A matched Spotify track from a search.
+
+    ``popularity`` is Spotify's authoritative 0-100 score; it is None when the
+    track object omits the field (rare).
+    """
+
+    track_id: str
+    popularity: int | None
+
+
 class SpotifyConnector(base_module.BaseConnector):
     """Connector for the Spotify Web API."""
 
@@ -357,8 +368,13 @@ class SpotifyConnector(base_module.BaseConnector):
         access_token: str,
         title: str,
         artist_name: str,
-    ) -> str | None:
-        """Search Spotify for a track by title and artist. Returns track ID or None."""
+    ) -> TrackSearchResult | None:
+        """Search Spotify for a track by title and artist.
+
+        Returns the matched track's ID and its authoritative 0-100 popularity
+        score, or None when no track matches. The popularity field feeds
+        ``Track.popularity_score`` (Spotify is authoritative — see #117).
+        """
         query = f"track:{title} artist:{artist_name}"
         response = await self._request(
             "GET",
@@ -370,8 +386,45 @@ class SpotifyConnector(base_module.BaseConnector):
         items = data.get("tracks", {}).get("items", [])
         if not items:
             return None
-        result: str = items[0]["id"]
-        return result
+        item = items[0]
+        return TrackSearchResult(
+            track_id=item["id"],
+            popularity=item.get("popularity"),
+        )
+
+    async def get_tracks(
+        self,
+        access_token: str,
+        track_ids: list[str],
+    ) -> dict[str, int]:
+        """Fetch popularity for tracks by Spotify ID, batching at 50 per request.
+
+        Returns a mapping of track ID -> 0-100 popularity for every requested ID
+        that resolved to a track exposing a ``popularity`` field. Unknown IDs
+        (Spotify returns a null entry) and tracks without a popularity field are
+        omitted. Used by the POPULARITY_BACKFILL task (#117) to populate
+        ``Track.popularity_score`` for tracks already linked to Spotify.
+        """
+        if not track_ids:
+            return {}
+        out: dict[str, int] = {}
+        for i in range(0, len(track_ids), 50):
+            batch = track_ids[i : i + 50]
+            response = await self._request(
+                "GET",
+                f"{SPOTIFY_API_BASE}/tracks",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"ids": ",".join(batch)},
+            )
+            data = response.json()
+            for track in data.get("tracks", []):
+                if track is None:
+                    continue
+                popularity = track.get("popularity")
+                if popularity is None:
+                    continue
+                out[track["id"]] = popularity
+        return out
 
     async def get_artist_by_id(
         self,
