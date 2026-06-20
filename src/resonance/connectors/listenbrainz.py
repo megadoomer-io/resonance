@@ -21,6 +21,11 @@ MUSICBRAINZ_USERINFO_URL = "https://musicbrainz.org/oauth2/userinfo"
 LISTENBRAINZ_API_BASE = "https://api.listenbrainz.org/1"
 LISTENBRAINZ_LABS_BASE = "https://labs.api.listenbrainz.org"
 
+# Max recording MBIDs per POST /1/popularity/recording request. The endpoint
+# caps at MAX_ITEMS_PER_GET (1000 server-side); 50 keeps each request small and
+# matches the conservative batching used elsewhere.
+MAX_RECORDING_POPULARITY_BATCH = 50
+
 # The labs similar-artists endpoint bakes its result limit into the algorithm
 # name (limit_100). There is no separate limit query param, so the caller's
 # limit is applied client-side after fetching.
@@ -313,6 +318,46 @@ class ListenBrainzConnector(base_module.BaseConnector):
                 return track_id
 
         return None
+
+    async def get_recording_popularity(
+        self, recording_mbids: list[str]
+    ) -> dict[str, int]:
+        """Fetch global listen counts for recordings by MusicBrainz recording MBID.
+
+        Calls the public ``POST /1/popularity/recording`` endpoint (unauthenticated),
+        batching at ``MAX_RECORDING_POPULARITY_BATCH`` per request. The endpoint
+        returns ``total_listen_count``/``total_user_count`` per recording, with
+        nulls for recordings it has no data on.
+
+        Args:
+            recording_mbids: MusicBrainz recording UUIDs to look up.
+
+        Returns:
+            A mapping of recording MBID -> ``total_listen_count`` for every
+            requested MBID that resolved to a non-null listen count. Recordings
+            with no data (null counts) are omitted.
+        """
+        if not recording_mbids:
+            return {}
+        out: dict[str, int] = {}
+        for i in range(0, len(recording_mbids), MAX_RECORDING_POPULARITY_BATCH):
+            batch = recording_mbids[i : i + MAX_RECORDING_POPULARITY_BATCH]
+            response = await self._request(
+                "POST",
+                f"{LISTENBRAINZ_API_BASE}/popularity/recording",
+                json={"recording_mbids": batch},
+            )
+            for entry in response.json():
+                mbid = entry.get("recording_mbid")
+                count = entry.get("total_listen_count")
+                if mbid and count is not None:
+                    out[str(mbid)] = int(count)
+        logger.info(
+            "listenbrainz_recording_popularity",
+            requested=len(recording_mbids),
+            resolved=len(out),
+        )
+        return out
 
     async def get_similar_artists(
         self,

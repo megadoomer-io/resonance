@@ -413,42 +413,43 @@ async def admin_backfill_coverage_endpoint(
 
 
 async def get_popularity_coverage(db: sa_async.AsyncSession) -> dict[str, object]:
-    """Popularity-backfill coverage: Spotify-linked tracks vs. scored tracks (#117).
+    """Popularity-backfill coverage: MB-recording-linked tracks vs. scored tracks.
 
-    ``spotify_linked`` is how many tracks carry a ``service_links["spotify"]`` id
-    (the backfill candidate set); ``scored`` is how many of those already have a
-    ``popularity_score``.
+    ``mb_linked`` is how many tracks carry a MusicBrainz recording MBID at
+    ``service_links["musicbrainz"]["id"]`` (the backfill candidate set, since LB
+    popularity is keyed by recording MBID); ``scored`` is how many of those
+    already have a ``popularity_score``.
     """
-    spotify_link = music_models.Track.service_links["spotify"].as_string()
+    mb_link = music_models.Track.service_links["musicbrainz"]["id"].as_string()
     linked = await db.scalar(
         sa.select(sa.func.count())
         .select_from(music_models.Track)
-        .where(spotify_link.isnot(None))
+        .where(mb_link.isnot(None))
     )
     scored = await db.scalar(
         sa.select(sa.func.count())
         .select_from(music_models.Track)
         .where(
-            spotify_link.isnot(None),
+            mb_link.isnot(None),
             music_models.Track.popularity_score.isnot(None),
         )
     )
-    return {"spotify_linked": linked or 0, "scored": scored or 0}
+    return {"mb_linked": linked or 0, "scored": scored or 0}
 
 
 @router.post(
     "/backfill-popularity",
-    summary="Enqueue Spotify popularity backfill",
+    summary="Enqueue ListenBrainz popularity backfill",
 )
 async def admin_backfill_popularity_endpoint(
     request: fastapi.Request,
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, str]:
-    """Enqueue a POPULARITY_BACKFILL task (#117).
+    """Enqueue a POPULARITY_BACKFILL task.
 
-    Refreshes ``Track.popularity_score`` from Spotify's authoritative 0-100
-    popularity for every Spotify-linked track, overwriting discovery-sourced
-    synthetic values.
+    Refreshes ``Track.popularity_score`` from ListenBrainz recording popularity
+    (global listen counts, normalized to 0-100) for every track carrying a
+    MusicBrainz recording MBID, overwriting discovery-sourced synthetic values.
     """
     task = task_models.Task(
         task_type=types_module.TaskType.POPULARITY_BACKFILL,
@@ -471,7 +472,7 @@ async def admin_backfill_popularity_endpoint(
 
 @router.get(
     "/backfill-popularity",
-    summary="Spotify popularity backfill coverage",
+    summary="ListenBrainz popularity backfill coverage",
 )
 async def admin_backfill_popularity_coverage_endpoint(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],

@@ -79,7 +79,7 @@ Commands:
   feed-sync <conn_id|all>      Sync a calendar connection (or all)
   dedup <type> [--no-wait]     Run deduplication
   backfill-mbids [opts]        Backfill MusicBrainz MBIDs (#71)
-  backfill-popularity [opts]   Backfill Spotify popularity (#117)
+  backfill-popularity [opts]   Backfill ListenBrainz popularity
   task <task_id>               Check task status
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
@@ -1016,12 +1016,13 @@ _POPULARITY_BACKFILL_USAGE = """\
 Usage: resonance-api backfill-popularity [opts]
 
 Options:
-  --status       Show coverage (spotify-linked vs scored), do not enqueue
+  --status       Show coverage (mb-linked vs scored), do not enqueue
   --no-wait      Enqueue and return immediately (don't poll)
 
-Refreshes Track.popularity_score from Spotify's authoritative 0-100 popularity for
-every Spotify-linked track, overwriting discovery-sourced synthetic values. Default
-polls the task to completion and prints the updated/no-popularity counts.
+Refreshes Track.popularity_score from ListenBrainz recording popularity (global
+listen counts, normalized to 0-100) for every track carrying a MusicBrainz recording
+MBID, overwriting discovery-sourced synthetic values. Default polls the task to
+completion and prints the updated/no-popularity counts.
 """
 
 
@@ -1055,7 +1056,10 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "feed-sync": ("Sync a calendar connection", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
     "backfill-mbids": ("Backfill MusicBrainz MBIDs", _cmd_backfill_mbids),
-    "backfill-popularity": ("Backfill Spotify popularity", _cmd_backfill_popularity),
+    "backfill-popularity": (
+        "Backfill ListenBrainz popularity",
+        _cmd_backfill_popularity,
+    ),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
     "profile": ("Manage generator profiles", _cmd_profile),

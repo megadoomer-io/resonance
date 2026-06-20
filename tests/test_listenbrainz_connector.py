@@ -1,5 +1,6 @@
 """Tests for the ListenBrainz connector."""
 
+import json
 import urllib.parse
 
 import httpx
@@ -401,6 +402,114 @@ class TestDiscoverTracks:
         assert result[0].popularity_score == 100
         assert result[1].popularity_score == 95
         assert result[2].popularity_score == 90
+
+
+class TestGetRecordingPopularity:
+    """Tests for get_recording_popularity (POST /1/popularity/recording)."""
+
+    def _connector_with_handler(
+        self, handler: object
+    ) -> listenbrainz_module.ListenBrainzConnector:
+        transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
+        connector = listenbrainz_module.ListenBrainzConnector(settings=_make_settings())
+        connector._http_client = httpx.AsyncClient(transport=transport)
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+        return connector
+
+    @pytest.mark.anyio()
+    async def test_posts_mbids_and_returns_listen_counts(self) -> None:
+        api_response = [
+            {
+                "recording_mbid": "rec-a",
+                "total_listen_count": 1000,
+                "total_user_count": 10,
+            },
+            {
+                "recording_mbid": "rec-b",
+                "total_listen_count": 25,
+                "total_user_count": 3,
+            },
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert "api.listenbrainz.org/1/popularity/recording" in str(request.url)
+            # Public endpoint — no Authorization header threaded through.
+            assert "Authorization" not in request.headers
+            body = json.loads(request.content)
+            assert body["recording_mbids"] == ["rec-a", "rec-b"]
+            return httpx.Response(200, json=api_response)
+
+        connector = self._connector_with_handler(handler)
+        result = await connector.get_recording_popularity(["rec-a", "rec-b"])
+
+        assert result == {"rec-a": 1000, "rec-b": 25}
+
+    @pytest.mark.anyio()
+    async def test_skips_null_listen_counts(self) -> None:
+        api_response = [
+            {
+                "recording_mbid": "rec-a",
+                "total_listen_count": 500,
+                "total_user_count": 8,
+            },
+            {
+                "recording_mbid": "rec-b",
+                "total_listen_count": None,
+                "total_user_count": None,
+            },
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=api_response)
+
+        connector = self._connector_with_handler(handler)
+        result = await connector.get_recording_popularity(["rec-a", "rec-b"])
+
+        assert result == {"rec-a": 500}
+
+    @pytest.mark.anyio()
+    async def test_empty_input_returns_empty_without_request(self) -> None:
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            nonlocal called
+            called = True
+            return httpx.Response(200, json=[])
+
+        connector = self._connector_with_handler(handler)
+        result = await connector.get_recording_popularity([])
+
+        assert result == {}
+        assert called is False
+
+    @pytest.mark.anyio()
+    async def test_batches_over_limit(self) -> None:
+        mbids = [f"rec-{i:03d}" for i in range(120)]
+        batches: list[list[str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            posted = body["recording_mbids"]
+            batches.append(posted)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "recording_mbid": m,
+                        "total_listen_count": 1,
+                        "total_user_count": 1,
+                    }
+                    for m in posted
+                ],
+            )
+
+        connector = self._connector_with_handler(handler)
+        result = await connector.get_recording_popularity(mbids)
+
+        # Batched at MAX_RECORDING_POPULARITY_BATCH (50) -> 50 + 50 + 20.
+        assert [len(b) for b in batches] == [50, 50, 20]
+        assert len(result) == 120
 
 
 class TestGetSimilarArtists:
