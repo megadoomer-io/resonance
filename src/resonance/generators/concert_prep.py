@@ -69,9 +69,53 @@ def _score_candidate(
     return scoring_module.composite_score(
         familiarity_val=fam_val,
         popularity_val=pop_val,
-        is_target_artist=candidate.is_target_artist,
         params=params,
     )
+
+
+def _round_half_up(value: float) -> int:
+    """Round to the nearest integer, halves rounding up (not banker's rounding).
+
+    Used for slot-count math so a 3.5 quota becomes 4, predictably.
+    """
+    return int(value + 0.5)
+
+
+def _select_with_quota(
+    target_pool: list[tuple[CandidateTrack, float]],
+    adjacent_pool: list[tuple[CandidateTrack, float]],
+    similar_artist_ratio: int,
+    max_tracks: int,
+) -> list[tuple[CandidateTrack, float]]:
+    """Fill ``max_tracks`` slots, drawing ~ratio% from the adjacent pool.
+
+    Both pools must already be sorted by score descending. The adjacent quota is
+    ``round_half_up(max_tracks * ratio / 100)``; the rest go to the target pool.
+
+    When a pool cannot fill its quota, the shortfall is backfilled from the other
+    pool -- but only if the other pool was allocated at least one slot. This keeps
+    the extremes literal: at ratio=0 no adjacent track is ever added, and at
+    ratio=100 no target track is ever added (matching the design intent that 0 is
+    target-only and 100 is adjacent-only).
+    """
+    ratio = max(0, min(100, similar_artist_ratio))
+    adj_quota = _round_half_up(max_tracks * ratio / 100)
+    tgt_quota = max_tracks - adj_quota
+
+    tgt_take = target_pool[:tgt_quota]
+    adj_take = adjacent_pool[:adj_quota]
+
+    tgt_short = tgt_quota - len(tgt_take)
+    adj_short = adj_quota - len(adj_take)
+
+    # Backfill a pool's shortfall from the other pool's remainder, but only when
+    # the other pool was allocated slots (so 0/100 stay pure).
+    if tgt_short > 0 and adj_quota > 0:
+        adj_take += adjacent_pool[adj_quota : adj_quota + tgt_short]
+    if adj_short > 0 and tgt_quota > 0:
+        tgt_take += target_pool[tgt_quota : tgt_quota + adj_short]
+
+    return (tgt_take + adj_take)[:max_tracks]
 
 
 def _apply_freshness_filter(
@@ -145,10 +189,20 @@ def score_and_select(
         scored, previous_track_ids, freshness_target, max_tracks
     )
 
-    # 4. Take the top max_tracks
-    scored = scored[:max_tracks]
+    # 4. Partition into target / adjacent pools (each stays score-desc) and
+    #    select per the similar_artist_ratio blend quota.
+    target_pool = [pair for pair in scored if pair[0].is_target_artist]
+    adjacent_pool = [pair for pair in scored if not pair[0].is_target_artist]
+    selected = _select_with_quota(
+        target_pool,
+        adjacent_pool,
+        params.get("similar_artist_ratio", 0),
+        max_tracks,
+    )
 
-    # 5. Assign positions (1-indexed) and build ScoredTrack list
+    # 5. Re-sort the merged selection by score for final ordering, then assign
+    #    1-indexed positions and build the ScoredTrack list.
+    selected.sort(key=lambda pair: pair[1], reverse=True)
     tracks = [
         ScoredTrack(
             track_id=candidate.track_id,
@@ -158,7 +212,7 @@ def score_and_select(
             score=score,
             source=candidate.source,
         )
-        for i, (candidate, score) in enumerate(scored)
+        for i, (candidate, score) in enumerate(selected)
     ]
 
     # 6. Compute source summary

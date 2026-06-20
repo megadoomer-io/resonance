@@ -24,23 +24,6 @@ def popularity_signal(*, popularity_score: int) -> float:
     return max(0.0, min(1.0, popularity_score / 100.0))
 
 
-def artist_relevance_signal(*, is_target_artist: bool) -> float:
-    """1.0 for target artists, 0.0 for adjacent artists."""
-    return 1.0 if is_target_artist else 0.0
-
-
-def adjacent_multiplier(*, is_target_artist: bool, similar_artist_ratio: int) -> float:
-    """Score multiplier from artist relevance, scaled by similar_artist_ratio.
-
-    Target artists always score at full weight (1.0). Adjacent artists are
-    scaled by similar_artist_ratio (a 0-100 unipolar parameter): 0 excludes
-    them entirely, 100 applies no penalty, 50 halves their score.
-    """
-    relevance = artist_relevance_signal(is_target_artist=is_target_artist)
-    ratio = max(0.0, min(1.0, similar_artist_ratio / 100.0))
-    return relevance + (1.0 - relevance) * ratio
-
-
 def bipolar_weight(param_value: int) -> float:
     """Convert a 0-100 bipolar parameter to a -1.0 to 1.0 weight.
 
@@ -53,12 +36,14 @@ def composite_score(
     *,
     familiarity_val: float,
     popularity_val: float,
-    is_target_artist: bool,
     params: dict[str, int],
 ) -> float:
-    """Compute composite score for a candidate track.
+    """Compute composite score for a candidate track from familiarity and hit_depth.
 
-    Returns a value clamped to [0.0, 1.0].
+    Returns a value clamped to [0.0, 1.0]. Artist relevance (target vs adjacent)
+    is intentionally NOT part of this score: similar_artist_ratio is applied as a
+    blend quota at selection time (see concert_prep.score_and_select), keeping
+    familiarity (within-pool rank) and similar_artist_ratio (the mix) orthogonal.
     """
     base = 0.5
 
@@ -68,9 +53,5 @@ def composite_score(
     score = base
     score += fam_weight * (familiarity_val - 0.5)
     score += hit_weight * (popularity_val - 0.5)
-    score *= adjacent_multiplier(
-        is_target_artist=is_target_artist,
-        similar_artist_ratio=params.get("similar_artist_ratio", 0),
-    )
 
     return max(0.0, min(1.0, score))

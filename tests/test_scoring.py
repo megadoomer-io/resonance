@@ -29,14 +29,6 @@ class TestPopularitySignal:
         assert 0.4 <= score <= 0.6
 
 
-class TestArtistRelevanceSignal:
-    def test_target_artist(self) -> None:
-        assert scoring_module.artist_relevance_signal(is_target_artist=True) == 1.0
-
-    def test_adjacent_artist(self) -> None:
-        assert scoring_module.artist_relevance_signal(is_target_artist=False) == 0.0
-
-
 class TestBipolarWeight:
     def test_neutral_returns_zero(self) -> None:
         assert scoring_module.bipolar_weight(50) == 0.0
@@ -52,89 +44,65 @@ class TestBipolarWeight:
 
 
 class TestCompositeScore:
-    def test_neutral_params_score_from_relevance(self) -> None:
+    """composite_score reflects familiarity + hit_depth only.
+
+    Artist relevance (target vs adjacent) is NOT a score factor; it is applied
+    as a blend quota at selection time (see concert_prep.score_and_select).
+    """
+
+    def test_neutral_params_midpoint(self) -> None:
         score = scoring_module.composite_score(
             familiarity_val=0.5,
             popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
         )
-        assert 0.0 <= score <= 1.0
+        assert score == 0.5
 
     def test_high_familiarity_boosts_known_tracks(self) -> None:
         known = scoring_module.composite_score(
             familiarity_val=0.9,
             popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 90, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 90, "hit_depth": 50},
         )
         unknown = scoring_module.composite_score(
             familiarity_val=0.1,
             popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 90, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 90, "hit_depth": 50},
         )
         assert known > unknown
 
-    def test_similar_artist_ratio_zero_excludes_adjacent(self) -> None:
+    def test_discovery_profile_boosts_unheard(self) -> None:
+        # familiarity=0 (all discovery) => an unheard track outranks a heard one.
+        unheard = scoring_module.composite_score(
+            familiarity_val=0.0,
+            popularity_val=0.5,
+            params={"familiarity": 0, "hit_depth": 50},
+        )
+        heard = scoring_module.composite_score(
+            familiarity_val=1.0,
+            popularity_val=0.5,
+            params={"familiarity": 0, "hit_depth": 50},
+        )
+        assert unheard > heard
+
+    def test_missing_params_default_to_neutral(self) -> None:
         score = scoring_module.composite_score(
             familiarity_val=0.5,
             popularity_val=0.5,
-            is_target_artist=False,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={},
         )
-        assert score == 0.0
+        assert score == 0.5
 
-    def test_similar_artist_ratio_does_not_affect_target_artist(self) -> None:
-        low = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
-        )
+    def test_clamped_to_unit_range(self) -> None:
         high = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 100},
+            familiarity_val=1.0,
+            popularity_val=1.0,
+            params={"familiarity": 100, "hit_depth": 100},
         )
-        assert low == high
-
-    def test_similar_artist_ratio_full_removes_adjacent_penalty(self) -> None:
-        target = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 100},
+        low = scoring_module.composite_score(
+            familiarity_val=0.0,
+            popularity_val=0.0,
+            params={"familiarity": 100, "hit_depth": 100},
         )
-        adjacent = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=False,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 100},
-        )
-        assert adjacent == target
-
-    def test_similar_artist_ratio_partial_scales_adjacent(self) -> None:
-        target = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=True,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 50},
-        )
-        adjacent = scoring_module.composite_score(
-            familiarity_val=0.7,
-            popularity_val=0.5,
-            is_target_artist=False,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 50},
-        )
-        assert adjacent == target * 0.5
-
-    def test_similar_artist_ratio_defaults_to_zero(self) -> None:
-        score = scoring_module.composite_score(
-            familiarity_val=0.5,
-            popularity_val=0.5,
-            is_target_artist=False,
-            params={"familiarity": 50, "hit_depth": 50},
-        )
-        assert score == 0.0
+        assert high == 1.0
+        assert low == 0.0
