@@ -1,0 +1,25 @@
+// Playlist Generation + Export Flow
+// From a GeneratorProfile through discovery and scoring to a Playlist, then the
+// two-pass export to a connected Spotify account.
+//
+// Render: dot -Tsvg generation-export.dot -o generation-export.svg
+
+digraph generation_export {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#f5f5f5"];
+    edge [fontname="Helvetica", fontsize=9];
+
+    prof  [label="GeneratorProfile\ntype + params + inputs"];
+    gen   [label="Create PLAYLIST_GENERATION"];
+    disc  [label="TRACK_DISCOVERY (per artist < 5 library tracks)\nconnector w/ TRACK_DISCOVERY → MusicBrainz"];
+    score [label="TRACK_SCORING\nload library + discovered candidates"];
+    comp  [label="composite_score() per track\n+ freshness filter"];
+    pl    [label="Playlist + PlaylistTrack\n+ GenerationRecord"];
+    exp   [label="PLAYLIST_EXPORT (per Spotify connection)"];
+    m1    [label="pass 1: MusicBrainz MBID\nvia MB URL relations"];
+    m2    [label="pass 2: Spotify text search\n(unresolved tracks)"];
+    spot  [label="Spotify playlist\n+ service_links", shape=cylinder, fillcolor="#e8f0fe"];
+
+    prof -> gen -> disc -> score -> comp -> pl -> exp -> m1 -> m2 -> spot;
+}

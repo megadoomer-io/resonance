@@ -1,0 +1,39 @@
+// Connector Class Hierarchy
+// Full connectors extend BaseConnector (solid edge = inheritance); lightweight
+// connectors realize the Connectable protocol (dashed edge = realization).
+// Concrete connectors list their declared capabilities.
+//
+// Render: dot -Tsvg connector-system.dot -o connector-system.svg
+
+digraph connector_system {
+    rankdir=BT;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=9, shape=record, style=filled, fillcolor="#f5f5f5"];
+    edge [fontname="Helvetica", fontsize=9];
+
+    BaseConnector [label="{«abstract» BaseConnector|+ get_auth_url(state)\l+ exchange_code(code)\l+ get_current_user(token)\l+ connection_config()\l}", fillcolor="#e8f0fe"];
+    Connectable   [label="{«protocol» Connectable|+ service_type\l+ connection_config()\l}", fillcolor="#fffde7"];
+
+    SpotifyConnector      [label="{SpotifyConnector|AUTHN, LISTENING_HISTORY\lFOLLOWS, TRACK_RATINGS\lPLAYLIST_WRITE\l}"];
+    LastFmConnector       [label="{LastFmConnector|AUTHN, LISTENING_HISTORY\lSIMILAR_ARTISTS, TRACK_RATINGS\l}"];
+    ListenBrainzConnector [label="{ListenBrainzConnector|AUTHN, LISTENING_HISTORY\lSIMILAR_ARTISTS, TRACK_DISCOVERY\l}"];
+    GitHubConnector       [label="{GitHubConnector|AUTHN, AUTHZ\l}"];
+    TestConnector         [label="TestConnector"];
+    SongkickConnector        [label="SongkickConnector"];
+    ICalConnector            [label="ICalConnector"];
+    ConcertArchivesConnector [label="ConcertArchivesConnector"];
+
+    // Inheritance: solid line, open triangle pointing at the base class.
+    edge [arrowhead=empty, style=solid];
+    SpotifyConnector      -> BaseConnector;
+    LastFmConnector       -> BaseConnector;
+    ListenBrainzConnector -> BaseConnector;
+    GitHubConnector       -> BaseConnector;
+    TestConnector         -> BaseConnector;
+
+    // Realization: dashed line, open triangle pointing at the protocol.
+    edge [arrowhead=empty, style=dashed];
+    SongkickConnector        -> Connectable;
+    ICalConnector            -> Connectable;
+    ConcertArchivesConnector -> Connectable;
+}

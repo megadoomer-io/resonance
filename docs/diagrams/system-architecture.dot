@@ -1,0 +1,70 @@
+// System Architecture
+// Components and their runtime interactions: clients, the app processes,
+// stateful backends, and the external services the worker talks to.
+//
+// Render: dot -Tsvg system-architecture.dot -o system-architecture.svg
+
+digraph system_architecture {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#f5f5f5"];
+    edge [fontname="Helvetica", fontsize=9];
+    compound=true;
+
+    subgraph cluster_clients {
+        label="Clients";
+        style=filled;
+        color="#e8f0fe";
+        fillcolor="#f8faff";
+
+        UI  [label="Browser UI\nJinja2 + HTMX"];
+        CLI [label="resonance-api CLI"];
+    }
+
+    subgraph cluster_app {
+        label="Resonance app — megadoomer-do K8s";
+        style=filled;
+        color="#fff9c4";
+        fillcolor="#fffde7";
+
+        WEB    [label="FastAPI web\nUI routes + /api/v1"];
+        WORKER [label="arq worker\nbackground tasks"];
+    }
+
+    subgraph cluster_data {
+        label="Stateful backends";
+        style=filled;
+        color="#fce8e6";
+        fillcolor="#fef6f5";
+
+        PG    [label="PostgreSQL", shape=cylinder, fillcolor="#e8f0fe"];
+        REDIS [label="Redis\narq queue + sessions", shape=cylinder, fillcolor="#fce8e6"];
+    }
+
+    subgraph cluster_ext {
+        label="External services";
+        style=dashed;
+        color="#999999";
+        fontcolor="#999999";
+
+        SPOT [label="Spotify", shape=oval, fillcolor="#e8f0fe"];
+        LFM  [label="Last.fm", shape=oval, fillcolor="#e8f0fe"];
+        LBZ  [label="ListenBrainz", shape=oval, fillcolor="#e8f0fe"];
+        MB   [label="MusicBrainz", shape=oval, fillcolor="#e8f0fe"];
+        SK   [label="Songkick / iCal", shape=oval, fillcolor="#e8f0fe"];
+        DEX  [label="Dex OIDC\n(GitHub login)", shape=oval, fillcolor="#fce8e6"];
+    }
+
+    UI     -> WEB    [label="HTTP"];
+    CLI    -> WEB    [label="/api/v1 bearer"];
+    WEB    -> REDIS  [label="enqueue jobs"];
+    REDIS  -> WORKER [label="consume jobs"];
+    WEB    -> PG;
+    WORKER -> PG;
+    WORKER -> SPOT [label="sync / export"];
+    WORKER -> LFM  [label="sync / enrich"];
+    WORKER -> LBZ  [label="sync / enrich"];
+    WORKER -> MB   [label="MBID lookup"];
+    WORKER -> SK   [label="feed fetch"];
+    WEB    -> DEX  [label="login"];
+}
