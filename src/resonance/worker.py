@@ -625,8 +625,36 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
 # Playlist generation pipeline
 # ---------------------------------------------------------------------------
 
-# Minimum number of library tracks per artist before skipping discovery.
+# Minimum number of distinct library tracks per artist before skipping discovery.
 _MIN_LIBRARY_TRACKS = 5
+
+# A profile with familiarity below this (0-100 bipolar; <50 leans toward
+# discovery) triggers an external catalog fetch for ALL target artists, not just
+# under-covered ones, so a well-known artist can still surface unheard tracks.
+_DISCOVERY_FAMILIARITY_THRESHOLD = 50
+
+
+def _artists_needing_discovery(
+    artist_ids: collections.abc.Iterable[uuid.UUID],
+    track_coverage: collections.abc.Mapping[uuid.UUID, int],
+    discovery_wanted: bool,
+) -> list[uuid.UUID]:
+    """Pick which artists need an external catalog fetch (TRACK_DISCOVERY).
+
+    An artist needs discovery when its distinct-track coverage is below
+    ``_MIN_LIBRARY_TRACKS`` OR the profile is leaning toward discovery
+    (``discovery_wanted``). The discovery-intent branch is what lets a
+    well-covered target artist surface unheard catalog tracks for a
+    high-discovery playlist (issue #110); without it, the candidate pool for such
+    an artist is 100% scrobble-derived and has nothing unheard to offer.
+
+    Pure logic (no DB) so the gating decision is unit-testable.
+    """
+    return [
+        aid
+        for aid in artist_ids
+        if track_coverage.get(aid, 0) < _MIN_LIBRARY_TRACKS or discovery_wanted
+    ]
 
 
 async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
@@ -731,11 +759,13 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
             artists_by_id = {a.id: a for a in artists_result.scalars().all()}
 
-            # Check library coverage for all artists in a single query
-            listen_counts_result = await session.execute(
+            # Library coverage = distinct tracks per artist that the user has
+            # actually listened to (not total scrobbles). A handful of songs
+            # played many times should NOT read as broad coverage.
+            track_coverage_result = await session.execute(
                 sa.select(
                     music_models.Track.artist_id,
-                    sa.func.count(music_models.ListeningEvent.id).label("cnt"),
+                    sa.func.count(sa.distinct(music_models.Track.id)).label("cnt"),
                 )
                 .join(
                     music_models.ListeningEvent,
@@ -747,14 +777,19 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 )
                 .group_by(music_models.Track.artist_id)
             )
-            listen_counts: dict[uuid.UUID, int] = {
-                row[0]: row[1] for row in listen_counts_result.all()
+            track_coverage: dict[uuid.UUID, int] = {
+                row[0]: row[1] for row in track_coverage_result.all()
             }
-            artists_needing_discovery = [
-                aid
-                for aid in artist_ids
-                if listen_counts.get(aid, 0) < _MIN_LIBRARY_TRACKS
-            ]
+
+            # A discovery-leaning profile fetches catalog tracks for every target
+            # artist, so well-known artists also surface unheard tracks (#110).
+            gen_params = params_module.apply_defaults(dict(profile.parameter_values))
+            discovery_wanted = (
+                gen_params.get("familiarity", 50) < _DISCOVERY_FAMILIARITY_THRESHOLD
+            )
+            artists_needing_discovery = _artists_needing_discovery(
+                artist_ids, track_coverage, discovery_wanted
+            )
 
             # Create child tasks
             arq_redis = wctx["redis"]
