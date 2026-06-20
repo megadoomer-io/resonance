@@ -412,6 +412,73 @@ async def admin_backfill_coverage_endpoint(
     return await get_backfill_coverage(db)
 
 
+async def get_popularity_coverage(db: sa_async.AsyncSession) -> dict[str, object]:
+    """Popularity-backfill coverage: Spotify-linked tracks vs. scored tracks (#117).
+
+    ``spotify_linked`` is how many tracks carry a ``service_links["spotify"]`` id
+    (the backfill candidate set); ``scored`` is how many of those already have a
+    ``popularity_score``.
+    """
+    spotify_link = music_models.Track.service_links["spotify"].as_string()
+    linked = await db.scalar(
+        sa.select(sa.func.count())
+        .select_from(music_models.Track)
+        .where(spotify_link.isnot(None))
+    )
+    scored = await db.scalar(
+        sa.select(sa.func.count())
+        .select_from(music_models.Track)
+        .where(
+            spotify_link.isnot(None),
+            music_models.Track.popularity_score.isnot(None),
+        )
+    )
+    return {"spotify_linked": linked or 0, "scored": scored or 0}
+
+
+@router.post(
+    "/backfill-popularity",
+    summary="Enqueue Spotify popularity backfill",
+)
+async def admin_backfill_popularity_endpoint(
+    request: fastapi.Request,
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Enqueue a POPULARITY_BACKFILL task (#117).
+
+    Refreshes ``Track.popularity_score`` from Spotify's authoritative 0-100
+    popularity for every Spotify-linked track, overwriting discovery-sourced
+    synthetic values.
+    """
+    task = task_models.Task(
+        task_type=types_module.TaskType.POPULARITY_BACKFILL,
+        status=types_module.SyncStatus.PENDING,
+        params={},
+        description="Popularity Backfill",
+    )
+    db.add(task)
+    await db.commit()
+    task_id = str(task.id)
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "backfill_popularity",
+        task_id,
+        _job_id=f"popularity-backfill:{task_id}",
+    )
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.get(
+    "/backfill-popularity",
+    summary="Spotify popularity backfill coverage",
+)
+async def admin_backfill_popularity_coverage_endpoint(
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_popularity_coverage(db)
+
+
 # ---------------------------------------------------------------------------
 # Legacy endpoints
 # ---------------------------------------------------------------------------

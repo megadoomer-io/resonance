@@ -64,6 +64,7 @@ class TaskType(enum.StrEnum):
     CONCERT_ARCHIVES_CHUNK = "concert_archives_chunk"
     PLAYLIST_EXPORT = "playlist_export"
     MBID_BACKFILL = "mbid_backfill"
+    POPULARITY_BACKFILL = "popularity_backfill"
 
 
 class SyncStatus(enum.StrEnum):

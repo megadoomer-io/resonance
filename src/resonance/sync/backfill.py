@@ -52,6 +52,7 @@ import structlog
 
 import resonance.config as config_module
 import resonance.connectors.listenbrainz as listenbrainz_module
+import resonance.connectors.spotify as spotify_module
 import resonance.models.music as music_module
 import resonance.normalize as normalize_module
 import resonance.services.artist_utils as artist_utils
@@ -311,6 +312,75 @@ async def backfill_artists(
         await session.commit()
 
     logger.info("mbid_backfill_artists_done", **dataclasses.asdict(counts))
+    return counts
+
+
+@dataclasses.dataclass
+class PopularityBackfillCounts:
+    """Outcome tally for a Spotify popularity backfill run."""
+
+    candidates: int = 0
+    updated: int = 0
+    no_popularity: int = 0
+
+
+async def run_popularity_backfill(
+    session: Any,
+    settings: config_module.Settings,
+    connector: spotify_module.SpotifyConnector,
+    access_token: str,
+) -> PopularityBackfillCounts:
+    """Backfill ``Track.popularity_score`` from Spotify for Spotify-linked tracks.
+
+    Iterates tracks whose ``service_links["spotify"]`` is set, in batches, and
+    fetches Spotify's authoritative 0-100 popularity via ``connector.get_tracks``.
+    Spotify is authoritative, so the fetched value overwrites any prior
+    discovery-sourced synthetic ``popularity_score`` (#117).
+
+    Tracks Spotify reports without a popularity field are counted under
+    ``no_popularity`` and left untouched. Batched + committed per batch so a worker
+    restart re-enters and re-scans (the scan is idempotent — re-reading popularity
+    is cheap and converges).
+    """
+    counts = PopularityBackfillCounts()
+    spotify_link = music_module.Track.service_links["spotify"].as_string()
+    offset = 0
+    batch_size = settings.mbid_mapper_batch_size
+    while True:
+        stmt = (
+            sa.select(music_module.Track)
+            .where(spotify_link.isnot(None))
+            .order_by(music_module.Track.id)
+            .offset(offset)
+            .limit(batch_size)
+        )
+        tracks = list((await session.execute(stmt)).scalars().all())
+        if not tracks:
+            break
+        offset += len(tracks)
+        counts.candidates += len(tracks)
+
+        by_spotify_id: dict[str, list[music_module.Track]] = {}
+        for track in tracks:
+            spotify_id = (track.service_links or {}).get("spotify")
+            if isinstance(spotify_id, str):
+                by_spotify_id.setdefault(spotify_id, []).append(track)
+
+        popularity = await connector.get_tracks(
+            access_token, list(by_spotify_id.keys())
+        )
+        for spotify_id, group in by_spotify_id.items():
+            score = popularity.get(spotify_id)
+            if score is None:
+                counts.no_popularity += len(group)
+                continue
+            for track in group:
+                track.popularity_score = score
+                counts.updated += 1
+
+        await session.commit()
+
+    logger.info("popularity_backfill_done", **dataclasses.asdict(counts))
     return counts
 
 
