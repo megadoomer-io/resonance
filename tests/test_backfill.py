@@ -330,41 +330,69 @@ class TestRunMbidBackfill:
         assert out["artist"].matched == 1
 
 
-def _pop_track(spotify_id: str | None, popularity_score: int | None = None) -> Any:
-    links = {"spotify": spotify_id} if spotify_id is not None else None
+def _pop_track(recording_mbid: str | None, popularity_score: int | None = None) -> Any:
+    links = {"musicbrainz": {"id": recording_mbid}} if recording_mbid else None
     return _entity(service_links=links, popularity_score=popularity_score)
+
+
+class TestNormalizePopularity:
+    """The log10 mapping from a raw listen count to a 0-100 score."""
+
+    def test_zero_count_is_zero(self) -> None:
+        assert backfill_module.normalize_popularity(0) == 0
+
+    def test_one_million_listens_saturates_to_100(self) -> None:
+        # 10^6 is the ceiling (a global hit like "Closer" at ~1.38M -> capped 100).
+        assert backfill_module.normalize_popularity(1_000_000) == 100
+        assert backfill_module.normalize_popularity(2_000_000) == 100
+
+    def test_monotonic_increasing(self) -> None:
+        scores = [backfill_module.normalize_popularity(c) for c in (1, 100, 10_000)]
+        assert scores == sorted(scores)
+        assert all(0 <= s <= 100 for s in scores)
+
+    def test_thousand_listens_is_midscale(self) -> None:
+        # log10(1000)/log10(1e6) = 3/6 = 0.5 -> 50.
+        assert backfill_module.normalize_popularity(1000) == 50
 
 
 class TestRunPopularityBackfill:
     @pytest.mark.anyio()
-    async def test_overwrites_score_for_spotify_linked_tracks(self) -> None:
-        # Spotify is authoritative: overwrite a prior synthetic value (#117).
-        a = _pop_track("sp-a", popularity_score=3)
-        b = _pop_track("sp-b", popularity_score=None)
+    async def test_normalizes_and_overwrites_for_mb_linked_tracks(self) -> None:
+        # LB is the source: overwrite any prior synthetic value with the
+        # normalized listen count.
+        a = _pop_track("rec-a", popularity_score=3)
+        b = _pop_track("rec-b", popularity_score=None)
         session = _session([[a, b], []])
         connector = AsyncMock()
-        connector.get_tracks = AsyncMock(return_value={"sp-a": 71, "sp-b": 12})
-
-        counts = await backfill_module.run_popularity_backfill(
-            session, _settings(), connector, access_token="tok"
+        # rec-a: 10^6 listens -> 100; rec-b: 1000 listens -> 50.
+        connector.get_recording_popularity = AsyncMock(
+            return_value={"rec-a": 1_000_000, "rec-b": 1000}
         )
 
-        assert a.popularity_score == 71  # overwrote synthetic 3
-        assert b.popularity_score == 12
+        counts = await backfill_module.run_popularity_backfill(
+            session, _settings(), connector
+        )
+
+        assert a.popularity_score == 100  # overwrote synthetic 3
+        assert b.popularity_score == 50
         assert counts.candidates == 2
         assert counts.updated == 2
         assert counts.no_popularity == 0
-        connector.get_tracks.assert_awaited_once_with("tok", ["sp-a", "sp-b"])
+        assert counts.skipped_no_mbid == 0
+        connector.get_recording_popularity.assert_awaited_once_with(["rec-a", "rec-b"])
 
     @pytest.mark.anyio()
     async def test_no_popularity_leaves_score_untouched(self) -> None:
-        a = _pop_track("sp-a", popularity_score=5)
+        a = _pop_track("rec-a", popularity_score=5)
         session = _session([[a], []])
         connector = AsyncMock()
-        connector.get_tracks = AsyncMock(return_value={})  # Spotify gave nothing
+        connector.get_recording_popularity = AsyncMock(
+            return_value={}
+        )  # LB had no data
 
         counts = await backfill_module.run_popularity_backfill(
-            session, _settings(), connector, access_token="tok"
+            session, _settings(), connector
         )
 
         assert a.popularity_score == 5  # untouched
@@ -373,33 +401,54 @@ class TestRunPopularityBackfill:
         assert counts.no_popularity == 1
 
     @pytest.mark.anyio()
-    async def test_dedupes_shared_spotify_id_into_one_lookup(self) -> None:
-        # Two tracks pointing at the same Spotify id -> one lookup, both updated.
+    async def test_skips_tracks_without_recording_mbid(self) -> None:
+        # A track with no MB recording MBID is counted and skipped (not looked up).
+        a = _pop_track("rec-a")
+        b = _pop_track(None)  # no musicbrainz link
+        session = _session([[a, b], []])
+        connector = AsyncMock()
+        connector.get_recording_popularity = AsyncMock(return_value={"rec-a": 1000})
+
+        counts = await backfill_module.run_popularity_backfill(
+            session, _settings(), connector
+        )
+
+        assert a.popularity_score == 50
+        assert b.popularity_score is None  # left untouched
+        assert counts.candidates == 2
+        assert counts.updated == 1
+        assert counts.skipped_no_mbid == 1
+        # Only the MB-linked track is looked up.
+        connector.get_recording_popularity.assert_awaited_once_with(["rec-a"])
+
+    @pytest.mark.anyio()
+    async def test_dedupes_shared_recording_mbid_into_one_lookup(self) -> None:
+        # Two tracks pointing at the same recording MBID -> one lookup, both updated.
         a = _pop_track("dup")
         b = _pop_track("dup")
         session = _session([[a, b], []])
         connector = AsyncMock()
-        connector.get_tracks = AsyncMock(return_value={"dup": 40})
+        connector.get_recording_popularity = AsyncMock(return_value={"dup": 1000})
 
         counts = await backfill_module.run_popularity_backfill(
-            session, _settings(), connector, access_token="tok"
+            session, _settings(), connector
         )
 
-        assert a.popularity_score == 40
-        assert b.popularity_score == 40
+        assert a.popularity_score == 50
+        assert b.popularity_score == 50
         assert counts.updated == 2
-        connector.get_tracks.assert_awaited_once_with("tok", ["dup"])
+        connector.get_recording_popularity.assert_awaited_once_with(["dup"])
 
     @pytest.mark.anyio()
     async def test_empty_library_no_lookup(self) -> None:
         session = _session([[]])
         connector = AsyncMock()
-        connector.get_tracks = AsyncMock()
+        connector.get_recording_popularity = AsyncMock()
 
         counts = await backfill_module.run_popularity_backfill(
-            session, _settings(), connector, access_token="tok"
+            session, _settings(), connector
         )
 
         assert counts.candidates == 0
         assert counts.updated == 0
-        connector.get_tracks.assert_not_awaited()
+        connector.get_recording_popularity.assert_not_awaited()

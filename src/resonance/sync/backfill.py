@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import math
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -52,7 +53,6 @@ import structlog
 
 import resonance.config as config_module
 import resonance.connectors.listenbrainz as listenbrainz_module
-import resonance.connectors.spotify as spotify_module
 import resonance.models.music as music_module
 import resonance.normalize as normalize_module
 import resonance.services.artist_utils as artist_utils
@@ -317,39 +317,68 @@ async def backfill_artists(
 
 @dataclasses.dataclass
 class PopularityBackfillCounts:
-    """Outcome tally for a Spotify popularity backfill run."""
+    """Outcome tally for a ListenBrainz popularity backfill run."""
 
     candidates: int = 0
     updated: int = 0
     no_popularity: int = 0
+    skipped_no_mbid: int = 0
+
+
+# Listen-count ceiling for the 0-100 normalization. A global hit recording
+# (e.g. "Closer" at ~1.38M listens) saturates the scale; 10^6 gives a clean
+# log10 denominator of 6.
+_POPULARITY_CEILING = 1_000_000
+_POPULARITY_LOG_CEILING = math.log10(_POPULARITY_CEILING)
+
+
+def normalize_popularity(listen_count: int) -> int:
+    """Map a raw ListenBrainz listen count to a 0-100 popularity score.
+
+    Listen counts are heavy-tailed (a handful of recordings dominate), so a
+    linear scale would collapse almost everything to 0. A log10 mapping spreads
+    the distribution: ``score = 100 * log10(count) / log10(10^6)``, clamped to
+    0-100. A recording with ~1M listens saturates to 100; ~1000 listens lands at
+    50; a single listen rounds to ~0.
+
+    Args:
+        listen_count: ``total_listen_count`` from the LB popularity endpoint.
+
+    Returns:
+        An integer popularity score in ``[0, 100]``.
+    """
+    if listen_count <= 0:
+        return 0
+    ratio = math.log10(listen_count) / _POPULARITY_LOG_CEILING
+    return max(0, min(100, round(ratio * 100)))
 
 
 async def run_popularity_backfill(
     session: Any,
     settings: config_module.Settings,
-    connector: spotify_module.SpotifyConnector,
-    access_token: str,
+    connector: listenbrainz_module.ListenBrainzConnector,
 ) -> PopularityBackfillCounts:
-    """Backfill ``Track.popularity_score`` from Spotify for Spotify-linked tracks.
+    """Backfill ``Track.popularity_score`` from ListenBrainz recording popularity.
 
-    Iterates tracks whose ``service_links["spotify"]`` is set, in batches, and
-    fetches Spotify's authoritative 0-100 popularity via ``connector.get_tracks``.
-    Spotify is authoritative, so the fetched value overwrites any prior
-    discovery-sourced synthetic ``popularity_score`` (#117).
+    Iterates library tracks that carry a MusicBrainz recording MBID
+    (``service_links["musicbrainz"]["id"]``), in batches, and fetches each
+    recording's global listen count via ``connector.get_recording_popularity``
+    (the public ``POST /1/popularity/recording`` endpoint — no auth token). The
+    listen count is normalized to a 0-100 score (see ``normalize_popularity``) and
+    overwrites any prior discovery-sourced synthetic ``popularity_score``.
 
-    Tracks Spotify reports without a popularity field are counted under
-    ``no_popularity`` and left untouched. Batched + committed per batch so a worker
-    restart re-enters and re-scans (the scan is idempotent — re-reading popularity
-    is cheap and converges).
+    Tracks without a recording MBID are counted under ``skipped_no_mbid`` and left
+    untouched — there is no MBID-keyed popularity to fetch for them. Recordings LB
+    has no data on are counted under ``no_popularity`` and left untouched. Batched
+    and committed per batch so a worker restart re-enters and re-scans (the scan is
+    idempotent — re-reading popularity is cheap and converges).
     """
     counts = PopularityBackfillCounts()
-    spotify_link = music_module.Track.service_links["spotify"].as_string()
     offset = 0
     batch_size = settings.mbid_mapper_batch_size
     while True:
         stmt = (
             sa.select(music_module.Track)
-            .where(spotify_link.isnot(None))
             .order_by(music_module.Track.id)
             .offset(offset)
             .limit(batch_size)
@@ -360,23 +389,27 @@ async def run_popularity_backfill(
         offset += len(tracks)
         counts.candidates += len(tracks)
 
-        by_spotify_id: dict[str, list[music_module.Track]] = {}
+        by_recording_mbid: dict[str, list[music_module.Track]] = {}
         for track in tracks:
-            spotify_id = (track.service_links or {}).get("spotify")
-            if isinstance(spotify_id, str):
-                by_spotify_id.setdefault(spotify_id, []).append(track)
+            recording_mbid = artist_utils.get_mbid(track.service_links)
+            if recording_mbid:
+                by_recording_mbid.setdefault(recording_mbid, []).append(track)
+            else:
+                counts.skipped_no_mbid += 1
 
-        popularity = await connector.get_tracks(
-            access_token, list(by_spotify_id.keys())
-        )
-        for spotify_id, group in by_spotify_id.items():
-            score = popularity.get(spotify_id)
-            if score is None:
-                counts.no_popularity += len(group)
-                continue
-            for track in group:
-                track.popularity_score = score
-                counts.updated += 1
+        if by_recording_mbid:
+            popularity = await connector.get_recording_popularity(
+                list(by_recording_mbid.keys())
+            )
+            for recording_mbid, group in by_recording_mbid.items():
+                listen_count = popularity.get(recording_mbid)
+                if listen_count is None:
+                    counts.no_popularity += len(group)
+                    continue
+                score = normalize_popularity(listen_count)
+                for track in group:
+                    track.popularity_score = score
+                    counts.updated += 1
 
         await session.commit()
 
