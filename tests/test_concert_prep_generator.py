@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 
 import resonance.generators.concert_prep as concert_prep_module
@@ -490,3 +491,251 @@ class TestBlendQuota:
             freshness_target=None,
         )
         assert len(result.tracks) == 0
+
+
+# Parameters that make track score a strict monotonic function of listen_count:
+# familiarity=100 gives familiarity full positive weight, hit_depth=50 makes
+# popularity neutral. So higher listen_count => strictly higher score, which lets
+# the per-artist fairness tests control ranking deterministically.
+_FAMILIARITY_DRIVEN = {"familiarity": 100, "hit_depth": 50}
+
+
+def _artist_candidate(
+    *,
+    artist_id: uuid.UUID,
+    listen_count: int,
+    is_target: bool,
+) -> concert_prep_module.CandidateTrack:
+    """Build a candidate whose score is driven solely by listen_count.
+
+    Used by the per-artist fairness tests, where ranking must be deterministic
+    and grouping by artist_id matters.
+    """
+    return concert_prep_module.CandidateTrack(
+        track_id=uuid.uuid4(),
+        title=f"Song {listen_count}",
+        artist_name=str(artist_id),
+        artist_id=artist_id,
+        is_target_artist=is_target,
+        listen_count=listen_count,
+        in_library=True,
+        popularity_score=0,
+        source=types_module.TrackSource.LIBRARY,
+    )
+
+
+class TestPerArtistFairness:
+    """Round-robin interleave spreads quota slots across artists in a pool.
+
+    The fix replaces "sort-by-score-and-slice" with a round-robin fill: round 0
+    takes each artist's best track, round 1 their second-best, etc. No artist
+    gets a 2nd track until every artist has had a 1st (issue #115 / PR #121).
+    """
+
+    def test_anti_flooding_one_artist_cannot_dominate(self) -> None:
+        # One artist with 15 high-scoring tracks; 5 others with enough tracks that
+        # the quota can be filled fairly (so the constraint is fairness, not
+        # scarcity). Pool = 15 + 5*8 = 55 tracks for a quota of 30.
+        flooder = uuid.uuid4()
+        others = [uuid.uuid4() for _ in range(5)]
+        candidates: list[concert_prep_module.CandidateTrack] = [
+            # Flooder's tracks all outscore everyone else's.
+            _artist_candidate(artist_id=flooder, listen_count=90 + i, is_target=True)
+            for i in range(15)
+        ]
+        for other in others:
+            candidates += [
+                _artist_candidate(artist_id=other, listen_count=10 + i, is_target=True)
+                for i in range(8)
+            ]
+
+        max_tracks = 30
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params={**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 0},
+            max_tracks=max_tracks,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+
+        # Map each returned track back to its artist via title (carries listen_count
+        # is not unique enough) -- instead rebuild an id->artist map.
+        artist_by_track = {c.track_id: c.artist_id for c in candidates}
+        per_artist: dict[uuid.UUID, int] = {}
+        for t in result.tracks:
+            aid = artist_by_track[t.track_id]
+            per_artist[aid] = per_artist.get(aid, 0) + 1
+
+        # The pool has 6 artists. Round-robin guarantees no artist exceeds
+        # ceil(quota / num_artists) by more than the rounding remainder; with 6
+        # artists and quota 30, the cap is ceil(30/6) = 5. The flooder should be
+        # held to roughly that, not ~15. Compute the cap from the pool's distinct
+        # artist count (NOT the result's) -- a flooding bug collapses the result
+        # to one artist and would otherwise hide itself.
+        num_artists_in_pool = len({c.artist_id for c in candidates})
+        cap = math.ceil(max_tracks / num_artists_in_pool)
+        assert per_artist[flooder] <= cap + 1, per_artist
+        # And the quota is fully filled (enough tracks exist: 15 + 15 = 30).
+        assert len(result.tracks) == max_tracks
+
+    def test_few_artists_alternate_without_starvation(self) -> None:
+        # Only 2 artists, quota of 10: must alternate and fill all 10.
+        a1 = uuid.uuid4()
+        a2 = uuid.uuid4()
+        candidates: list[concert_prep_module.CandidateTrack] = []
+        for i in range(10):
+            candidates.append(
+                _artist_candidate(artist_id=a1, listen_count=80 + i, is_target=True)
+            )
+            candidates.append(
+                _artist_candidate(artist_id=a2, listen_count=20 + i, is_target=True)
+            )
+
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params={**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 0},
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+
+        artist_by_track = {c.track_id: c.artist_id for c in candidates}
+        per_artist: dict[uuid.UUID, int] = {}
+        for t in result.tracks:
+            aid = artist_by_track[t.track_id]
+            per_artist[aid] = per_artist.get(aid, 0) + 1
+
+        assert len(result.tracks) == 10
+        # Two artists, quota 10 -> 5 each (round-robin, no starvation).
+        assert per_artist[a1] == 5
+        assert per_artist[a2] == 5
+
+    def test_round_robin_in_adjacent_pool(self) -> None:
+        # Fairness also applies to the adjacent pool. One adjacent flooder, several
+        # adjacent others; ratio=100 routes the whole playlist through adjacent.
+        flooder = uuid.uuid4()
+        others = [uuid.uuid4() for _ in range(4)]
+        candidates: list[concert_prep_module.CandidateTrack] = [
+            _artist_candidate(artist_id=flooder, listen_count=90 + i, is_target=False)
+            for i in range(15)
+        ]
+        for other in others:
+            candidates += [
+                _artist_candidate(artist_id=other, listen_count=10 + i, is_target=False)
+                for i in range(3)
+            ]
+
+        max_tracks = 10
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params={**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 100},
+            max_tracks=max_tracks,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+
+        artist_by_track = {c.track_id: c.artist_id for c in candidates}
+        per_artist: dict[uuid.UUID, int] = {}
+        for t in result.tracks:
+            aid = artist_by_track[t.track_id]
+            per_artist[aid] = per_artist.get(aid, 0) + 1
+
+        # Cap from the pool's distinct artist count, not the result's, so a
+        # flooding regression cannot hide by collapsing the result to one artist.
+        num_artists_in_pool = len({c.artist_id for c in candidates})
+        cap = math.ceil(max_tracks / num_artists_in_pool)
+        assert per_artist[flooder] <= cap + 1, per_artist
+        assert len(result.tracks) == max_tracks
+
+    def test_backfill_uses_round_robin_from_donor_pool(self) -> None:
+        # Adjacent pool underflows its quota, so the target pool backfills. The
+        # backfilled target tracks must come via round-robin, not a naive top-N
+        # slice that would let the target flooder dominate the backfill.
+        tgt_flooder = uuid.uuid4()
+        tgt_others = [uuid.uuid4() for _ in range(4)]
+        target: list[concert_prep_module.CandidateTrack] = [
+            _artist_candidate(
+                artist_id=tgt_flooder, listen_count=90 + i, is_target=True
+            )
+            for i in range(15)
+        ]
+        for other in tgt_others:
+            target += [
+                _artist_candidate(artist_id=other, listen_count=30 + i, is_target=True)
+                for i in range(3)
+            ]
+        # Only 1 adjacent track -> adjacent quota of 5 underflows by 4.
+        adjacent = [
+            _artist_candidate(artist_id=uuid.uuid4(), listen_count=50, is_target=False)
+        ]
+
+        max_tracks = 10
+        result = concert_prep_module.score_and_select(
+            candidates=target + adjacent,
+            params={**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 50},
+            max_tracks=max_tracks,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+
+        assert len(result.tracks) == max_tracks
+        artist_by_track = {c.track_id: c.artist_id for c in (target + adjacent)}
+        # Count how many slots the target flooder grabbed across base + backfill.
+        flooder_count = sum(
+            1 for t in result.tracks if artist_by_track[t.track_id] == tgt_flooder
+        )
+        # tgt quota is 5, backfill adds 4 more from target = 9 target slots over
+        # 5 target artists. Round-robin caps the flooder well below a top-N slice
+        # (which would give the flooder all 9).
+        assert flooder_count <= 3, flooder_count
+
+    def test_deterministic_same_input_same_output(self) -> None:
+        flooder = uuid.uuid4()
+        others = [uuid.uuid4() for _ in range(3)]
+        candidates: list[concert_prep_module.CandidateTrack] = [
+            _artist_candidate(artist_id=flooder, listen_count=90 + i, is_target=True)
+            for i in range(10)
+        ]
+        for other in others:
+            candidates += [
+                _artist_candidate(artist_id=other, listen_count=20 + i, is_target=True)
+                for i in range(4)
+            ]
+        params = {**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 0}
+        run1 = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=params,
+            max_tracks=15,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        run2 = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=params,
+            max_tracks=15,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert [t.track_id for t in run1.tracks] == [t.track_id for t in run2.tracks]
+
+    def test_strongest_artist_still_leads(self) -> None:
+        # Round-robin orders artist groups by their best track's score, so the
+        # top-scoring track overall still appears (first in score-desc output).
+        strong = uuid.uuid4()
+        weak = uuid.uuid4()
+        candidates = [
+            _artist_candidate(artist_id=strong, listen_count=99, is_target=True),
+            _artist_candidate(artist_id=strong, listen_count=98, is_target=True),
+            _artist_candidate(artist_id=weak, listen_count=5, is_target=True),
+            _artist_candidate(artist_id=weak, listen_count=4, is_target=True),
+        ]
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params={**_FAMILIARITY_DRIVEN, "similar_artist_ratio": 0},
+            max_tracks=4,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        artist_by_track = {c.track_id: c.artist_id for c in candidates}
+        # Final output is score-desc; the very first track is the strong artist's best.
+        assert artist_by_track[result.tracks[0].track_id] == strong
