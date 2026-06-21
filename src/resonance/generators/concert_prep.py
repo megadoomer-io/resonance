@@ -81,6 +81,52 @@ def _round_half_up(value: float) -> int:
     return int(value + 0.5)
 
 
+def _round_robin_order(
+    pool: list[tuple[CandidateTrack, float]],
+) -> list[tuple[CandidateTrack, float]]:
+    """Re-order a score-desc pool so slots spread fairly across artists.
+
+    Per-artist fairness: instead of taking the strict top-N by score (which lets
+    one prolific artist flood the playlist), the pool is interleaved by rounds.
+    Round 0 yields each artist's best track, round 1 each artist's second-best,
+    and so on. Slicing the result is proportional-to-artist-count by
+    construction -- no artist gets a 2nd track until every artist has had a 1st.
+
+    The input pool must already be sorted by score descending; that order is the
+    within-artist tie-break (preserving the existing ranking, e.g. score then a
+    stable secondary). Artist groups lead with the strongest artists: groups are
+    ordered by their best track's score descending, ties broken by first
+    appearance in the pool for deterministic output.
+    """
+    # Group by artist, preserving the pool's score-desc order within each group.
+    groups: dict[uuid.UUID, list[tuple[CandidateTrack, float]]] = {}
+    first_seen: dict[uuid.UUID, int] = {}
+    for index, pair in enumerate(pool):
+        artist_id = pair[0].artist_id
+        if artist_id not in groups:
+            groups[artist_id] = []
+            first_seen[artist_id] = index
+        groups[artist_id].append(pair)
+
+    # Order artist groups by their best (first, since score-desc) track's score
+    # descending; tie-break by first appearance for stable, deterministic output.
+    ordered_artists = sorted(
+        groups,
+        key=lambda aid: (-groups[aid][0][1], first_seen[aid]),
+    )
+
+    # Fill by rounds: round r takes each artist's track at index r, in artist
+    # order, until every track is consumed.
+    result: list[tuple[CandidateTrack, float]] = []
+    max_depth = max((len(g) for g in groups.values()), default=0)
+    for depth in range(max_depth):
+        for artist_id in ordered_artists:
+            group = groups[artist_id]
+            if depth < len(group):
+                result.append(group[depth])
+    return result
+
+
 def _select_with_quota(
     target_pool: list[tuple[CandidateTrack, float]],
     adjacent_pool: list[tuple[CandidateTrack, float]],
@@ -92,8 +138,14 @@ def _select_with_quota(
     Both pools must already be sorted by score descending. The adjacent quota is
     ``round_half_up(max_tracks * ratio / 100)``; the rest go to the target pool.
 
+    Within each pool, tracks are chosen by a round-robin interleave across
+    artists (see :func:`_round_robin_order`) rather than a strict top-N slice, so
+    a single prolific artist cannot flood the playlist. The quota split is
+    unchanged -- this governs *which* tracks fill each quota, not the quota sizes.
+
     When a pool cannot fill its quota, the shortfall is backfilled from the other
-    pool -- but only if the other pool was allocated at least one slot. This keeps
+    pool -- but only if the other pool was allocated at least one slot. The
+    backfilled tracks also come via round-robin from the donor pool. This keeps
     the extremes literal: at ratio=0 no adjacent track is ever added, and at
     ratio=100 no target track is ever added (matching the design intent that 0 is
     target-only and 100 is adjacent-only).
@@ -102,8 +154,13 @@ def _select_with_quota(
     adj_quota = _round_half_up(max_tracks * ratio / 100)
     tgt_quota = max_tracks - adj_quota
 
-    tgt_take = target_pool[:tgt_quota]
-    adj_take = adjacent_pool[:adj_quota]
+    # Round-robin order each pool once; slicing this order is fair selection, and
+    # the slice past the quota is the donor remainder for backfill (still fair).
+    target_ordered = _round_robin_order(target_pool)
+    adjacent_ordered = _round_robin_order(adjacent_pool)
+
+    tgt_take = target_ordered[:tgt_quota]
+    adj_take = adjacent_ordered[:adj_quota]
 
     tgt_short = tgt_quota - len(tgt_take)
     adj_short = adj_quota - len(adj_take)
@@ -111,9 +168,9 @@ def _select_with_quota(
     # Backfill a pool's shortfall from the other pool's remainder, but only when
     # the other pool was allocated slots (so 0/100 stay pure).
     if tgt_short > 0 and adj_quota > 0:
-        adj_take += adjacent_pool[adj_quota : adj_quota + tgt_short]
+        adj_take += adjacent_ordered[adj_quota : adj_quota + tgt_short]
     if adj_short > 0 and tgt_quota > 0:
-        tgt_take += target_pool[tgt_quota : tgt_quota + adj_short]
+        tgt_take += target_ordered[tgt_quota : tgt_quota + adj_short]
 
     return (tgt_take + adj_take)[:max_tracks]
 
