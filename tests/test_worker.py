@@ -2378,6 +2378,442 @@ class TestGeneratePlaylist:
         call_args = arq_redis.enqueue_job.call_args
         assert call_args.args[0] == "score_and_build_playlist"
 
+    @pytest.mark.asyncio
+    async def test_adjacent_discovery_when_high_ratio_low_familiarity(self) -> None:
+        """Adjacent library artists get discovery + persist when discovery-leaning.
+
+        similar_artist_ratio > 0 AND familiarity < 50: the resolved (capped,
+        ranked) adjacent library artists are added to the discovery fan-out and
+        persisted onto the parent task params for scoring to read (issue #115).
+        """
+        import resonance.connectors.base as base_module
+        import resonance.models.concert as concert_models
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        adjacent_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        # Discovery-leaning + adjacent ratio > 0
+        profile.parameter_values = {"familiarity": 10, "similar_artist_ratio": 70}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = target_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        target_artist = MagicMock(spec=music_models.Artist)
+        target_artist.id = target_id
+        target_artist.name = "King Buffalo"
+        target_artist.service_links = {"musicbrainz": {"id": "mbid-kb"}}
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [target_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        # Library coverage: target is well-covered (no discovery needed by
+        # coverage), but discovery_wanted=True still includes it.
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = [(target_id, 25)]
+
+        # Resolver's library name->id query returns one adjacent artist.
+        resolver_result = MagicMock()
+        resolver_result.all.return_value = [("elder", adjacent_id)]
+
+        # Adjacent artist objects loaded for the discovery children.
+        adjacent_obj = MagicMock(spec=music_models.Artist)
+        adjacent_obj.id = adjacent_id
+        adjacent_obj.name = "Elder"
+        adjacent_obj.service_links = None
+        adjacent_obj_scalars = MagicMock()
+        adjacent_obj_scalars.all.return_value = [adjacent_obj]
+        adjacent_obj_result = MagicMock()
+        adjacent_obj_result.scalars.return_value = adjacent_obj_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_counts,
+            resolver_result,
+            adjacent_obj_result,
+        ]
+
+        # Similar-artist connector returns one neighbor.
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": None, "match": 0.9},
+        ]
+        registry = MagicMock()
+        registry.get_by_capability.return_value = [connector]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        registry.get_by_capability.assert_called_once_with(
+            base_module.ConnectorCapability.SIMILAR_ARTISTS
+        )
+
+        # Discovery tasks created for BOTH the target and the adjacent artist.
+        added_tasks = [call.args[0] for call in session.add.call_args_list]
+        discovery_artist_ids = {
+            t.params["artist_id"]
+            for t in added_tasks
+            if t.task_type == types_module.TaskType.TRACK_DISCOVERY
+        }
+        assert discovery_artist_ids == {str(target_id), str(adjacent_id)}
+
+        # The capped, ranked adjacent set is persisted on the parent task params
+        # so scoring reads the SAME set (resolve-once-and-persist).
+        assert task.params["adjacent_artist_ids"] == [str(adjacent_id)]
+
+    @pytest.mark.asyncio
+    async def test_no_adjacent_discovery_when_ratio_zero(self) -> None:
+        """ratio == 0: no adjacent resolution, no persisted set, behavior unchanged."""
+        import resonance.models.concert as concert_models
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        # Discovery-leaning but NO adjacent ratio.
+        profile.parameter_values = {"familiarity": 10, "similar_artist_ratio": 0}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = target_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        target_artist = MagicMock(spec=music_models.Artist)
+        target_artist.id = target_id
+        target_artist.name = "King Buffalo"
+        target_artist.service_links = None
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [target_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = []
+
+        # No resolver query expected; only the 6 base executes.
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_counts,
+        ]
+
+        registry = MagicMock()
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # No similar-artist resolution path taken.
+        registry.get_by_capability.assert_not_called()
+
+        # Only the target discovery task + scoring task.
+        added_tasks = [call.args[0] for call in session.add.call_args_list]
+        discovery = [
+            t
+            for t in added_tasks
+            if t.task_type == types_module.TaskType.TRACK_DISCOVERY
+        ]
+        assert len(discovery) == 1
+        assert discovery[0].params["artist_id"] == str(target_id)
+        # No adjacent set persisted (or persisted empty); never a populated list.
+        assert task.params.get("adjacent_artist_ids", []) == []
+
+    @pytest.mark.asyncio
+    async def test_no_adjacent_discovery_when_not_discovery_wanted(self) -> None:
+        """familiarity >= 50: adjacent discovery is skipped even if ratio > 0."""
+        import resonance.models.concert as concert_models
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        # Adjacent ratio > 0 but familiarity-leaning (not discovery).
+        profile.parameter_values = {"familiarity": 80, "similar_artist_ratio": 70}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = target_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        target_artist = MagicMock(spec=music_models.Artist)
+        target_artist.id = target_id
+        target_artist.name = "King Buffalo"
+        target_artist.service_links = None
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [target_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        # Target well-covered: with familiarity>=50 it needs no discovery either.
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = [(target_id, 25)]
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_counts,
+        ]
+
+        registry = MagicMock()
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # Not discovery-leaning -> no adjacent resolution.
+        registry.get_by_capability.assert_not_called()
+        assert task.params.get("adjacent_artist_ids", []) == []
+
+    @pytest.mark.asyncio
+    async def test_adjacent_discovery_capped_to_max(self) -> None:
+        """Adjacent fan-out is capped to _MAX_ADJACENT_DISCOVERY by rank (#115)."""
+        import resonance.models.concert as concert_models
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        # More adjacent artists than the cap.
+        adjacent_ids = [
+            uuid.uuid4() for _ in range(worker_module._MAX_ADJACENT_DISCOVERY + 4)
+        ]
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.parameter_values = {"familiarity": 10, "similar_artist_ratio": 90}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = target_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        target_artist = MagicMock(spec=music_models.Artist)
+        target_artist.id = target_id
+        target_artist.name = "King Buffalo"
+        target_artist.service_links = None
+        artist_scalars = MagicMock()
+        artist_scalars.all.return_value = [target_artist]
+        artist_result = MagicMock()
+        artist_result.scalars.return_value = artist_scalars
+
+        listen_counts = MagicMock()
+        listen_counts.all.return_value = [(target_id, 25)]
+
+        # Resolver returns rows in rank order (names ordered to match neighbor
+        # rank); the implementation orders by neighbor rank.
+        resolver_result = MagicMock()
+        resolver_result.all.return_value = [
+            (f"a{i}", aid) for i, aid in enumerate(adjacent_ids)
+        ]
+
+        # Adjacent artist objects loaded for the capped discovery children.
+        capped = adjacent_ids[: worker_module._MAX_ADJACENT_DISCOVERY]
+        adjacent_objs = []
+        for i, aid in enumerate(capped):
+            obj = MagicMock(spec=music_models.Artist)
+            obj.id = aid
+            obj.name = f"a{i}"
+            obj.service_links = None
+            adjacent_objs.append(obj)
+        adjacent_obj_scalars = MagicMock()
+        adjacent_obj_scalars.all.return_value = adjacent_objs
+        adjacent_obj_result = MagicMock()
+        adjacent_obj_result.scalars.return_value = adjacent_obj_scalars
+
+        session.execute.side_effect = [
+            task_result,
+            profile_result,
+            ea_result,
+            eac_result,
+            artist_result,
+            listen_counts,
+            resolver_result,
+            adjacent_obj_result,
+        ]
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": f"a{i}", "mbid": None, "match": 1.0 - i * 0.01}
+            for i in range(len(adjacent_ids))
+        ]
+        registry = MagicMock()
+        registry.get_by_capability.return_value = [connector]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.generate_playlist(ctx, str(task_id))
+
+        # Persisted adjacent set is capped to the first _MAX_ADJACENT_DISCOVERY.
+        persisted = task.params["adjacent_artist_ids"]
+        assert len(persisted) == worker_module._MAX_ADJACENT_DISCOVERY
+        assert persisted == [
+            str(aid) for aid in adjacent_ids[: worker_module._MAX_ADJACENT_DISCOVERY]
+        ]
+
+        # And the discovery fan-out enqueues only the capped adjacent + target.
+        added_tasks = [call.args[0] for call in session.add.call_args_list]
+        discovery_artist_ids = {
+            t.params["artist_id"]
+            for t in added_tasks
+            if t.task_type == types_module.TaskType.TRACK_DISCOVERY
+        }
+        expected = {str(target_id)} | {
+            str(aid) for aid in adjacent_ids[: worker_module._MAX_ADJACENT_DISCOVERY]
+        }
+        assert discovery_artist_ids == expected
+
 
 # ---------------------------------------------------------------------------
 # discover_tracks_for_artist tests
@@ -2679,11 +3115,11 @@ class TestScoreAndBuildPlaylist:
             profile_result,
             ea_result,
             eac_result,
+            parent_for_params_result,  # parent loaded early (adjacent + options)
             track_result,
             listen_result,
             utr_result,
             prev_gen_result,
-            parent_for_params_result,
             # _check_parent_completion
             pending_count_mock,
             parent_result_mock,
@@ -2827,11 +3263,11 @@ class TestScoreAndBuildPlaylist:
             profile_result,
             ea_result,
             eac_result,
+            parent_for_params_result,  # parent loaded early (adjacent + options)
             track_result,
             listen_result,
             utr_result,
             prev_gen_result,
-            parent_for_params_result,
             pending_count_mock,
             parent_result_mock,
             failed_count_mock,
@@ -2849,6 +3285,193 @@ class TestScoreAndBuildPlaylist:
         # Parent should be marked completed
         assert parent_task.status == types_module.SyncStatus.COMPLETED
         assert parent_task.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_reads_persisted_adjacent_ids_no_reresolve(self) -> None:
+        """Scoring reads parent params["adjacent_artist_ids"]; no re-resolve (#115).
+
+        The pool is expanded to exactly target union persisted set; the cap bounds
+        POOL MEMBERSHIP, not just discovery. Scoring must NOT call the similar-
+        artist connectors again (resolve-once-and-persist).
+        """
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+        import resonance.models.playlist as playlist_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        target_id = uuid.uuid4()
+        adjacent_id = uuid.uuid4()
+        target_track_id = uuid.uuid4()
+        adjacent_track_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+
+        # Parent carries the persisted, capped adjacent set from fan-out.
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": None,
+                "adjacent_artist_ids": [str(adjacent_id)],
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Discovery Playlist"
+        # Discovery-leaning with adjacent ratio so the OLD code would re-resolve.
+        profile.parameter_values = {"familiarity": 10, "similar_artist_ratio": 70}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = target_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        # The track query (target union adjacent) returns one track per artist.
+        target_artist_obj = MagicMock(spec=music_models.Artist)
+        target_artist_obj.id = target_id
+        target_artist_obj.name = "King Buffalo"
+        target_track = MagicMock(spec=music_models.Track)
+        target_track.id = target_track_id
+        target_track.title = "Target Song"
+        target_track.artist_id = target_id
+        target_track.popularity_score = None
+        target_track.artist = target_artist_obj
+
+        adjacent_artist_obj = MagicMock(spec=music_models.Artist)
+        adjacent_artist_obj.id = adjacent_id
+        adjacent_artist_obj.name = "Elder"
+        adjacent_track = MagicMock(spec=music_models.Track)
+        adjacent_track.id = adjacent_track_id
+        adjacent_track.title = "Adjacent Song"
+        adjacent_track.artist_id = adjacent_id
+        adjacent_track.popularity_score = None
+        adjacent_track.artist = adjacent_artist_obj
+
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [target_track, adjacent_track]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        # Target track heard; adjacent track unheard (the whole point of #115).
+        listen_result = MagicMock()
+        listen_result.all.return_value = [(target_track_id, 12)]
+
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = None
+
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        captured: dict[str, set[uuid.UUID]] = {}
+
+        async def _capture_execute(stmt: Any) -> Any:
+            # Capture the artist-id IN set used by the track query so we can
+            # assert pool membership == target union persisted set. UUIDs render
+            # without hyphens in compiled SQL, so match on .hex.
+            compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            if "FROM tracks" in compiled:
+                ids: set[uuid.UUID] = set()
+                for aid in (target_id, adjacent_id):
+                    if aid.hex in compiled:
+                        ids.add(aid)
+                captured["track_query_ids"] = ids
+            return next(_execute_iter)
+
+        _execute_iter = iter(
+            [
+                task_result_mock,
+                _not_cancelled_result(parent_id),
+                profile_result,
+                ea_result,
+                eac_result,
+                parent_for_params_result,
+                track_result,
+                listen_result,
+                utr_result,
+                prev_gen_result,
+                pending_count_mock,
+                parent_result_mock,
+                failed_count_mock,
+                children_result_mock,
+            ]
+        )
+        session.execute.side_effect = _capture_execute
+
+        registry = MagicMock()
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        # No re-resolution at scoring time; the persisted set is authoritative.
+        registry.get_by_capability.assert_not_called()
+
+        # Pool membership is exactly target union persisted adjacent set.
+        assert captured["track_query_ids"] == {target_id, adjacent_id}
+
+        # The adjacent (unheard) track entered the candidate pool as a non-target
+        # discovery candidate, and was selected into the playlist.
+        added_objects = [c.args[0] for c in session.add.call_args_list]
+        playlist_tracks = [
+            o for o in added_objects if isinstance(o, playlist_models.PlaylistTrack)
+        ]
+        selected_track_ids = {pt.track_id for pt in playlist_tracks}
+        assert adjacent_track_id in selected_track_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2875,7 +3498,11 @@ class TestExportPlaylist:
 
 
 class TestResolveSimilarLibraryArtists:
-    """Tests for _resolve_similar_library_artists (issue #103, Mode 1)."""
+    """Tests for _resolve_similar_library_artists (issue #103, Mode 1).
+
+    The resolver now returns an ORDERED list preserving provider similarity
+    rank (issue #115) so callers can take the top-N adjacent artists.
+    """
 
     @pytest.mark.anyio()
     async def test_matches_library_artists_excluding_targets(self) -> None:
@@ -2891,10 +3518,11 @@ class TestResolveSimilarLibraryArtists:
 
         elder_id = uuid.uuid4()
         target_id = uuid.uuid4()
-        # The library query returns a similar artist and a target artist;
-        # the target must be filtered out via exclude_ids.
+        # The library query returns (lowercased name, id) rows for a similar
+        # artist and a target artist; the target must be filtered out via
+        # exclude_ids.
         result = MagicMock()
-        result.all.return_value = [(elder_id,), (target_id,)]
+        result.all.return_value = [("elder", elder_id), ("king buffalo", target_id)]
         session = AsyncMock()
         session.execute.return_value = result
 
@@ -2902,7 +3530,7 @@ class TestResolveSimilarLibraryArtists:
             session, [connector], [target], {target_id}
         )
 
-        assert matched == {elder_id}
+        assert matched == [elder_id]
         connector.get_similar_artists.assert_awaited_once_with(
             "King Buffalo", mbid="mbid-kb", limit=30
         )
@@ -2921,7 +3549,7 @@ class TestResolveSimilarLibraryArtists:
             session, [connector], [target], set()
         )
 
-        assert matched == set()
+        assert matched == []
         session.execute.assert_not_called()
         connector.get_similar_artists.assert_awaited_once_with(
             "Obscure Band", mbid=None, limit=30
@@ -2947,7 +3575,10 @@ class TestResolveSimilarLibraryArtists:
         elder_id = uuid.uuid4()
         pallbearer_id = uuid.uuid4()
         result = MagicMock()
-        result.all.return_value = [(elder_id,), (pallbearer_id,)]
+        result.all.return_value = [
+            ("elder", elder_id),
+            ("pallbearer", pallbearer_id),
+        ]
         session = AsyncMock()
         session.execute.return_value = result
 
@@ -2955,7 +3586,7 @@ class TestResolveSimilarLibraryArtists:
             session, [lastfm, listenbrainz], [target], set()
         )
 
-        assert matched == {elder_id, pallbearer_id}
+        assert set(matched) == {elder_id, pallbearer_id}
         # Both providers are consulted...
         lastfm.get_similar_artists.assert_awaited_once_with(
             "King Buffalo", mbid="mbid-kb", limit=30
@@ -2965,6 +3596,131 @@ class TestResolveSimilarLibraryArtists:
         )
         # ...and their neighbors are unioned into a single library query.
         session.execute.assert_awaited_once()
+
+    @pytest.mark.anyio()
+    async def test_preserves_provider_similarity_rank(self) -> None:
+        """First-seen order across providers/targets is preserved (issue #115)."""
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = None
+
+        connector = AsyncMock()
+        # Providers return neighbors most-similar first. The resolver must
+        # preserve that rank so callers can take the top-N adjacent artists.
+        connector.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": None, "match": 0.9},
+            {"name": "Pallbearer", "mbid": None, "match": 0.7},
+            {"name": "Yob", "mbid": None, "match": 0.5},
+        ]
+
+        elder_id = uuid.uuid4()
+        pallbearer_id = uuid.uuid4()
+        yob_id = uuid.uuid4()
+        # The DB query returns rows in arbitrary order; the resolver reorders
+        # them to match first-seen similarity rank from the providers.
+        result = MagicMock()
+        result.all.return_value = [
+            ("yob", yob_id),
+            ("elder", elder_id),
+            ("pallbearer", pallbearer_id),
+        ]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        matched = await worker_module._resolve_similar_library_artists(
+            session, [connector], [target], set()
+        )
+
+        assert matched == [elder_id, pallbearer_id, yob_id]
+
+    @pytest.mark.anyio()
+    async def test_dedups_preserving_first_seen_order(self) -> None:
+        """A neighbor seen from multiple targets appears once, at first rank."""
+        target_a = MagicMock()
+        target_a.name = "King Buffalo"
+        target_a.service_links = None
+        target_b = MagicMock()
+        target_b.name = "Sleep"
+        target_b.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.side_effect = [
+            # Neighbors of target A
+            [
+                {"name": "Elder", "mbid": None, "match": 0.9},
+                {"name": "Yob", "mbid": None, "match": 0.4},
+            ],
+            # Neighbors of target B; Elder reappears (already seen)
+            [
+                {"name": "Pallbearer", "mbid": None, "match": 0.8},
+                {"name": "Elder", "mbid": None, "match": 0.6},
+            ],
+        ]
+
+        elder_id = uuid.uuid4()
+        yob_id = uuid.uuid4()
+        pallbearer_id = uuid.uuid4()
+        result = MagicMock()
+        result.all.return_value = [
+            ("pallbearer", pallbearer_id),
+            ("yob", yob_id),
+            ("elder", elder_id),
+        ]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        matched = await worker_module._resolve_similar_library_artists(
+            session, [connector], [target_a, target_b], set()
+        )
+
+        # Elder first (first-seen), then Yob, then Pallbearer; no duplicate.
+        assert matched == [elder_id, yob_id, pallbearer_id]
+
+
+class TestMaxAdjacentDiscovery:
+    """The adjacent-discovery cap constant (issue #115)."""
+
+    def test_constant_default(self) -> None:
+        assert worker_module._MAX_ADJACENT_DISCOVERY == 10
+
+
+class TestMergeAdjacentDiscoveryTargets:
+    """Pure merge of capped adjacent ids into the discovery target set (#115)."""
+
+    def test_appends_capped_adjacent_after_targets(self) -> None:
+        t1, t2 = uuid.uuid4(), uuid.uuid4()
+        a1, a2 = uuid.uuid4(), uuid.uuid4()
+        merged = worker_module._merge_adjacent_discovery_targets([t1, t2], [a1, a2])
+        assert merged == [t1, t2, a1, a2]
+
+    def test_caps_adjacent_to_max(self) -> None:
+        targets = [uuid.uuid4()]
+        adjacent = [
+            uuid.uuid4() for _ in range(worker_module._MAX_ADJACENT_DISCOVERY + 5)
+        ]
+        merged = worker_module._merge_adjacent_discovery_targets(targets, adjacent)
+        adj_in_result = [m for m in merged if m in set(adjacent)]
+        assert len(adj_in_result) == worker_module._MAX_ADJACENT_DISCOVERY
+        # The first _MAX_ADJACENT_DISCOVERY by rank are kept.
+        assert adj_in_result == adjacent[: worker_module._MAX_ADJACENT_DISCOVERY]
+
+    def test_dedups_adjacent_against_targets(self) -> None:
+        t1, t2 = uuid.uuid4(), uuid.uuid4()
+        a1 = uuid.uuid4()
+        # t2 reappears in the adjacent list; must not be enqueued twice.
+        merged = worker_module._merge_adjacent_discovery_targets([t1, t2], [t2, a1])
+        assert merged == [t1, t2, a1]
+
+    def test_dedups_adjacent_internally(self) -> None:
+        t1 = uuid.uuid4()
+        a1 = uuid.uuid4()
+        merged = worker_module._merge_adjacent_discovery_targets([t1], [a1, a1])
+        assert merged == [t1, a1]
+
+    def test_empty_adjacent_returns_targets(self) -> None:
+        t1, t2 = uuid.uuid4(), uuid.uuid4()
+        merged = worker_module._merge_adjacent_discovery_targets([t1, t2], [])
+        assert merged == [t1, t2]
 
 
 class TestArtistsNeedingDiscovery:
