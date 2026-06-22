@@ -2195,6 +2195,12 @@ class TestGeneratePlaylist:
         assert len(discovery_tasks) == 2
         assert len(scoring_tasks) == 1
 
+        # Each discovery child carries max_tracks so its catalog fetch scales
+        # with the playlist target. Parent has no max_tracks here, so the
+        # dispatch default (50) is threaded through.
+        for dt in discovery_tasks:
+            assert dt.params["max_tracks"] == 50
+
     @pytest.mark.asyncio
     async def test_enqueues_first_discovery_task(self) -> None:
         """Only the first discovery task is enqueued (sequential dispatch)."""
@@ -2883,10 +2889,79 @@ class TestDiscoverTracksForArtist:
 
         await worker_module.discover_tracks_for_artist(ctx, str(task_id))
 
+        # No max_tracks in params (legacy child) -> falls back to the playlist
+        # default of 50, not the old hardcoded 20.
         mock_connector.discover_tracks.assert_awaited_once_with(
             "Test Artist",
             {"listenbrainz": "mb-id-1"},
-            limit=20,
+            limit=50,
+        )
+
+    @pytest.mark.asyncio
+    async def test_discovery_limit_scales_with_max_tracks(self) -> None:
+        """The per-artist catalog fetch limit comes from the child's max_tracks.
+
+        A single deep artist must be able to fill the whole playlist, so the
+        discovery fetch scales with the requested length rather than a fixed cap.
+        """
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "artist_id": str(artist_id),
+                "artist_name": "Test Artist",
+                "service_links": {"listenbrainz": "mb-id-1"},
+                "max_tracks": 120,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        mock_connector = AsyncMock()
+        mock_connector.discover_tracks = AsyncMock(return_value=[])
+
+        mock_registry = MagicMock()
+        mock_registry.get_by_capability.return_value = [mock_connector]
+
+        pending_count = MagicMock()
+        pending_count.scalar_one.return_value = 1
+        next_pending_task = MagicMock(spec=task_module.Task)
+        next_pending_task.id = uuid.uuid4()
+        next_pending_task.task_type = types_module.TaskType.TRACK_SCORING
+        next_pending_result = MagicMock()
+        next_pending_result.scalar_one_or_none.return_value = next_pending_task
+
+        session.execute.side_effect = [
+            task_result,
+            _not_cancelled_result(parent_id),
+            pending_count,
+            next_pending_result,
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.discover_tracks_for_artist(ctx, str(task_id))
+
+        mock_connector.discover_tracks.assert_awaited_once_with(
+            "Test Artist",
+            {"listenbrainz": "mb-id-1"},
+            limit=120,
         )
 
     @pytest.mark.asyncio

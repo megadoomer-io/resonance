@@ -954,7 +954,11 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             arq_redis = wctx["redis"]
             children: list[task_module.Task] = []
 
-            # Discovery tasks (one per artist needing tracks)
+            # Discovery tasks (one per artist needing tracks). Thread max_tracks
+            # through so each artist's catalog fetch scales with the playlist
+            # target (a single deep artist can fill the whole list; round-robin
+            # in scoring balances across artists).
+            max_tracks = int(str(task.params.get("max_tracks", 50)))
             for aid in discovery_artist_ids:
                 artist_obj = artist_lookup.get(aid)
                 artist_name = artist_obj.name if artist_obj else "Unknown"
@@ -969,6 +973,7 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         "artist_id": str(aid),
                         "artist_name": artist_name,
                         "service_links": service_links,
+                        "max_tracks": max_tracks,
                     },
                     description=f"Discover tracks: {artist_name}",
                 )
@@ -1064,8 +1069,15 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             artist_id_str = str(task.params.get("artist_id", ""))
             artist_name = str(task.params.get("artist_name", ""))
             service_links = task.params.get("service_links")
+            # Per-artist catalog fetch size scales with the playlist target so a
+            # single deep artist can fill the whole list (round-robin balances
+            # across artists). Bounding the fetch by max_tracks keeps the
+            # MusicBrainz request volume proportional to what the playlist can
+            # actually use, never more. Fallback to the playlist default (50) for
+            # older child tasks created before max_tracks was threaded through.
+            discovery_limit = int(str(task.params.get("max_tracks", 50)))
             log = log.bind(artist_name=artist_name, artist_id=artist_id_str)
-            log.info("discover_tracks_started")
+            log.info("discover_tracks_started", discovery_limit=discovery_limit)
 
             # Get a connector with TRACK_DISCOVERY capability
             connectors = connector_registry.get_by_capability(
@@ -1095,7 +1107,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 ] = await connector.discover_tracks(
                     artist_name,
                     service_links_dict,
-                    limit=20,
+                    limit=discovery_limit,
                 )
             except base_module.RateLimitExceededError as exc:
                 task.status = types_module.SyncStatus.DEFERRED
