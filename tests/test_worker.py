@@ -3,7 +3,7 @@
 import datetime
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -2453,9 +2453,11 @@ class TestGeneratePlaylist:
         listen_counts = MagicMock()
         listen_counts.all.return_value = [(target_id, 25)]
 
-        # Resolver's library name->id query returns one adjacent artist.
+        # Resolver's library query returns one adjacent artist as
+        # (id, lowered_name, service_links). The neighbor "Elder" has no MBID,
+        # so it matches the library by name and is treated as library-adjacent.
         resolver_result = MagicMock()
-        resolver_result.all.return_value = [("elder", adjacent_id)]
+        resolver_result.all.return_value = [(adjacent_id, "elder", None)]
 
         # Adjacent artist objects loaded for the discovery children.
         adjacent_obj = MagicMock(spec=music_models.Artist)
@@ -2753,11 +2755,12 @@ class TestGeneratePlaylist:
         listen_counts = MagicMock()
         listen_counts.all.return_value = [(target_id, 25)]
 
-        # Resolver returns rows in rank order (names ordered to match neighbor
-        # rank); the implementation orders by neighbor rank.
+        # Resolver returns library rows as (id, lowered_name, service_links);
+        # the implementation orders them by neighbor (similarity) rank. All
+        # neighbors lack an MBID, so each matches the library by name.
         resolver_result = MagicMock()
         resolver_result.all.return_value = [
-            (f"a{i}", aid) for i, aid in enumerate(adjacent_ids)
+            (aid, f"a{i}", None) for i, aid in enumerate(adjacent_ids)
         ]
 
         # Adjacent artist objects loaded for the capped discovery children.
@@ -3844,3 +3847,277 @@ class TestArtistsNeedingDiscovery:
             [covered, under], {covered: 50, under: 1}, discovery_wanted=True
         )
         assert set(result) == {covered, under}
+
+
+class TestMaxImportedAdjacent:
+    """The per-generation new-import ceiling constant (issue #115 Phase 2)."""
+
+    def test_constant_default(self) -> None:
+        assert worker_module._MAX_IMPORTED_ADJACENT == 10
+
+
+class TestResolveAdjacentArtists:
+    """_resolve_adjacent_artists splits neighbors into library + imports (#115 Ph2)."""
+
+    @pytest.mark.anyio()
+    async def test_splits_library_matches_and_import_candidates(self) -> None:
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = {"musicbrainz": {"id": "mbid-kb"}}
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": "mbid-elder", "match": 0.9},
+            {"name": "Newcomer", "mbid": "mbid-new", "match": 0.5},
+        ]
+
+        elder_id = uuid.uuid4()
+        # Library query returns only Elder (Newcomer is not in the library).
+        result = MagicMock()
+        result.all.return_value = [
+            (elder_id, "elder", {"musicbrainz": {"id": "mbid-elder"}}),
+        ]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [target], set()
+        )
+
+        assert resolution.library_ids == [elder_id]
+        assert resolution.import_candidates == [("Newcomer", "mbid-new")]
+        connector.get_similar_artists.assert_awaited_once_with(
+            "King Buffalo", mbid="mbid-kb", limit=30
+        )
+
+    @pytest.mark.anyio()
+    async def test_mbid_match_dedups_name_variant_to_library(self) -> None:
+        """A neighbor whose MBID matches a library artist under a different name
+        is a library match, not an import (decision d)."""
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "Eldar", "mbid": "mbid-elder", "match": 0.9},
+        ]
+
+        elder_id = uuid.uuid4()
+        # Library has the artist under canonical name "elder" with the same MBID.
+        result = MagicMock()
+        result.all.return_value = [
+            (elder_id, "elder", {"musicbrainz": {"id": "mbid-elder"}}),
+        ]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [target], set()
+        )
+
+        assert resolution.library_ids == [elder_id]
+        assert resolution.import_candidates == []
+
+    @pytest.mark.anyio()
+    async def test_name_only_neighbor_is_not_an_import_candidate(self) -> None:
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "NoMbid", "mbid": None, "match": 0.9},
+        ]
+
+        result = MagicMock()
+        result.all.return_value = []  # not in the library
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [target], set()
+        )
+
+        assert resolution.library_ids == []
+        assert resolution.import_candidates == []
+
+    @pytest.mark.anyio()
+    async def test_excludes_target_ids_from_library_matches(self) -> None:
+        kb = MagicMock()
+        kb.name = "King Buffalo"
+        kb.service_links = None
+        sleep = MagicMock()
+        sleep.name = "Sleep"
+        sleep.service_links = None
+        kb_id, sleep_id = uuid.uuid4(), uuid.uuid4()
+
+        connector = AsyncMock()
+        # King Buffalo's neighbors include the other target (Sleep) and Elder.
+        connector.get_similar_artists.side_effect = [
+            [
+                {"name": "Sleep", "mbid": "mbid-sleep", "match": 0.9},
+                {"name": "Elder", "mbid": "mbid-elder", "match": 0.6},
+            ],
+            [],  # Sleep's neighbors (none for simplicity)
+        ]
+
+        elder_id = uuid.uuid4()
+        result = MagicMock()
+        result.all.return_value = [
+            (sleep_id, "sleep", {"musicbrainz": {"id": "mbid-sleep"}}),
+            (elder_id, "elder", {"musicbrainz": {"id": "mbid-elder"}}),
+        ]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [kb, sleep], {kb_id, sleep_id}
+        )
+
+        # Sleep (a target) is excluded; only Elder remains. Nothing imported.
+        assert resolution.library_ids == [elder_id]
+        assert resolution.import_candidates == []
+
+    @pytest.mark.anyio()
+    async def test_import_candidates_preserve_similarity_rank(self) -> None:
+        target = MagicMock()
+        target.name = "King Buffalo"
+        target.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = [
+            {"name": "First", "mbid": "mbid-1", "match": 0.9},
+            {"name": "Second", "mbid": "mbid-2", "match": 0.7},
+            {"name": "Third", "mbid": "mbid-3", "match": 0.5},
+        ]
+
+        result = MagicMock()
+        result.all.return_value = []  # none in the library
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [target], set()
+        )
+
+        assert resolution.library_ids == []
+        assert resolution.import_candidates == [
+            ("First", "mbid-1"),
+            ("Second", "mbid-2"),
+            ("Third", "mbid-3"),
+        ]
+
+    @pytest.mark.anyio()
+    async def test_no_neighbors_returns_empty_without_query(self) -> None:
+        target = MagicMock()
+        target.name = "Obscure"
+        target.service_links = None
+
+        connector = AsyncMock()
+        connector.get_similar_artists.return_value = []
+        session = AsyncMock()
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [connector], [target], set()
+        )
+
+        assert resolution.library_ids == []
+        assert resolution.import_candidates == []
+        session.execute.assert_not_called()
+
+
+class TestImportAdjacentCandidates:
+    """_import_adjacent_candidates imports recommended artists (#115 Phase 2)."""
+
+    @pytest.mark.anyio()
+    async def test_imports_up_to_limit_in_order(self) -> None:
+        a1, a2, a3 = MagicMock(), MagicMock(), MagicMock()
+        a1.id, a2.id, a3.id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        session = AsyncMock()
+        connector = AsyncMock()
+        log = MagicMock()
+        candidates = [("A", "m1"), ("B", "m2"), ("C", "m3")]
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            new=AsyncMock(side_effect=[a1, a2, a3]),
+        ) as imp:
+            result = await worker_module._import_adjacent_candidates(
+                session, connector, candidates, limit=2, exclude_ids=set(), log=log
+            )
+
+        assert result == [a1.id, a2.id]
+        assert imp.await_count == 2  # limit honored
+
+    @pytest.mark.anyio()
+    async def test_skips_unresolved_none(self) -> None:
+        a1 = MagicMock()
+        a1.id = uuid.uuid4()
+        session = AsyncMock()
+        connector = AsyncMock()
+        log = MagicMock()
+        candidates = [("A", "m1"), ("Ghost", "m2")]
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            new=AsyncMock(side_effect=[a1, None]),
+        ):
+            result = await worker_module._import_adjacent_candidates(
+                session, connector, candidates, limit=10, exclude_ids=set(), log=log
+            )
+
+        assert result == [a1.id]
+
+    @pytest.mark.anyio()
+    async def test_dedups_against_exclude_and_self(self) -> None:
+        shared_id = uuid.uuid4()
+        a_lib = MagicMock()
+        a_lib.id = shared_id  # resolves to an already-selected library artist
+        a_dup1 = MagicMock()
+        a_dup1.id = uuid.uuid4()
+        a_dup2 = MagicMock()
+        a_dup2.id = a_dup1.id  # a second candidate resolves to the same artist
+        session = AsyncMock()
+        connector = AsyncMock()
+        log = MagicMock()
+        candidates = [("Lib", "m1"), ("Dup", "m2"), ("DupAgain", "m3")]
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            new=AsyncMock(side_effect=[a_lib, a_dup1, a_dup2]),
+        ):
+            result = await worker_module._import_adjacent_candidates(
+                session,
+                connector,
+                candidates,
+                limit=10,
+                exclude_ids={shared_id},
+                log=log,
+            )
+
+        assert result == [a_dup1.id]  # library dup excluded; self-dup collapsed
+
+    @pytest.mark.anyio()
+    async def test_failure_is_logged_and_skipped(self) -> None:
+        a2 = MagicMock()
+        a2.id = uuid.uuid4()
+        session = AsyncMock()
+        connector = AsyncMock()
+        log = MagicMock()
+        candidates = [("Boom", "m1"), ("Ok", "m2")]
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            new=AsyncMock(side_effect=[RuntimeError("mb 500"), a2]),
+        ):
+            result = await worker_module._import_adjacent_candidates(
+                session, connector, candidates, limit=10, exclude_ids=set(), log=log
+            )
+
+        assert result == [a2.id]  # one failure does not abort the rest
+        log.warning.assert_called_once()

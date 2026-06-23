@@ -48,6 +48,7 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_module
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
+import resonance.services.artist_import as artist_import_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
 import resonance.sync.backfill as backfill_module
@@ -712,6 +713,14 @@ _DISCOVERY_FAMILIARITY_THRESHOLD = 50
 # rank, and bounds BOTH the discovery fan-out and the scoring candidate pool.
 _MAX_ADJACENT_DISCOVERY = 10
 
+# Independent ceiling on NEW artist imports per generation (issue #115 Phase 2).
+# Importing a recommended artist who is not yet in the library costs one
+# MusicBrainz artist lookup plus a TRACK_DISCOVERY catalog fetch, so a
+# cold-start library must not silently trigger a flood of imports + fetches
+# every run. Bounds imports separately from the combined adjacent cap above;
+# library-adjacent artists (free) are always preferred first.
+_MAX_IMPORTED_ADJACENT = 10
+
 
 def _artists_needing_discovery(
     artist_ids: collections.abc.Iterable[uuid.UUID],
@@ -908,19 +917,44 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             # similarity rank, and persist the capped set onto the parent task so
             # scoring expands the candidate pool to exactly this fetched set.
             adjacent_artist_ids: list[uuid.UUID] = []
+            library_adjacent_count = 0
+            imported_adjacent_count = 0
             similar_ratio = gen_params.get("similar_artist_ratio", 0)
             if similar_ratio > 0 and discovery_wanted:
                 similar_connectors = wctx["connector_registry"].get_by_capability(
                     base_module.ConnectorCapability.SIMILAR_ARTISTS
                 )
                 if similar_connectors:
-                    resolved = await _resolve_similar_library_artists(
+                    resolution = await _resolve_adjacent_artists(
                         session,
                         similar_connectors,
                         list(artists_by_id.values()),
                         set(artist_ids),
                     )
-                    adjacent_artist_ids = resolved[:_MAX_ADJACENT_DISCOVERY]
+                    # Prefer library-adjacent artists (free: no import, no extra
+                    # MusicBrainz lookup); fill any remaining slots with newly
+                    # imported recommended artists by rank (#115 Phase 2).
+                    library_ids = resolution.library_ids[:_MAX_ADJACENT_DISCOVERY]
+                    library_adjacent_count = len(library_ids)
+                    remaining = _MAX_ADJACENT_DISCOVERY - len(library_ids)
+                    imported_ids: list[uuid.UUID] = []
+                    if remaining > 0 and resolution.import_candidates:
+                        lb_connector = wctx["connector_registry"].get_base_connector(
+                            types_module.ServiceType.LISTENBRAINZ
+                        )
+                        if lb_connector is not None:
+                            imported_ids = await _import_adjacent_candidates(
+                                session,
+                                lb_connector,
+                                resolution.import_candidates,
+                                limit=min(remaining, _MAX_IMPORTED_ADJACENT),
+                                exclude_ids=set(library_ids),
+                                log=log,
+                            )
+                    imported_adjacent_count = len(imported_ids)
+                    adjacent_artist_ids = (library_ids + imported_ids)[
+                        :_MAX_ADJACENT_DISCOVERY
+                    ]
 
             # Persist the capped adjacent set (possibly empty) so scoring reads
             # the SAME artists this fan-out fetched, not a fresh re-resolve.
@@ -1013,6 +1047,8 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 discovery_tasks=len(discovery_artist_ids),
                 target_discovery_tasks=len(artists_needing_discovery),
                 adjacent_discovery_tasks=len(adjacent_artist_ids),
+                library_adjacent_count=library_adjacent_count,
+                imported_adjacent_count=imported_adjacent_count,
                 total_children=len(children),
             )
 
@@ -1273,6 +1309,174 @@ async def _resolve_similar_library_artists(
             seen.add(aid)
             ordered_ids.append(aid)
     return ordered_ids
+
+
+@dataclasses.dataclass(frozen=True)
+class _AdjacentResolution:
+    """Resolved adjacent artists for discovery (issue #115 Phase 2).
+
+    ``library_ids`` are similar artists already in the library (free to use).
+    ``import_candidates`` are similar artists NOT in the library, as
+    ``(name, mbid)`` pairs in provider similarity rank, ready to import. Both
+    lists preserve first-seen (similarity) order so the caller can cap by rank.
+    """
+
+    library_ids: list[uuid.UUID]
+    import_candidates: list[tuple[str, str]]
+
+
+async def _resolve_adjacent_artists(
+    session: sa_async.AsyncSession,
+    connectors: collections.abc.Sequence[Any],
+    target_artists: collections.abc.Sequence[music_models.Artist],
+    exclude_ids: set[uuid.UUID],
+    *,
+    per_artist_limit: int = 30,
+) -> _AdjacentResolution:
+    """Resolve similar artists into library matches AND import candidates.
+
+    Phase 2 of issue #115. Where ``_resolve_similar_library_artists`` returns
+    only neighbors already in the library, this also surfaces neighbors NOT in
+    the library as import candidates (name + MBID), so the caller can import
+    them and run the same catalog discovery the library-adjacent artists get.
+
+    Dedup follows design decision (d): a neighbor whose MBID matches a library
+    artist is treated as a library match even under a different name (MBID
+    first), then by normalized name. A neighbor without an MBID cannot be
+    imported cleanly in v1, so it is never an import candidate (it may still
+    match the library by name). Target artists are excluded from both lists.
+
+    Args:
+        session: Async DB session (reads only; the caller does imports/writes).
+        connectors: Connectors exposing ``get_similar_artists``.
+        target_artists: The event's target (lineup) artists.
+        exclude_ids: Artist IDs to exclude (the target set).
+        per_artist_limit: Max neighbors to request per target.
+
+    Returns:
+        An ``_AdjacentResolution`` with library IDs and import candidates, both
+        in provider similarity rank.
+    """
+    # First-seen order of lowercased neighbor names = approximate similarity
+    # rank across providers/targets. Track the original name + best-known MBID
+    # per neighbor (a later provider may supply an MBID an earlier one lacked).
+    ordered: dict[str, dict[str, str | None]] = {}
+    for artist in target_artists:
+        mbid = artist_utils.get_mbid(artist.service_links)
+        for connector in connectors:
+            neighbors = await connector.get_similar_artists(
+                artist.name, mbid=mbid, limit=per_artist_limit
+            )
+            for neighbor in neighbors:
+                name = neighbor.get("name")
+                if not name:
+                    continue
+                key = name.lower()
+                nbr_mbid = neighbor.get("mbid") or None
+                if key not in ordered:
+                    ordered[key] = {"name": name, "mbid": nbr_mbid}
+                elif ordered[key]["mbid"] is None and nbr_mbid:
+                    ordered[key]["mbid"] = nbr_mbid
+
+    if not ordered:
+        return _AdjacentResolution(library_ids=[], import_candidates=[])
+
+    neighbor_mbids = {v["mbid"] for v in ordered.values() if v["mbid"]}
+    # Library artists matching any neighbor by name OR by MBID. Select
+    # service_links too so MBID-dedup can map a neighbor MBID to a library id
+    # even when the stored name differs.
+    conds = [sa.func.lower(music_models.Artist.name).in_(ordered.keys())]
+    if neighbor_mbids:
+        conds.append(
+            music_models.Artist.service_links["musicbrainz"]["id"]
+            .as_string()
+            .in_(neighbor_mbids)
+        )
+        conds.append(
+            music_models.Artist.service_links["listenbrainz"]
+            .as_string()
+            .in_(neighbor_mbids)
+        )
+    result = await session.execute(
+        sa.select(
+            music_models.Artist.id,
+            sa.func.lower(music_models.Artist.name),
+            music_models.Artist.service_links,
+        ).where(sa.or_(*conds))
+    )
+    id_by_name: dict[str, uuid.UUID] = {}
+    id_by_mbid: dict[str, uuid.UUID] = {}
+    for row in result.all():
+        aid, lname, links = row[0], row[1], row[2]
+        id_by_name.setdefault(lname, aid)
+        lib_mbid = artist_utils.get_mbid(links)
+        if lib_mbid:
+            id_by_mbid.setdefault(lib_mbid, aid)
+
+    target_names = {a.name.lower() for a in target_artists}
+    library_ids: list[uuid.UUID] = []
+    import_candidates: list[tuple[str, str]] = []
+    seen_ids: set[uuid.UUID] = set(exclude_ids)
+    for key, meta in ordered.items():
+        nbr_mbid = meta["mbid"]
+        # MBID match first (decision d), then normalized name.
+        aid = (id_by_mbid.get(nbr_mbid) if nbr_mbid else None) or id_by_name.get(key)
+        if aid is not None:
+            if aid not in seen_ids:
+                seen_ids.add(aid)
+                library_ids.append(aid)
+            continue
+        # Not in the library: import only with an MBID and not a target name.
+        if nbr_mbid and key not in target_names:
+            import_candidates.append((str(meta["name"]), nbr_mbid))
+    return _AdjacentResolution(
+        library_ids=library_ids, import_candidates=import_candidates
+    )
+
+
+async def _import_adjacent_candidates(
+    session: sa_async.AsyncSession,
+    connector: Any,
+    candidates: collections.abc.Sequence[tuple[str, str]],
+    *,
+    limit: int,
+    exclude_ids: set[uuid.UUID],
+    log: Any,
+) -> list[uuid.UUID]:
+    """Import up to ``limit`` recommended artists by MBID (issue #115 Phase 2).
+
+    Each ``(name, mbid)`` candidate is resolved and created via the
+    artist-import service. Failures are logged and skipped (best-effort: a
+    flaky MusicBrainz lookup degrades to fewer imports rather than failing the
+    whole playlist generation). Returns the newly-imported artist IDs in
+    candidate order, deduped against ``exclude_ids`` and each other.
+
+    Args:
+        session: Async DB session (the caller owns the transaction/commit).
+        connector: Connector exposing ``get_artist_by_mbid`` (ListenBrainz).
+        candidates: ``(name, mbid)`` import candidates in similarity rank.
+        limit: Max number of candidates to import this generation.
+        exclude_ids: Artist IDs already selected (library-adjacent), so an
+            import that resolves to one of them is not double-counted.
+        log: Bound structlog logger for per-candidate failure reporting.
+
+    Returns:
+        The imported artist IDs, in candidate order.
+    """
+    imported_ids: list[uuid.UUID] = []
+    seen = set(exclude_ids)
+    for name, mbid in candidates[:limit]:
+        try:
+            imported = await artist_import_module.import_artist_by_mbid(
+                session, connector, mbid
+            )
+        except Exception:
+            log.warning("adjacent_import_failed", mbid=mbid, name=name)
+            continue
+        if imported is not None and imported.id not in seen:
+            seen.add(imported.id)
+            imported_ids.append(imported.id)
+    return imported_ids
 
 
 async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
