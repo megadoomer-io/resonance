@@ -26,6 +26,9 @@ class CandidateTrack:
     title: str
     artist_name: str
     artist_id: uuid.UUID
+    # Provenance metadata only: whether this track's artist was an event/seed
+    # ("target") vs a resolved related artist. Selection ignores this -- there is
+    # one ranked pool. Retained for UI provenance display and source summaries.
     is_target_artist: bool
     listen_count: int
     in_library: bool
@@ -73,106 +76,50 @@ def _score_candidate(
     )
 
 
-def _round_half_up(value: float) -> int:
-    """Round to the nearest integer, halves rounding up (not banker's rounding).
-
-    Used for slot-count math so a 3.5 quota becomes 4, predictably.
-    """
-    return int(value + 0.5)
-
-
-def _round_robin_order(
-    pool: list[tuple[CandidateTrack, float]],
-) -> list[tuple[CandidateTrack, float]]:
-    """Re-order a score-desc pool so slots spread fairly across artists.
-
-    Per-artist fairness: instead of taking the strict top-N by score (which lets
-    one prolific artist flood the playlist), the pool is interleaved by rounds.
-    Round 0 yields each artist's best track, round 1 each artist's second-best,
-    and so on. Slicing the result is proportional-to-artist-count by
-    construction -- no artist gets a 2nd track until every artist has had a 1st.
-
-    The input pool must already be sorted by score descending; that order is the
-    within-artist tie-break (preserving the existing ranking, e.g. score then a
-    stable secondary). Artist groups lead with the strongest artists: groups are
-    ordered by their best track's score descending, ties broken by first
-    appearance in the pool for deterministic output.
-    """
-    # Group by artist, preserving the pool's score-desc order within each group.
-    groups: dict[uuid.UUID, list[tuple[CandidateTrack, float]]] = {}
-    first_seen: dict[uuid.UUID, int] = {}
-    for index, pair in enumerate(pool):
-        artist_id = pair[0].artist_id
-        if artist_id not in groups:
-            groups[artist_id] = []
-            first_seen[artist_id] = index
-        groups[artist_id].append(pair)
-
-    # Order artist groups by their best (first, since score-desc) track's score
-    # descending; tie-break by first appearance for stable, deterministic output.
-    ordered_artists = sorted(
-        groups,
-        key=lambda aid: (-groups[aid][0][1], first_seen[aid]),
-    )
-
-    # Fill by rounds: round r takes each artist's track at index r, in artist
-    # order, until every track is consumed.
-    result: list[tuple[CandidateTrack, float]] = []
-    max_depth = max((len(g) for g in groups.values()), default=0)
-    for depth in range(max_depth):
-        for artist_id in ordered_artists:
-            group = groups[artist_id]
-            if depth < len(group):
-                result.append(group[depth])
-    return result
-
-
-def _select_with_quota(
-    target_pool: list[tuple[CandidateTrack, float]],
-    adjacent_pool: list[tuple[CandidateTrack, float]],
-    similar_artist_ratio: int,
+def _select_one_pool(
+    scored: list[tuple[CandidateTrack, float]],
     max_tracks: int,
 ) -> list[tuple[CandidateTrack, float]]:
-    """Fill ``max_tracks`` slots, drawing ~ratio% from the adjacent pool.
+    """Select ``max_tracks`` from a single scored pool with a per-artist floor.
 
-    Both pools must already be sorted by score descending. The adjacent quota is
-    ``round_half_up(max_tracks * ratio / 100)``; the rest go to the target pool.
+    Provenance (event / manual / related) never touches selection -- there is one
+    pool, ranked by ``composite_score``. The input must already be sorted by score
+    descending. Selection is two phases:
 
-    Within each pool, tracks are chosen by a round-robin interleave across
-    artists (see :func:`_round_robin_order`) rather than a strict top-N slice, so
-    a single prolific artist cannot flood the playlist. The quota split is
-    unchanged -- this governs *which* tracks fill each quota, not the quota sizes.
+    Round 0 -- per-artist guarantee: each artist in the pool contributes its single
+    highest-scoring track. Because ``scored`` is score-desc, the first time an
+    artist is seen is its best track, so round 0 is the set of those firsts, itself
+    in score-desc order. This guarantees every pool artist is represented by at
+    least one track and is never silently absent.
 
-    When a pool cannot fill its quota, the shortfall is backfilled from the other
-    pool -- but only if the other pool was allocated at least one slot. The
-    backfilled tracks also come via round-robin from the donor pool. This keeps
-    the extremes literal: at ratio=0 no adjacent track is ever added, and at
-    ratio=100 no target track is ever added (matching the design intent that 0 is
-    target-only and 100 is adjacent-only).
+    Fill: the remaining ``max_tracks - num_artists`` slots are filled by pure score
+    across all not-yet-selected tracks. A prolific, high-scoring artist *can* take
+    several fill slots here -- that is the intended "heard artists get depth"
+    behavior, replacing the old forced round-robin spread.
+
+    Edge case: when the pool has more distinct artists than ``max_tracks``, round 0
+    cannot seat everyone. The highest-scoring artist groups keep their guaranteed
+    slot; the lowest are dropped (graceful best-effort), since round 0 is already
+    in score-desc order.
     """
-    ratio = max(0, min(100, similar_artist_ratio))
-    adj_quota = _round_half_up(max_tracks * ratio / 100)
-    tgt_quota = max_tracks - adj_quota
+    round_zero: list[tuple[CandidateTrack, float]] = []
+    remaining: list[tuple[CandidateTrack, float]] = []
+    seen_artists: set[uuid.UUID] = set()
+    for pair in scored:
+        artist_id = pair[0].artist_id
+        if artist_id not in seen_artists:
+            seen_artists.add(artist_id)
+            round_zero.append(pair)
+        else:
+            remaining.append(pair)
 
-    # Round-robin order each pool once; slicing this order is fair selection, and
-    # the slice past the quota is the donor remainder for backfill (still fair).
-    target_ordered = _round_robin_order(target_pool)
-    adjacent_ordered = _round_robin_order(adjacent_pool)
+    # More artists than slots: keep the highest-scoring guaranteed tracks, drop
+    # the rest. round_zero is score-desc, so a head slice is the graceful choice.
+    if len(round_zero) >= max_tracks:
+        return round_zero[:max_tracks]
 
-    tgt_take = target_ordered[:tgt_quota]
-    adj_take = adjacent_ordered[:adj_quota]
-
-    tgt_short = tgt_quota - len(tgt_take)
-    adj_short = adj_quota - len(adj_take)
-
-    # Backfill a pool's shortfall from the other pool's remainder, but only when
-    # the other pool was allocated slots (so 0/100 stay pure).
-    if tgt_short > 0 and adj_quota > 0:
-        adj_take += adjacent_ordered[adj_quota : adj_quota + tgt_short]
-    if adj_short > 0 and tgt_quota > 0:
-        tgt_take += target_ordered[tgt_quota : tgt_quota + adj_short]
-
-    return (tgt_take + adj_take)[:max_tracks]
+    fill_slots = max_tracks - len(round_zero)
+    return round_zero + remaining[:fill_slots]
 
 
 def _apply_freshness_filter(
@@ -246,16 +193,11 @@ def score_and_select(
         scored, previous_track_ids, freshness_target, max_tracks
     )
 
-    # 4. Partition into target / adjacent pools (each stays score-desc) and
-    #    select per the similar_artist_ratio blend quota.
-    target_pool = [pair for pair in scored if pair[0].is_target_artist]
-    adjacent_pool = [pair for pair in scored if not pair[0].is_target_artist]
-    selected = _select_with_quota(
-        target_pool,
-        adjacent_pool,
-        params.get("similar_artist_ratio", 0),
-        max_tracks,
-    )
+    # 4. Select from one pool: round-0 per-artist guarantee, then fill by score.
+    #    Provenance (target vs adjacent) is metadata only -- it does not affect
+    #    selection. similar_artist_ratio governs *pool composition* upstream (how
+    #    many related artists are resolved into the candidate set), not selection.
+    selected = _select_one_pool(scored, max_tracks)
 
     # 5. Re-sort the merged selection by score for final ordering, then assign
     #    1-indexed positions and build the ScoredTrack list.

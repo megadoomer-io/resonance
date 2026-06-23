@@ -41,9 +41,9 @@ def composite_score(
     """Compute composite score for a candidate track from familiarity and hit_depth.
 
     Returns a value clamped to [0.0, 1.0]. Artist relevance (target vs adjacent)
-    is intentionally NOT part of this score: similar_artist_ratio is applied as a
-    blend quota at selection time (see concert_prep.score_and_select), keeping
-    familiarity (within-pool rank) and similar_artist_ratio (the mix) orthogonal.
+    is intentionally NOT part of this score. There is one ranked pool: provenance
+    is metadata only, and similar_artist_ratio governs pool *composition* (how many
+    related artists are resolved in), not scoring or selection.
     """
     base = 0.5
 

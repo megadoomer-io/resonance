@@ -48,10 +48,14 @@ PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
     "similar_artist_ratio": ParameterDefinition(
         name="similar_artist_ratio",
         display_name="Similar Artists",
-        description="How much to include tracks from adjacent/similar artists",
+        # Composition, not a selection quota: this controls how many related
+        # artists are resolved into the candidate pool. Every pool artist is
+        # then guaranteed at least one track, so a higher value widens the mix
+        # of artists rather than forcing a fixed fraction of the final tracks.
+        description="How many related artists to fold into the pool",
         scale_type=types_module.ParameterScaleType.UNIPOLAR,
         default_value=0,
-        labels=("Target Artists Only", "Heavy Adjacent Artists"),
+        labels=("Seed Artists Only", "Many Related Artists"),
     ),
 }
 
