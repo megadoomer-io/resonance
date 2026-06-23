@@ -16,6 +16,7 @@ import resonance.crypto as crypto_module
 import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.user as user_models
+import resonance.services.artist_import as artist_import_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -320,6 +321,9 @@ async def _find_local_artist_by_mbid(
 ) -> Any | None:
     """Find a local artist by MBID, checking both storage locations.
 
+    Thin wrapper over the shared service helper so the HTTP import path and the
+    worker's adjacent-artist import (issue #115) dedup identically.
+
     Args:
         db: The async database session.
         mbid: The MusicBrainz artist ID.
@@ -327,14 +331,7 @@ async def _find_local_artist_by_mbid(
     Returns:
         The Artist if found, or None.
     """
-    stmt = sa.select(music_models.Artist).where(
-        sa.or_(
-            music_models.Artist.service_links["musicbrainz"]["id"].as_string() == mbid,
-            music_models.Artist.service_links["listenbrainz"].as_string() == mbid,
-        )
-    )
-    result = await db.execute(stmt)
-    return result.scalar_one_or_none()
+    return await artist_import_module.find_local_artist_by_mbid(db, mbid)
 
 
 async def _get_spotify_token(
