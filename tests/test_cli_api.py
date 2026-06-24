@@ -423,3 +423,72 @@ class TestBackfillMbidsCommand:
         monkeypatch.setattr(cli_module, "_api_request", fake_req)
         cli_module._cmd_backfill_mbids()
         assert "entity_types=track" in captured["path"]
+
+
+class TestParsePoolSources:
+    """Tests for the layered --source / --exclude grammar (#128 T8)."""
+
+    def test_no_flags_returns_none(self) -> None:
+        # No --source/--exclude -> caller falls back to legacy --input.
+        assert cli_module._parse_pool_sources(["--input", "event_id=abc"]) is None
+
+    def test_event_source(self) -> None:
+        result = cli_module._parse_pool_sources(["--source", "event:e1"])
+        assert result == {
+            "sources": [{"kind": "event", "event_id": "e1", "enabled": True}],
+            "exclude_artist_ids": [],
+        }
+
+    def test_artist_source(self) -> None:
+        result = cli_module._parse_pool_sources(["--source", "artist:a1"])
+        assert result is not None
+        assert result["sources"] == [
+            {"kind": "artist", "artist_id": "a1", "enabled": True}
+        ]
+
+    def test_related_source_default_seed(self) -> None:
+        result = cli_module._parse_pool_sources(["--source", "related:5"])
+        assert result is not None
+        assert result["sources"] == [
+            {"kind": "related", "amount": 5, "seed": "target", "enabled": True}
+        ]
+
+    def test_related_source_explicit_seed(self) -> None:
+        result = cli_module._parse_pool_sources(["--source", "related:3:target"])
+        assert result is not None
+        assert result["sources"][0] == {
+            "kind": "related",
+            "amount": 3,
+            "seed": "target",
+            "enabled": True,
+        }
+
+    def test_multiple_sources_and_excludes(self) -> None:
+        result = cli_module._parse_pool_sources(
+            [
+                "--source",
+                "event:e1",
+                "--source",
+                "artist:a1",
+                "--exclude",
+                "x1",
+                "--exclude",
+                "x2",
+            ]
+        )
+        assert result is not None
+        assert len(result["sources"]) == 2  # type: ignore[arg-type]
+        assert result["exclude_artist_ids"] == ["x1", "x2"]
+
+    def test_exclude_only_returns_dict(self) -> None:
+        # --exclude alone still opts into the layered shape (empty sources).
+        result = cli_module._parse_pool_sources(["--exclude", "x1"])
+        assert result == {"sources": [], "exclude_artist_ids": ["x1"]}
+
+    def test_unknown_kind_exits(self) -> None:
+        with pytest.raises(SystemExit):
+            cli_module._parse_pool_sources(["--source", "bogus:1"])
+
+    def test_related_non_integer_exits(self) -> None:
+        with pytest.raises(SystemExit):
+            cli_module._parse_pool_sources(["--source", "related:lots"])

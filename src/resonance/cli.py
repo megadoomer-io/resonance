@@ -442,13 +442,20 @@ Subcommands:
   list                              List all profiles
   show <profile-id>                 Show profile with generation history
   create --type <type> --name <n>   Create a profile
-           [--input key=val ...]
+           [--source event:<uuid> ...]    Layered pool sources (#128)
+           [--source artist:<uuid> ...]
+           [--source related:<n>[:seed] ...]
+           [--exclude <artist-uuid> ...]  Drop artists from the pool
            [--param key=val ...]
+           [--input key=val ...]          Legacy (e.g. event_id=<uuid>)
   update <profile-id>               Update a profile
            [--name <n>]
            [--param key=val ...]
-           [--input key=val ...]
+           [--source ... | --exclude ... | --input key=val ...]
   delete <profile-id>               Delete a profile
+
+Sources and --input are mutually exclusive: if any --source/--exclude is given,
+the layered spec is sent; otherwise --input key=value is used (legacy).
 """
 
 
@@ -474,6 +481,74 @@ def _parse_key_value_args(args: list[str], flag: str) -> dict[str, str]:
         else:
             i += 1
     return result
+
+
+def _parse_source_spec(spec: str) -> dict[str, object]:
+    """Parse one ``--source`` spec into a layered pool source dict.
+
+    Grammar:
+      ``event:<uuid>``                -> an event source
+      ``artist:<uuid>``               -> a single artist source
+      ``related:<amount>[:<seed>]``   -> fold in N related artists (seed defaults
+                                         to "target")
+
+    Exits with a usage error on an unknown kind or a non-integer related amount.
+    """
+    kind, _, rest = spec.partition(":")
+    if kind == "event":
+        return {"kind": "event", "event_id": rest, "enabled": True}
+    if kind == "artist":
+        return {"kind": "artist", "artist_id": rest, "enabled": True}
+    if kind == "related":
+        amount_str, _, seed = rest.partition(":")
+        try:
+            amount = int(amount_str)
+        except ValueError:
+            print(f"Invalid related amount: {amount_str!r} (expected an integer)")
+            sys.exit(1)
+        return {
+            "kind": "related",
+            "amount": amount,
+            "seed": seed or "target",
+            "enabled": True,
+        }
+    print(f"Unknown source kind: {kind!r} (expected event, artist, or related)")
+    sys.exit(1)
+
+
+def _parse_pool_sources(args: list[str]) -> dict[str, object] | None:
+    """Parse ``--source`` / ``--exclude`` flags into a layered input_references dict.
+
+    Grammar (both flags repeatable)::
+
+        --source event:<uuid>
+        --source artist:<uuid>
+        --source related:<amount>[:<seed>]
+        --exclude <artist-uuid>
+
+    Returns the ``{"sources": [...], "exclude_artist_ids": [...]}`` dict, or None
+    when neither flag is present so the caller can fall back to the legacy
+    ``--input key=value`` form (e.g. ``--input event_id=<uuid>``). This keeps the
+    CLI at parity with the API, which accepts both shapes (#128).
+    """
+    sources: list[dict[str, object]] = []
+    excludes: list[str] = []
+    saw_flag = False
+    i = 0
+    while i < len(args):
+        if args[i] == "--source" and i + 1 < len(args):
+            saw_flag = True
+            sources.append(_parse_source_spec(args[i + 1]))
+            i += 2
+        elif args[i] == "--exclude" and i + 1 < len(args):
+            saw_flag = True
+            excludes.append(args[i + 1])
+            i += 2
+        else:
+            i += 1
+    if not saw_flag:
+        return None
+    return {"sources": sources, "exclude_artist_ids": excludes}
 
 
 def _cmd_profile() -> None:
@@ -552,12 +627,19 @@ def _cmd_profile() -> None:
         if not name or not gen_type:
             print("Usage: resonance-api profile create --type <type> --name <name>")
             sys.exit(1)
-        inputs = _parse_key_value_args(remaining, "--input")
+        # Prefer the layered --source/--exclude grammar; fall back to the legacy
+        # --input key=value form (e.g. --input event_id=<uuid>) (#128).
+        layered = _parse_pool_sources(remaining)
+        input_refs: dict[str, object] = (
+            layered
+            if layered is not None
+            else dict(_parse_key_value_args(remaining, "--input"))
+        )
         params = _parse_key_value_args(remaining, "--param")
         body: dict[str, object] = {
             "name": name,
             "generator_type": gen_type,
-            "input_references": inputs,
+            "input_references": input_refs,
         }
         if params:
             body["parameter_values"] = {k: int(v) for k, v in params.items()}
@@ -584,11 +666,18 @@ def _cmd_profile() -> None:
         params = _parse_key_value_args(remaining, "--param")
         if params:
             body_update["parameter_values"] = {k: int(v) for k, v in params.items()}
-        inputs = _parse_key_value_args(remaining, "--input")
-        if inputs:
-            body_update["input_references"] = inputs
+        layered = _parse_pool_sources(remaining)
+        if layered is not None:
+            body_update["input_references"] = layered
+        else:
+            legacy_inputs = _parse_key_value_args(remaining, "--input")
+            if legacy_inputs:
+                body_update["input_references"] = dict(legacy_inputs)
         if not body_update:
-            print("Nothing to update. Use --name, --param, or --input.")
+            print(
+                "Nothing to update. Use --name, --param, --source, --exclude, "
+                "or --input."
+            )
             sys.exit(1)
         resp = _api_request(
             "PATCH",
