@@ -97,6 +97,13 @@ class GenerationRecord(base_module.TimestampMixin, base_module.Base):
     track_sources_summary: orm.Mapped[dict[str, int] | None] = orm.mapped_column(
         sa.JSON, nullable=True
     )
+    # Resolved pool snapshot (#128): the artist ids + provenance that fed this
+    # generation, captured for reproducibility/audit since sources re-resolve
+    # live. Shape: [{"artist_id": "<uuid>", "via": "event|artist|related"}].
+    # Nullable: records written before the snapshot column have none.
+    pool_snapshot: orm.Mapped[list[dict[str, str]] | None] = orm.mapped_column(
+        sa.JSON, nullable=True
+    )
 
     profile: orm.Mapped[GeneratorProfile] = orm.relationship(
         back_populates="generations"

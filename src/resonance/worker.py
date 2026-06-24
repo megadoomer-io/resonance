@@ -1807,6 +1807,24 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             generation_duration_ms = int(
                 (time_module.monotonic() - generation_start) * 1000
             )
+            # Snapshot the resolved pool for reproducibility/audit (#128): sources
+            # re-resolve live, so record the exact artists that fed this run. The
+            # source pool keeps its provenance (event/artist); adjacent artists
+            # folded in by similar_artist_ratio are tagged related.
+            pool_snapshot: list[dict[str, str]] = [
+                {"artist_id": str(resolved.artist_id), "via": resolved.via.value}
+                for resolved in pool
+            ]
+            pool_snapshot.extend(
+                {
+                    "artist_id": str(adjacent_id),
+                    "via": pool_module.PoolProvenance.RELATED.value,
+                }
+                for adjacent_id in sorted(
+                    query_artist_ids - {resolved.artist_id for resolved in pool},
+                    key=str,
+                )
+            )
             gen_record = generator_models.GenerationRecord(
                 id=uuid.uuid4(),
                 profile_id=uuid.UUID(profile_id),
@@ -1816,6 +1834,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 freshness_actual=selection.freshness_actual,
                 track_sources_summary=selection.sources_summary,
                 generation_duration_ms=generation_duration_ms,
+                pool_snapshot=pool_snapshot,
             )
             session.add(gen_record)
 
