@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import fastapi
 import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import sqlalchemy.orm.exc as orm_exc
 import structlog
 
 import resonance.dependencies as deps_module
@@ -23,6 +24,25 @@ logger = structlog.get_logger()
 router = fastapi.APIRouter(
     prefix="/generator-profiles", tags=["generators"], redirect_slashes=False
 )
+
+# Task statuses that count as "in flight" for the mutual-exclusion guard.
+_ACTIVE_TASK_STATUSES = (
+    types_module.SyncStatus.PENDING,
+    types_module.SyncStatus.RUNNING,
+    types_module.SyncStatus.DEFERRED,
+)
+
+# Both task types mutate the profile's pool (generation re-resolves it; enrichment
+# rewrites input_references). They are mutually exclusive per profile so a
+# generation never runs against a pool that an enrich task is mid-rewrite on.
+_PROFILE_MUTATING_TASK_TYPES = (
+    types_module.TaskType.PLAYLIST_GENERATION,
+    types_module.TaskType.RELATED_ARTIST_ENRICHMENT,
+)
+
+# Cap enrichment fan-out / batch size at the API boundary.
+_MAX_ENRICH_N = 50
+_MAX_ENRICH_SEEDS = 50
 
 
 class CreateProfileRequest(pydantic.BaseModel):
@@ -43,11 +63,18 @@ class CreateProfileRequest(pydantic.BaseModel):
 
 
 class UpdateProfileRequest(pydantic.BaseModel):
-    """Request body for updating a generator profile."""
+    """Request body for updating a generator profile.
+
+    ``expected_version`` is the optimistic-concurrency token the client last saw
+    (#133). When provided and stale, the update is rejected with 409 before any
+    write, so a builder edit never clobbers a concurrent enrich worker's pool
+    rewrite. Omit it for unconditional updates (e.g. the CLI).
+    """
 
     name: str | None = None
     parameter_values: dict[str, int] | None = None
     input_references: dict[str, Any] | None = None
+    expected_version: int | None = None
 
 
 class GenerateRequest(pydantic.BaseModel):
@@ -55,6 +82,100 @@ class GenerateRequest(pydantic.BaseModel):
 
     freshness_target: int | None = None
     max_tracks: int = 30
+
+
+class EnrichRequest(pydantic.BaseModel):
+    """Request body for triggering related-artist pool enrichment (#133).
+
+    ``seed_artist_ids`` selects the scope: a non-empty list of artist IDs enriches
+    per-seed (each discovered artist is tagged ``via_seed=<seed_id>`` and replaces
+    that seed's prior discoveries), or the literal ``"lineup"`` enriches from the
+    whole lineup (tagged ``via_seed="lineup"``, bounded by an early-stop at ``n``).
+
+    ``n`` is the target count: up to ``n`` new artists per seed in per-seed mode,
+    or up to ``n`` total in lineup mode.
+    """
+
+    seed_artist_ids: list[uuid.UUID] | Literal["lineup"]
+    n: int = pydantic.Field(default=10, gt=0, le=_MAX_ENRICH_N)
+
+    @pydantic.field_validator("seed_artist_ids")
+    @classmethod
+    def _seeds_non_empty_and_bounded(
+        cls, value: list[uuid.UUID] | str
+    ) -> list[uuid.UUID] | str:
+        if isinstance(value, list):
+            if not value:
+                msg = "seed_artist_ids must be a non-empty list or 'lineup'"
+                raise ValueError(msg)
+            if len(value) > _MAX_ENRICH_SEEDS:
+                msg = f"seed_artist_ids accepts at most {_MAX_ENRICH_SEEDS} seeds"
+                raise ValueError(msg)
+        return value
+
+
+async def _trigger_profile_task(
+    *,
+    db: sa_async.AsyncSession,
+    arq_redis: Any,
+    profile_id: uuid.UUID,
+    user_id: uuid.UUID,
+    task_type: types_module.TaskType,
+    params: dict[str, Any],
+    job_name: str,
+) -> str:
+    """Create a pool-mutating profile task, enqueue its job, return the task id.
+
+    Shared by generation and enrichment. Both mutate the profile's pool, so this
+    enforces mutual exclusion: a 409 is raised if EITHER a generation or an
+    enrichment task is already in flight for this profile. The caller is
+    responsible for the 404 profile-existence check.
+
+    Args:
+        db: Async DB session.
+        arq_redis: The arq Redis pool for job enqueue.
+        profile_id: The profile the task acts on (stored in params["profile_id"]).
+        user_id: The owning user.
+        task_type: PLAYLIST_GENERATION or RELATED_ARTIST_ENRICHMENT.
+        params: Task params (must include "profile_id").
+        job_name: The arq job to enqueue (also the _job_id prefix).
+
+    Returns:
+        The created task's id as a string.
+
+    Raises:
+        HTTPException: 409 if a generation or enrichment is already running.
+    """
+    running_stmt = sa.select(task_models.Task).where(
+        task_models.Task.user_id == user_id,
+        task_models.Task.task_type.in_(_PROFILE_MUTATING_TASK_TYPES),
+        task_models.Task.params["profile_id"].as_string() == str(profile_id),
+        task_models.Task.status.in_(_ACTIVE_TASK_STATUSES),
+    )
+    running_result = await db.execute(running_stmt)
+    if running_result.scalar_one_or_none() is not None:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail=(
+                "A generation or enrichment task is already running for this profile"
+            ),
+        )
+
+    task = task_models.Task(
+        user_id=user_id,
+        task_type=task_type,
+        status=types_module.SyncStatus.PENDING,
+        params=params,
+    )
+    db.add(task)
+    await db.commit()
+
+    await arq_redis.enqueue_job(
+        job_name,
+        str(task.id),
+        _job_id=f"{job_name}:{task.id}",
+    )
+    return str(task.id)
 
 
 def validate_profile_inputs(
@@ -150,6 +271,8 @@ async def create_profile(
         "profile_id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "profile_status": profile.status.value,
+        "version": profile.version,
     }
 
 
@@ -171,9 +294,16 @@ async def list_profiles(
     Returns:
         A list of profile summary dicts.
     """
+    # Only active profiles are listed; drafts (builder work-in-progress) are
+    # reached directly by id via the editor until first generate flips them
+    # active (#133).
     stmt = (
         sa.select(generator_models.GeneratorProfile)
-        .where(generator_models.GeneratorProfile.user_id == user_id)
+        .where(
+            generator_models.GeneratorProfile.user_id == user_id,
+            generator_models.GeneratorProfile.status
+            == types_module.ProfileStatus.ACTIVE,
+        )
         .order_by(generator_models.GeneratorProfile.created_at.desc())
     )
     result = await db.execute(stmt)
@@ -184,6 +314,8 @@ async def list_profiles(
             "id": str(profile.id),
             "name": profile.name,
             "generator_type": profile.generator_type.value,
+            "status": profile.status.value,
+            "version": profile.version,
             "input_references": profile.input_references,
             "parameter_values": profile.parameter_values,
             "created_at": profile.created_at.isoformat(),
@@ -240,6 +372,8 @@ async def get_profile(
         "id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "status": profile.status.value,
+        "version": profile.version,
         "input_references": profile.input_references,
         "parameter_values": profile.parameter_values,
         "auto_sync_targets": profile.auto_sync_targets,
@@ -297,6 +431,14 @@ async def update_profile(
     if profile is None:
         raise fastapi.HTTPException(status_code=404, detail="Profile not found")
 
+    # Optimistic-concurrency precheck: reject a stale edit before writing, so the
+    # builder never overwrites a concurrent enrich worker's pool rewrite (#133).
+    if body.expected_version is not None and body.expected_version != profile.version:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Profile was modified concurrently; reload and retry",
+        )
+
     if body.name is not None:
         profile.name = body.name
     if body.parameter_values is not None:
@@ -308,7 +450,17 @@ async def update_profile(
             raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
         profile.input_references = dict(body.input_references)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except orm_exc.StaleDataError as exc:
+        # The profile was modified concurrently (e.g. an enrich worker rewrote
+        # input_references) after this request loaded it. The client should
+        # reload and reapply — surfaced in the builder as a version-conflict banner.
+        await db.rollback()
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Profile was modified concurrently; reload and retry",
+        ) from exc
 
     logger.info(
         "generator_profile_updated",
@@ -321,6 +473,8 @@ async def update_profile(
         "id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "profile_status": profile.status.value,
+        "version": profile.version,
         "input_references": profile.input_references,
         "parameter_values": profile.parameter_values,
     }
@@ -414,54 +568,108 @@ async def trigger_generation(
     if profile is None:
         raise fastapi.HTTPException(status_code=404, detail="Profile not found")
 
+    # First generate flips a draft profile active so it appears in the list (#133).
+    if profile.status == types_module.ProfileStatus.DRAFT:
+        profile.status = types_module.ProfileStatus.ACTIVE
+
     gen_params = body or GenerateRequest()
 
-    running_stmt = sa.select(task_models.Task).where(
-        task_models.Task.user_id == user_id,
-        task_models.Task.task_type == types_module.TaskType.PLAYLIST_GENERATION,
-        task_models.Task.params["profile_id"].as_string() == str(profile_id),
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-                types_module.SyncStatus.DEFERRED,
-            ]
-        ),
-    )
-    running_result = await db.execute(running_stmt)
-    existing_job = running_result.scalar_one_or_none()
-
-    if existing_job is not None:
-        raise fastapi.HTTPException(
-            status_code=409,
-            detail="A generation is already running for this profile",
-        )
-
-    task = task_models.Task(
+    task_id = await _trigger_profile_task(
+        db=db,
+        arq_redis=request.app.state.arq_redis,
+        profile_id=profile_id,
         user_id=user_id,
         task_type=types_module.TaskType.PLAYLIST_GENERATION,
-        status=types_module.SyncStatus.PENDING,
         params={
             "profile_id": str(profile_id),
             "freshness_target": gen_params.freshness_target,
             "max_tracks": gen_params.max_tracks,
         },
-    )
-    db.add(task)
-    await db.commit()
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "generate_playlist",
-        str(task.id),
-        _job_id=f"generate_playlist:{task.id}",
+        job_name="generate_playlist",
     )
 
     logger.info(
         "playlist_generation_triggered",
         profile_id=str(profile_id),
-        task_id=str(task.id),
+        task_id=task_id,
         user_id=str(user_id),
     )
 
-    return {"status": "started", "task_id": str(task.id)}
+    return {"status": "started", "task_id": task_id}
+
+
+@router.post(
+    "/{profile_id}/enrich",
+    summary="Trigger related-artist pool enrichment",
+    description=(
+        "Resolve related artists for a seed (or the whole lineup) and persist them"
+        " into the profile's pool as concrete artist sources. Creates a task and"
+        " enqueues an arq job."
+    ),
+)
+async def enrich_profile(
+    profile_id: uuid.UUID,
+    body: EnrichRequest,
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Trigger related-artist enrichment for a profile (#133).
+
+    Creates a Task with RELATED_ARTIST_ENRICHMENT type and enqueues the
+    enrich_related_artists arq job. Mutually exclusive with generation (a 409 is
+    raised if either is already running for this profile).
+
+    Args:
+        profile_id: The profile UUID to enrich.
+        body: The enrichment request (scope + count).
+        request: The FastAPI request object.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+
+    Returns:
+        A dict with status and task_id.
+
+    Raises:
+        HTTPException: 404 if profile not found; 409 if a task is already running.
+    """
+    stmt = sa.select(generator_models.GeneratorProfile).where(
+        generator_models.GeneratorProfile.id == profile_id,
+        generator_models.GeneratorProfile.user_id == user_id,
+    )
+    result = await db.execute(stmt)
+    profile = result.scalar_one_or_none()
+
+    if profile is None:
+        raise fastapi.HTTPException(status_code=404, detail="Profile not found")
+
+    # Normalize the scope for JSON storage: "lineup" or a list of id strings.
+    scope: str | list[str]
+    if isinstance(body.seed_artist_ids, list):
+        scope = [str(aid) for aid in body.seed_artist_ids]
+    else:
+        scope = body.seed_artist_ids
+
+    task_id = await _trigger_profile_task(
+        db=db,
+        arq_redis=request.app.state.arq_redis,
+        profile_id=profile_id,
+        user_id=user_id,
+        task_type=types_module.TaskType.RELATED_ARTIST_ENRICHMENT,
+        params={
+            "profile_id": str(profile_id),
+            "seed_artist_ids": scope,
+            "n": body.n,
+        },
+        job_name="enrich_related_artists",
+    )
+
+    logger.info(
+        "related_artist_enrichment_triggered",
+        profile_id=str(profile_id),
+        task_id=task_id,
+        user_id=str(user_id),
+        scope="lineup" if scope == "lineup" else "seeds",
+    )
+
+    return {"status": "started", "task_id": task_id}

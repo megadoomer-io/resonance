@@ -11,10 +11,10 @@ class TestParameterDefinition:
         assert param.default_value == 50
         assert param.labels == ("Deep Cuts", "Big Hits")
 
-    def test_unipolar_parameter(self) -> None:
-        param = params_module.PARAMETER_REGISTRY["similar_artist_ratio"]
-        assert param.scale_type == types_module.ParameterScaleType.UNIPOLAR
-        assert param.default_value == 0
+    def test_similar_artist_ratio_removed(self) -> None:
+        # Removed in #133: related artists are added explicitly via enrichment,
+        # not folded in at generation time by a slider.
+        assert "similar_artist_ratio" not in params_module.PARAMETER_REGISTRY
 
     def test_familiarity_parameter(self) -> None:
         param = params_module.PARAMETER_REGISTRY["familiarity"]
@@ -48,9 +48,15 @@ class TestApplyDefaults:
         result = params_module.apply_defaults({"hit_depth": 75})
         assert result["hit_depth"] == 75
         assert result["familiarity"] == 50
-        assert result["similar_artist_ratio"] == 0
 
     def test_preserves_all_provided(self) -> None:
-        provided = {"hit_depth": 25, "familiarity": 80, "similar_artist_ratio": 30}
+        provided = {"hit_depth": 25, "familiarity": 80}
         result = params_module.apply_defaults(provided)
         assert result == provided
+
+    def test_rejects_removed_similar_artist_ratio(self) -> None:
+        # The dead parameter must be rejected, not silently accepted (#133).
+        import pytest
+
+        with pytest.raises(ValueError, match="Unknown parameter"):
+            params_module.apply_defaults({"similar_artist_ratio": 30})

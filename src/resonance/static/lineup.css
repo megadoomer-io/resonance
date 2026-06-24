@@ -136,3 +136,108 @@
   font-variant-numeric: tabular-nums;
   flex: none;
 }
+
+/* ===== Server-backed editor + enrichment (#133) ===== */
+
+.backlink { color: var(--primary); text-decoration: none; font-size: 0.85rem; }
+.editor-top {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-md); margin-bottom: var(--space-md);
+}
+
+/* Autosave indicator */
+.autosave {
+  font-size: 0.8rem; color: var(--text-muted);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.autosave .dot {
+  width: 7px; height: 7px; border-radius: var(--radius-full); background: var(--success);
+}
+.autosave.saving .dot { background: var(--warning); }
+
+/* Version-conflict banner */
+.lineup-conflict {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-md);
+  border: 1px solid var(--warning); border-left-width: 3px;
+  background: var(--surface-alt); border-radius: var(--radius-md);
+  padding: var(--space-xs) var(--space-md); margin-bottom: var(--space-md); font-size: 0.85rem;
+}
+.lineup-conflict button {
+  font-size: 0.8rem; padding: 4px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--warning); background: var(--surface); color: var(--warning); cursor: pointer;
+}
+
+/* Global "add N related" control in the add row */
+.add-related { display: flex; align-items: center; gap: var(--space-xs); flex: 1 1 16rem; min-width: 14rem; }
+.add-related .lbl { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
+.add-related input[type="number"] { width: 4rem; margin: 0; }
+.add-related button { white-space: nowrap; }
+
+button.ghost {
+  background: var(--surface); color: var(--primary); border: 1px solid var(--primary);
+  border-radius: var(--radius-md); padding: 8px 12px; font-size: 0.85rem; cursor: pointer;
+}
+
+/* Per-row "+ similar": subdued, full-strength on hover (desktop) but always
+ * tappable on touch (no overflow menu). */
+.artist-row .afind {
+  border: none; background: none; color: var(--primary); cursor: pointer;
+  font-size: 0.78rem; font-weight: 500; padding: 4px 8px; white-space: nowrap; opacity: 0.55;
+}
+.artist-row:hover .afind, .artist-row .afind:focus { opacity: 1; }
+.artist-row .afind:hover { text-decoration: underline; }
+@media (hover: none) { .artist-row .afind { opacity: 0.9; } }
+
+/* Group-level action (related group "↻ replace") */
+.lineup-group-head .ghead-actions { display: flex; align-items: center; gap: var(--space-xs); }
+.lineup-group-head .gaction {
+  border: none; background: none; color: var(--primary); cursor: pointer;
+  font-size: 0.78rem; font-weight: 500; padding: 2px 6px; white-space: nowrap;
+}
+.lineup-group-head .gaction:hover { text-decoration: underline; }
+
+/* Neutral "related" provenance pill in artist rows (reuses the muted picker pill
+ * vocabulary; NOT accent — blue is reserved for actions). */
+.artist-row .ptag {
+  font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: var(--radius-full); padding: 1px 8px; white-space: nowrap;
+}
+
+/* Related groups: collapsible <details>, subtle accent left-rule so they read
+ * as derived from the core lineup. */
+details.lineup-group.related { border-left: 3px solid var(--primary); }
+details.lineup-group > summary {
+  cursor: pointer; list-style: none;
+}
+details.lineup-group > summary::-webkit-details-marker { display: none; }
+details.lineup-group > summary::before {
+  content: "▸"; color: var(--text-muted); font-size: 0.75rem; margin-right: 6px;
+}
+details.lineup-group[open] > summary::before { content: "▾"; }
+
+/* Enrich in-progress status (spinner + found M of N) */
+.enrich-status {
+  display: flex; align-items: center; gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md); color: var(--text-muted); font-size: 0.85rem;
+}
+.enrich-status .count { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 500; }
+.spinner {
+  width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--primary);
+  border-radius: var(--radius-full); animation: spin 0.7s linear infinite; flex: none; display: inline-block;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Quiet inline enrich notes (0 found / no connector) */
+.enrich-note {
+  padding: var(--space-sm) var(--space-md); font-size: 0.83rem; color: var(--text-muted);
+  display: flex; align-items: center; gap: var(--space-xs); margin-bottom: var(--space-sm);
+}
+.enrich-note a { color: var(--primary); }
+
+button.primary {
+  background: var(--primary); color: #fff; border: none; border-radius: var(--radius-md);
+  padding: 10px 18px; font-family: var(--body-font); font-weight: 500; font-size: 0.95rem; cursor: pointer;
+}
+button.primary:disabled { opacity: 0.6; cursor: default; }

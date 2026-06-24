@@ -8,10 +8,14 @@ applied last to the union (issue #128). The stored shape is::
       "sources": [
         {"kind": "event",   "event_id": "<uuid>", "enabled": true},
         {"kind": "artist",  "artist_id": "<uuid>", "enabled": true},
-        {"kind": "related", "seed": "target", "amount": 5, "enabled": true}
+        {"kind": "artist",  "artist_id": "<uuid>", "enabled": true,
+         "via_seed": "lineup"}
       ],
       "exclude_artist_ids": ["<uuid>"]
     }
+
+Related artists are no longer a live source kind: enrichment (#133) resolves them
+up front and persists them as concrete ``artist`` sources tagged with ``via_seed``.
 
 This module is **pure** -- no database, no connectors. It does two jobs:
 
@@ -21,9 +25,8 @@ This module is **pure** -- no database, no connectors. It does two jobs:
 2. Assemble a deduplicated, exclude-filtered pool from already-resolved
    ``(artist_id, provenance)`` pairs (:func:`build_pool`).
 
-The DB/connector resolution step (event -> artists, related -> similar artists)
-lives in the worker's ``resolve_pool`` helper, which calls into this module for the
-pure parts.
+The DB/connector resolution step (event -> artists) lives in the worker's
+``resolve_pool`` helper, which calls into this module for the pure parts.
 """
 
 from __future__ import annotations
@@ -39,16 +42,11 @@ class PoolSourceKind(enum.StrEnum):
 
     EVENT = "event"
     ARTIST = "artist"
-    RELATED = "related"
 
 
 # Provenance shares the source vocabulary: an artist enters the pool *via* the kind
-# of source that produced it (event lineup, manual artist add, or related expansion).
+# of source that produced it (event lineup or manual/discovered artist add).
 PoolProvenance = PoolSourceKind
-
-# The only ``seed`` selector today: expand related artists from the non-related
-# ("target") artists already resolved from event + artist sources.
-SEED_TARGET = "target"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,27 +59,23 @@ class EventSource:
 
 @dataclasses.dataclass(frozen=True)
 class ArtistSource:
-    """Add a single artist directly to the pool."""
+    """Add a single artist directly to the pool.
+
+    ``via_seed`` records enrichment provenance (#133): ``None`` for a manual or
+    event-origin artist the user added, ``"<artist_id>"`` for one discovered by
+    "find similar" from that seed artist, and ``"lineup"`` for one discovered by
+    the global "add N related from the whole lineup" sweep. It drives
+    replace-by-scope (re-running a scope's enrich drops only that scope's prior
+    discovered sources) and lets the builder group discovered artists under the
+    seed that produced them.
+    """
 
     artist_id: uuid.UUID
     enabled: bool = True
+    via_seed: str | None = None
 
 
-@dataclasses.dataclass(frozen=True)
-class RelatedSource:
-    """Fold in artists similar to the already-resolved seed artists.
-
-    ``amount`` caps how many related artists are folded in. ``seed`` selects which
-    already-resolved artists to expand from; only ``"target"`` (the non-related
-    artists) is supported today.
-    """
-
-    amount: int
-    seed: str = SEED_TARGET
-    enabled: bool = True
-
-
-PoolSource = EventSource | ArtistSource | RelatedSource
+PoolSource = EventSource | ArtistSource
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,6 +104,20 @@ def _parse_enabled(raw: Mapping[str, object]) -> bool:
     return value
 
 
+def _parse_via_seed(value: object) -> str | None:
+    """Parse the optional ``via_seed`` provenance tag on an artist source.
+
+    Absent or null means a user-added (manual/event-origin) artist. A present
+    value must be a non-empty string (a seed ``<artist_id>`` or ``"lineup"``).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        msg = f"Artist source 'via_seed' must be a non-empty string, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
 def _parse_source(raw: object) -> PoolSource:
     """Parse one source entry into a typed source.
 
@@ -133,23 +141,12 @@ def _parse_source(raw: object) -> PoolSource:
         return EventSource(
             event_id=_parse_uuid(raw.get("event_id"), "event_id"), enabled=enabled
         )
-    if kind is PoolSourceKind.ARTIST:
-        return ArtistSource(
-            artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"), enabled=enabled
-        )
-    # RELATED
-    amount_raw = raw.get("amount")
-    if not isinstance(amount_raw, int) or isinstance(amount_raw, bool):
-        msg = f"Related source 'amount' must be an integer, got {amount_raw!r}"
-        raise ValueError(msg)
-    if amount_raw < 0:
-        msg = f"Related source 'amount' must be non-negative, got {amount_raw}"
-        raise ValueError(msg)
-    seed = str(raw.get("seed", SEED_TARGET))
-    if seed != SEED_TARGET:
-        msg = f"Unsupported related 'seed': {seed!r} (only {SEED_TARGET!r})"
-        raise ValueError(msg)
-    return RelatedSource(amount=amount_raw, seed=seed, enabled=enabled)
+    # ARTIST (the only remaining kind; unknown kinds raised above).
+    return ArtistSource(
+        artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"),
+        enabled=enabled,
+        via_seed=_parse_via_seed(raw.get("via_seed")),
+    )
 
 
 def normalize_sources(raw: Mapping[str, object]) -> list[PoolSource]:
@@ -231,18 +228,17 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
             "event_id": str(source.event_id),
             "enabled": source.enabled,
         }
-    if isinstance(source, ArtistSource):
-        return {
-            "kind": PoolSourceKind.ARTIST.value,
-            "artist_id": str(source.artist_id),
-            "enabled": source.enabled,
-        }
-    return {
-        "kind": PoolSourceKind.RELATED.value,
-        "seed": source.seed,
-        "amount": source.amount,
+    # ARTIST (the only remaining kind).
+    payload: dict[str, object] = {
+        "kind": PoolSourceKind.ARTIST.value,
+        "artist_id": str(source.artist_id),
         "enabled": source.enabled,
     }
+    # Omit via_seed when None so user-added artists keep the lean shape and
+    # round-trip cleanly (None -> absent -> None).
+    if source.via_seed is not None:
+        payload["via_seed"] = source.via_seed
+    return payload
 
 
 def serialize_input_references(
@@ -254,3 +250,47 @@ def serialize_input_references(
         "sources": [serialize_source(s) for s in sources],
         "exclude_artist_ids": [str(aid) for aid in exclude_ids],
     }
+
+
+def scope_artist_ids(
+    input_references: Mapping[str, object], scope: str
+) -> list[uuid.UUID]:
+    """Return the artist ids of every ``ArtistSource`` tagged ``via_seed == scope``.
+
+    Used by the enrich worker to know which previously-discovered artists belong
+    to a scope (so they can be re-discovered on replace rather than excluded).
+    """
+    return [
+        s.artist_id
+        for s in normalize_sources(input_references)
+        if isinstance(s, ArtistSource) and s.via_seed == scope
+    ]
+
+
+def replace_via_seed_sources(
+    input_references: Mapping[str, object],
+    scope: str,
+    artist_ids: Sequence[uuid.UUID],
+) -> dict[str, object]:
+    """Replace a scope's discovered artist sources with a fresh batch (#133).
+
+    Drops every ``ArtistSource`` whose ``via_seed == scope``, then appends one
+    enabled ``ArtistSource(via_seed=scope)`` per id in ``artist_ids`` (in order).
+    All other sources (events, manual artists, other scopes) and the global
+    ``exclude_artist_ids`` set are preserved. Pure: returns a new stored
+    ``input_references`` dict, leaving the input untouched.
+
+    This is how per-seed and global enrichment are "batch + replace": re-running a
+    scope removes only that scope's prior discoveries before adding the new ones,
+    so curation in other scopes and the core pool is never disturbed.
+    """
+    kept: list[PoolSource] = [
+        s
+        for s in normalize_sources(input_references)
+        if not (isinstance(s, ArtistSource) and s.via_seed == scope)
+    ]
+    kept.extend(
+        ArtistSource(artist_id=aid, enabled=True, via_seed=scope) for aid in artist_ids
+    )
+    excludes = extract_excludes(input_references)
+    return serialize_input_references(kept, sorted(excludes, key=str))

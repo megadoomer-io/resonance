@@ -96,10 +96,16 @@ class TestTaskTypeNewValues:
 
     def test_tasktype_member_count(self) -> None:
         """TaskType members (bump when adding a task type)."""
-        assert len(types_module.TaskType) == 13
+        assert len(types_module.TaskType) == 14
 
     def test_mbid_backfill_value(self) -> None:
         assert types_module.TaskType.MBID_BACKFILL == "mbid_backfill"
 
     def test_popularity_backfill_value(self) -> None:
         assert types_module.TaskType.POPULARITY_BACKFILL == "popularity_backfill"
+
+    def test_related_artist_enrichment_value(self) -> None:
+        assert (
+            types_module.TaskType.RELATED_ARTIST_ENRICHMENT
+            == "related_artist_enrichment"
+        )

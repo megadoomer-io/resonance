@@ -195,8 +195,8 @@ def score_and_select(
 
     # 4. Select from one pool: round-0 per-artist guarantee, then fill by score.
     #    Provenance (target vs adjacent) is metadata only -- it does not affect
-    #    selection. similar_artist_ratio governs *pool composition* upstream (how
-    #    many related artists are resolved into the candidate set), not selection.
+    #    selection. Pool composition (which related artists are present) is decided
+    #    upstream by enrichment (#133), not here.
     selected = _select_one_pool(scored, max_tracks)
 
     # 5. Re-sort the merged selection by score for final ordering, then assign

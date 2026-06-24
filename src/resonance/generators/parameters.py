@@ -64,18 +64,9 @@ PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
         default_value=50,
         labels=("Deep Cuts", "Big Hits"),
     ),
-    "similar_artist_ratio": ParameterDefinition(
-        name="similar_artist_ratio",
-        display_name="Similar Artists",
-        # Composition, not a selection quota: this controls how many related
-        # artists are resolved into the candidate pool. Every pool artist is
-        # then guaranteed at least one track, so a higher value widens the mix
-        # of artists rather than forcing a fixed fraction of the final tracks.
-        description="How many related artists to fold into the pool",
-        scale_type=types_module.ParameterScaleType.UNIPOLAR,
-        default_value=0,
-        labels=("Seed Artists Only", "Many Related Artists"),
-    ),
+    # NOTE: the old "similar_artist_ratio" parameter was removed in #133. Related
+    # artists are now added to the pool explicitly via the enrich endpoint as
+    # concrete artist sources, not folded in at generation time by a slider.
 }
 
 GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {

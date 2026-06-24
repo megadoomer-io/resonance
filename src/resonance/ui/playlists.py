@@ -13,8 +13,9 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
-import resonance.api.v1.generators as generators_api
+import resonance.api.v1.artists as artists_api
 import resonance.dependencies as deps_module
+import resonance.generators.pool as pool_module
 import resonance.models.concert as concert_models
 import resonance.models.generator as generator_models
 import resonance.models.music as music_models
@@ -219,6 +220,193 @@ async def _default_playlist_name(
     return f"Playlist {now_str}"
 
 
+async def _resolve_event_artist_ids(
+    db: sa_async.AsyncSession, event_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """Resolve an event to its artist ids (confirmed + accepted), deduped.
+
+    Mirrors ``worker.resolve_pool`` / the events lineup endpoint so the builder
+    renders the same artists generation will use.
+    """
+    ea_result = await db.execute(
+        sa.select(concert_models.EventArtist.artist_id).where(
+            concert_models.EventArtist.event_id == event_id
+        )
+    )
+    ordered: list[uuid.UUID] = list(ea_result.scalars().all())
+    cand_result = await db.execute(
+        sa.select(concert_models.EventArtistCandidate.matched_artist_id).where(
+            concert_models.EventArtistCandidate.event_id == event_id,
+            concert_models.EventArtistCandidate.status
+            == types_module.CandidateStatus.ACCEPTED,
+            concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
+        )
+    )
+    for cid in cand_result.scalars().all():
+        if cid is not None:
+            ordered.append(cid)
+    seen: set[uuid.UUID] = set()
+    unique: list[uuid.UUID] = []
+    for aid in ordered:
+        if aid not in seen:
+            seen.add(aid)
+            unique.append(aid)
+    return unique
+
+
+def _artist_row(summary: dict[str, object], *, included: bool) -> dict[str, object]:
+    """Build a builder row from an artist summary."""
+    bits = [
+        str(summary[k])
+        for k in ("disambiguation", "area", "begin_year")
+        if summary.get(k)
+    ]
+    return {
+        "id": str(summary["id"]),
+        "name": summary.get("name", ""),
+        "meta": " · ".join(bits),
+        "included": included,
+    }
+
+
+async def _hydrate_lineup(
+    db: sa_async.AsyncSession,
+    profile: generator_models.GeneratorProfile,
+) -> dict[str, object]:
+    """Turn a profile's input_references into named, grouped builder rows (#133).
+
+    Groups: one per event source, a manual "Added artists" group, and one
+    "related" group per enrichment scope (``via_seed``). Excluded artists keep
+    their row with ``included=False``. This is the initial state the client-side
+    builder renders and then mutates.
+    """
+    refs = profile.input_references
+    sources = pool_module.normalize_sources(refs)
+    excludes = pool_module.extract_excludes(refs)
+
+    event_sources = [
+        s for s in sources if isinstance(s, pool_module.EventSource) and s.enabled
+    ]
+    manual = [
+        s
+        for s in sources
+        if isinstance(s, pool_module.ArtistSource) and s.enabled and s.via_seed is None
+    ]
+    related: dict[str, list[pool_module.ArtistSource]] = {}
+    for s in sources:
+        if (
+            isinstance(s, pool_module.ArtistSource)
+            and s.enabled
+            and s.via_seed is not None
+        ):
+            related.setdefault(s.via_seed, []).append(s)
+
+    # Resolve event -> artist ids, and gather every artist id we must name.
+    event_artist_ids: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for ev in event_sources:
+        event_artist_ids[ev.event_id] = await _resolve_event_artist_ids(db, ev.event_id)
+
+    wanted: set[uuid.UUID] = set()
+    for ids in event_artist_ids.values():
+        wanted.update(ids)
+    wanted.update(s.artist_id for s in manual)
+    for lst in related.values():
+        wanted.update(s.artist_id for s in lst)
+    seed_ids = {
+        uuid.UUID(scope) for scope in related if scope != "lineup" and _is_uuid(scope)
+    }
+    wanted.update(seed_ids)
+
+    summaries: dict[uuid.UUID, dict[str, object]] = {}
+    if wanted:
+        artist_result = await db.execute(
+            sa.select(music_models.Artist).where(music_models.Artist.id.in_(wanted))
+        )
+        for artist in artist_result.scalars().all():
+            summaries[artist.id] = artists_api._format_artist_summary(artist)
+
+    def row(aid: uuid.UUID) -> dict[str, object] | None:
+        s = summaries.get(aid)
+        if s is None:
+            return None
+        return _artist_row(s, included=aid not in excludes)
+
+    groups: list[dict[str, object]] = []
+
+    # Event groups (with date/venue subtitle).
+    if event_sources:
+        events_result = await db.execute(
+            sa.select(concert_models.Event)
+            .where(concert_models.Event.id.in_([ev.event_id for ev in event_sources]))
+            .options(sa_orm.joinedload(concert_models.Event.venue))
+        )
+        events_by_id = {e.id: e for e in events_result.unique().scalars().all()}
+        for ev in event_sources:
+            event = events_by_id.get(ev.event_id)
+            title = event.title if event else "Event"
+            sub_bits = []
+            if event:
+                sub_bits.append(str(event.event_date))
+                if event.venue:
+                    sub_bits.append(event.venue.name)
+            sub = "· " + " · ".join([*sub_bits, "live lineup"])
+            rows = [
+                r
+                for aid in event_artist_ids.get(ev.event_id, [])
+                if (r := row(aid)) is not None
+            ]
+            groups.append(
+                {
+                    "kind": "event",
+                    "event_id": str(ev.event_id),
+                    "title": title,
+                    "sub": sub,
+                    "artists": rows,
+                }
+            )
+
+    if manual:
+        groups.append(
+            {
+                "kind": "manual",
+                "title": "Added artists",
+                "artists": [r for s in manual if (r := row(s.artist_id)) is not None],
+            }
+        )
+
+    for scope, lst in related.items():
+        if scope == "lineup":
+            title = "Related to your lineup"
+        else:
+            seed = summaries.get(uuid.UUID(scope)) if _is_uuid(scope) else None
+            title = f"Related to {seed['name']}" if seed else "Related artists"
+        groups.append(
+            {
+                "kind": "related",
+                "scope": scope,
+                "title": title,
+                "artists": [r for s in lst if (r := row(s.artist_id)) is not None],
+            }
+        )
+
+    return {
+        "profile_id": str(profile.id),
+        "version": profile.version,
+        "name": profile.name,
+        "generator_type": profile.generator_type.value,
+        "parameter_values": profile.parameter_values,
+        "groups": groups,
+    }
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 @router.get("/playlists/new", response_model=None)
 async def new_playlist_page(
     request: fastapi.Request,
@@ -226,98 +414,85 @@ async def new_playlist_page(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     event_id: str = "",
     type: str = "",
-) -> fastapi.responses.HTMLResponse:
-    """Render the lineup builder (New Playlist) page."""
-    ctx = await _new_playlist_context(
-        request, db, selected_event_id=event_id, selected_type=type
-    )
-    return common.templates.TemplateResponse(request, "playlists_new.html", ctx)
-
-
-@router.post("/playlists/new", response_model=None)
-async def create_playlist(
-    request: fastapi.Request,
-    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
-    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> fastapi.responses.Response:
-    """Handle lineup builder submission.
+    """Eagerly create a draft profile and redirect to the server-backed editor.
 
-    The builder serializes the lineup into a single ``input_references_json``
-    hidden field carrying the layered source spec
-    (``{"sources": [...], "exclude_artist_ids": [...]}``). This replaces the old
-    single-event ``{"event_id": ...}`` shape (#128). Validation reuses the same
-    ``validate_profile_inputs`` path as the JSON API so the UI and CLI/API agree
-    on what a valid pool is.
+    The builder is now a server-backed profile editor (#133): opening "new
+    playlist" creates a draft immediately so every edit persists. A preseed
+    ``?event_id=`` seeds the pool with that event.
     """
-    form = await request.form()
-
-    gen_type = str(form.get("generator_type", "") or "concert_prep")
-    max_tracks = int(str(form.get("max_tracks", "30")) or "30")
-    name = str(form.get("name", "")).strip()
-    raw_json = str(form.get("input_references_json", "")).strip()
-
-    param_values: dict[str, int] = {}
-    for key, val in form.items():
-        if key.startswith("param_"):
-            param_values[key[6:]] = int(str(val))
-
     try:
-        gen_type_enum = types_module.GeneratorType(gen_type)
+        gen_type_enum = types_module.GeneratorType(type or "concert_prep")
     except ValueError:
         gen_type_enum = types_module.GeneratorType.CONCERT_PREP
 
-    try:
-        parsed = json.loads(raw_json) if raw_json else {}
-    except json.JSONDecodeError:
-        parsed = None
-    input_references: dict[str, object] = parsed if isinstance(parsed, dict) else {}
+    sources: list[dict[str, object]] = []
+    if event_id and _is_uuid(event_id):
+        sources.append({"kind": "event", "event_id": event_id, "enabled": True})
+    input_references: dict[str, object] = {
+        "sources": sources,
+        "exclude_artist_ids": [],
+    }
 
-    try:
-        generators_api.validate_profile_inputs(input_references, gen_type_enum)
-    except ValueError as exc:
-        ctx = await _new_playlist_context(
-            request, db, selected_type=gen_type, error=str(exc)
-        )
-        return common.templates.TemplateResponse(
-            request, "playlists_new.html", ctx, status_code=400
-        )
-
-    if not name:
-        name = await _default_playlist_name(db, input_references)
-
+    name = (
+        await _default_playlist_name(db, input_references)
+        if sources
+        else "New Playlist"
+    )
     profile = generator_models.GeneratorProfile(
         user_id=user_id,
         name=name,
         generator_type=gen_type_enum,
+        status=types_module.ProfileStatus.DRAFT,
         input_references=input_references,
-        parameter_values=param_values,
+        parameter_values={},
     )
     db.add(profile)
-    await db.flush()
-
-    task = task_models.Task(
-        user_id=user_id,
-        task_type=types_module.TaskType.PLAYLIST_GENERATION,
-        status=types_module.SyncStatus.PENDING,
-        params={
-            "profile_id": str(profile.id),
-            "max_tracks": max_tracks,
-        },
-        description=name,
-    )
-    db.add(task)
     await db.commit()
 
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "generate_playlist",
-        str(task.id),
-        _job_id=f"generate_playlist:{task.id}",
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/{profile.id}/edit", status_code=303
     )
 
-    return fastapi.responses.RedirectResponse(
-        url=f"/playlists/generating/{task.id}", status_code=303
+
+@router.get("/playlists/{profile_id}/edit", response_model=None)
+async def edit_playlist_page(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    profile_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse:
+    """Render the server-backed lineup builder bound to a profile (#133)."""
+    result = await db.execute(
+        sa.select(generator_models.GeneratorProfile).where(
+            generator_models.GeneratorProfile.id == profile_id,
+            generator_models.GeneratorProfile.user_id == user_id,
+        )
     )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise fastapi.HTTPException(status_code=404, detail="Profile not found")
+
+    ctx = await _new_playlist_context(request, db)
+    lineup = await _hydrate_lineup(db, profile)
+    # Whether a similar-artists service is connected (drives the enrich hint).
+    conn_result = await db.execute(
+        sa.select(user_models.ServiceConnection.id).where(
+            user_models.ServiceConnection.user_id == user_id,
+            user_models.ServiceConnection.service_type.in_(
+                [types_module.ServiceType.LISTENBRAINZ, types_module.ServiceType.LASTFM]
+            ),
+        )
+    )
+    similar_available = conn_result.first() is not None
+    ctx.update(
+        profile_id=str(profile.id),
+        lineup_json=json.dumps(lineup),
+        profile_name=profile.name,
+        parameter_values=profile.parameter_values,
+        similar_available=similar_available,
+    )
+    return common.templates.TemplateResponse(request, "playlists_new.html", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +557,32 @@ async def generating_status_partial(
             "error": task.error_message,
         },
     )
+
+
+@router.get("/playlists/task-status/{task_id}", response_model=None)
+async def task_status_json(
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    task_id: uuid.UUID,
+) -> dict[str, object]:
+    """User-scoped JSON task status, polled by the builder for enrich/generate."""
+    result = await db.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise fastapi.HTTPException(status_code=404, detail="Task not found")
+    return {
+        "task_id": str(task.id),
+        "status": task.status.value,
+        "progress_current": task.progress_current,
+        "progress_total": task.progress_total,
+        "result": task.result or {},
+        "error": task.error_message,
+    }
 
 
 # ---------------------------------------------------------------------------

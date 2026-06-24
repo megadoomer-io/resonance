@@ -48,6 +48,10 @@ uv run uvicorn resonance.app:create_app --factory --reload
 # Run tests
 uv run pytest
 
+# Front-end unit tests (vitest) for the lineup builder's core logic.
+# Requires Node; `npm ci` once, then:
+npm test
+
 # Lint and format
 uv run ruff check .
 uv run ruff format .
@@ -63,6 +67,8 @@ uv run alembic revision --autogenerate -m "description"  # create new
 uv run resonance-api profile list
 uv run resonance-api profile create --type concert_prep --event <id> --name "name"
 uv run resonance-api generate <profile-id> [--freshness 50]
+uv run resonance-api enrich <profile-id> --lineup [--n 5]          # add related artists
+uv run resonance-api enrich <profile-id> --seed <artist-id> [--n 5]
 uv run resonance-api playlists
 uv run resonance-api playlist <playlist-id>
 ```
@@ -145,6 +151,7 @@ uv run resonance-api track <query>              # Search tracks by title
 uv run resonance-api profile list               # List generator profiles
 uv run resonance-api profile create ...         # Create a generator profile
 uv run resonance-api generate <profile-id>      # Generate playlist from profile
+uv run resonance-api enrich <profile-id> --lineup | --seed <id>  # Add related artists
 uv run resonance-api playlists                  # List playlists
 uv run resonance-api playlist <playlist-id>     # Show playlist details
 uv run resonance-api import concert_archives --file <path> [--export-date YYYY-MM-DD] [--wait]
@@ -188,6 +195,10 @@ uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d
 - Generator types declared in `generators/parameters.py` via `GENERATOR_TYPE_CONFIG`
 - Scoring logic in `generators/scoring.py`
 - Generator-specific logic in `generators/<type>.py` (e.g., `concert_prep.py`)
+- **Lineup builder is a server-backed profile editor (#133)**: `/playlists/new` eagerly creates a `draft` `GeneratorProfile` and redirects to `/playlists/{id}/edit`; the same editor edits existing profiles. Every edit PATCHes `input_references` (and parameters/name) via `/api/v1/generator-profiles/{id}`; "Generate" is a separate action that flips a draft `active`. The profile list shows only `active` profiles. Client state logic is the pure ES module `static/lineup.core.js` (unit-tested with **vitest** under `tests/js/`); `static/lineup.js` is the DOM/network controller. `ui/playlists._hydrate_lineup` turns stored `input_references` into named, grouped rows for the editor.
+- **Related-artist enrichment (#133)**: `POST /api/v1/generator-profiles/{id}/enrich {seed_artist_ids: [...] | "lineup", n}` resolves related artists and persists them into the pool as concrete `artist` sources tagged with `via_seed` (`"<seed_id>"` per-seed, `"lineup"` global). It runs as a `RELATED_ARTIST_ENRICHMENT` worker task; re-running a scope replaces only that scope's prior discoveries. There is NO generation-time related expansion anymore (the old `similar_artist_ratio` slider is gone).
+- **Profile concurrency (#133)**: `GeneratorProfile.version` is the SQLAlchemy `version_id_col`. The editor sends `expected_version` on PATCH (409 + conflict banner on mismatch); the enrich worker reloads and re-applies on a version conflict so concurrent edits merge instead of clobbering. Generation and enrichment are mutually exclusive per profile (409).
+- **Artist similarity is durable data, not a cache**: `models.taste.ArtistSimilarity` stores connector-reported artist→neighbor edges (`source_artist_id`, `connector`, `neighbor_name`/`mbid`, `rank`, `fetched_at`). The enrich worker reads stored edges first and falls back to a live fetch, recording the result; `fetched_at` drives refresh-if-old, never eviction.
 - SQLAlchemy models use UUID primary keys
 - OAuth tokens encrypted at rest via Fernet
 - All connections (OAuth, username-based, URL-based, file-upload) use the unified `ServiceConnection` model — there is no separate calendar feed or import model

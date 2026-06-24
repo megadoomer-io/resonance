@@ -30,6 +30,23 @@ class GeneratorProfile(base_module.TimestampMixin, base_module.Base):
     generator_type: orm.Mapped[types_module.GeneratorType] = orm.mapped_column(
         sa.Enum(types_module.GeneratorType, native_enum=False), nullable=False
     )
+    # Draft until first generate flips it active (#133). The lineup builder
+    # eagerly creates a draft so every edit persists; the profile list filters
+    # status=active so half-built drafts don't show.
+    status: orm.Mapped[types_module.ProfileStatus] = orm.mapped_column(
+        sa.Enum(types_module.ProfileStatus, native_enum=False),
+        nullable=False,
+        default=types_module.ProfileStatus.DRAFT,
+        server_default=types_module.ProfileStatus.DRAFT.name,
+    )
+    # Optimistic-concurrency token (#133). The builder (PATCH), the CLI/agent,
+    # and the enrich worker all write input_references; an assert-and-bump on
+    # this column turns the lost-update race into a 409/retry. Wired as the
+    # mapper's version_id_col (below), so every flush of a dirty profile bumps
+    # the version and a stale UPDATE raises StaleDataError instead of clobbering.
+    version: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=1, server_default="1"
+    )
     input_references: orm.Mapped[dict[str, object]] = orm.mapped_column(
         sa.JSON, nullable=False, insert_default=dict
     )
@@ -45,6 +62,16 @@ class GeneratorProfile(base_module.TimestampMixin, base_module.Base):
         cascade="all, delete-orphan",
         order_by="GenerationRecord.created_at.desc()",
     )
+
+    # Optimistic concurrency (#133): SQLAlchemy bumps `version` on every flush and
+    # adds `WHERE version = <loaded>` to UPDATEs, raising StaleDataError when a
+    # concurrent writer already advanced it. The editor PATCH surfaces that as a
+    # 409; the enrich worker reloads and re-applies onto the fresh row.
+    # RUF012 is suppressed below: ruff wants a ClassVar annotation, but
+    # SQLAlchemy's DeclarativeBase types __mapper_args__ as an instance
+    # attribute, so a ClassVar annotation makes mypy reject the override. The
+    # dict is the documented SQLAlchemy idiom and is never mutated.
+    __mapper_args__ = {"version_id_col": version}  # noqa: RUF012
 
 
 _GENERATOR_PROFILE_DEFAULTS: dict[str, object] = {
