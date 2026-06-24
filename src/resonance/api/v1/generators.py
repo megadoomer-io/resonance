@@ -254,6 +254,7 @@ async def get_profile(
                 "freshness_actual": gen.freshness_actual,
                 "generation_duration_ms": gen.generation_duration_ms,
                 "track_sources_summary": gen.track_sources_summary,
+                "pool_snapshot": gen.pool_snapshot,
                 "created_at": gen.created_at.isoformat(),
             }
             for gen in generations
