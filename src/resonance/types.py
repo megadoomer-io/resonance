@@ -65,6 +65,7 @@ class TaskType(enum.StrEnum):
     PLAYLIST_EXPORT = "playlist_export"
     MBID_BACKFILL = "mbid_backfill"
     POPULARITY_BACKFILL = "popularity_backfill"
+    RELATED_ARTIST_ENRICHMENT = "related_artist_enrichment"
 
 
 class SyncStatus(enum.StrEnum):
@@ -100,6 +101,20 @@ class CandidateStatus(enum.StrEnum):
     AUTO_ACCEPTED = "auto_accepted"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+
+
+class ProfileStatus(enum.StrEnum):
+    """Lifecycle state of a generator profile.
+
+    A profile opened in the lineup builder is created ``DRAFT`` immediately so
+    every builder edit can persist server-side (#133). The first successful
+    generation flips it to ``ACTIVE``; the profile list shows only ``ACTIVE``
+    profiles. Stored with ``native_enum=False``, so DB CHECK constraints and raw
+    SQL use the enum .name (UPPERCASE): 'DRAFT' / 'ACTIVE'.
+    """
+
+    DRAFT = "draft"
+    ACTIVE = "active"
 
 
 class GeneratorType(enum.StrEnum):

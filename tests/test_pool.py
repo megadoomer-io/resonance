@@ -121,6 +121,95 @@ class TestNormalizeSources:
             )
 
 
+class TestArtistViaSeed:
+    """via_seed provenance on artist sources (#133)."""
+
+    def test_via_seed_defaults_none(self) -> None:
+        aid = uuid.uuid4()
+        raw = {"sources": [{"kind": "artist", "artist_id": str(aid)}]}
+        assert pool_module.normalize_sources(raw) == [
+            pool_module.ArtistSource(artist_id=aid, via_seed=None)
+        ]
+
+    def test_via_seed_lineup_parsed(self) -> None:
+        aid = uuid.uuid4()
+        raw = {
+            "sources": [{"kind": "artist", "artist_id": str(aid), "via_seed": "lineup"}]
+        }
+        assert pool_module.normalize_sources(raw) == [
+            pool_module.ArtistSource(artist_id=aid, via_seed="lineup")
+        ]
+
+    def test_via_seed_artist_id_parsed(self) -> None:
+        aid = uuid.uuid4()
+        seed = str(uuid.uuid4())
+        raw = {"sources": [{"kind": "artist", "artist_id": str(aid), "via_seed": seed}]}
+        assert pool_module.normalize_sources(raw) == [
+            pool_module.ArtistSource(artist_id=aid, via_seed=seed)
+        ]
+
+    def test_via_seed_null_is_none(self) -> None:
+        aid = uuid.uuid4()
+        raw = {"sources": [{"kind": "artist", "artist_id": str(aid), "via_seed": None}]}
+        assert pool_module.normalize_sources(raw)[0] == pool_module.ArtistSource(
+            artist_id=aid, via_seed=None
+        )
+
+    def test_via_seed_empty_string_raises(self) -> None:
+        aid = uuid.uuid4()
+        raw = {"sources": [{"kind": "artist", "artist_id": str(aid), "via_seed": ""}]}
+        with pytest.raises(ValueError, match="via_seed"):
+            pool_module.normalize_sources(raw)
+
+    def test_via_seed_non_string_raises(self) -> None:
+        aid = uuid.uuid4()
+        raw = {"sources": [{"kind": "artist", "artist_id": str(aid), "via_seed": 3}]}
+        with pytest.raises(ValueError, match="via_seed"):
+            pool_module.normalize_sources(raw)
+
+    def test_serialize_omits_via_seed_when_none(self) -> None:
+        aid = uuid.uuid4()
+        out = pool_module.serialize_source(pool_module.ArtistSource(artist_id=aid))
+        assert "via_seed" not in out
+
+    def test_serialize_includes_via_seed_when_set(self) -> None:
+        aid = uuid.uuid4()
+        out = pool_module.serialize_source(
+            pool_module.ArtistSource(artist_id=aid, via_seed="lineup")
+        )
+        assert out["via_seed"] == "lineup"
+
+    def test_round_trip_with_via_seed(self) -> None:
+        aid = uuid.uuid4()
+        seed = str(uuid.uuid4())
+        sources: list[pool_module.PoolSource] = [
+            pool_module.ArtistSource(artist_id=aid, via_seed=seed),
+            pool_module.ArtistSource(artist_id=uuid.uuid4(), via_seed="lineup"),
+            pool_module.ArtistSource(artist_id=uuid.uuid4(), via_seed=None),
+        ]
+        stored = pool_module.serialize_input_references(sources)
+        assert pool_module.normalize_sources(stored) == sources
+
+    def test_via_seed_source_resolves_same_as_plain(self) -> None:
+        # via_seed is provenance only -- it must not change how the artist
+        # resolves into the pool (same artist_id -> same ResolvedArtist).
+        aid = uuid.uuid4()
+        plain = pool_module.ArtistSource(artist_id=aid)
+        tagged = pool_module.ArtistSource(artist_id=aid, via_seed="lineup")
+        resolved = [
+            pool_module.ResolvedArtist(
+                artist_id=s.artist_id, via=pool_module.PoolSourceKind.ARTIST
+            )
+            for s in (plain, tagged)
+        ]
+        # Both resolve to the same artist -> dedup keeps one.
+        assert pool_module.build_pool(resolved, set()) == [
+            pool_module.ResolvedArtist(
+                artist_id=aid, via=pool_module.PoolSourceKind.ARTIST
+            )
+        ]
+
+
 class TestExtractExcludes:
     def test_missing_yields_empty_set(self) -> None:
         assert pool_module.extract_excludes({}) == set()

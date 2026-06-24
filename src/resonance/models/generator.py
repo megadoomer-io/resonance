@@ -30,6 +30,22 @@ class GeneratorProfile(base_module.TimestampMixin, base_module.Base):
     generator_type: orm.Mapped[types_module.GeneratorType] = orm.mapped_column(
         sa.Enum(types_module.GeneratorType, native_enum=False), nullable=False
     )
+    # Draft until first generate flips it active (#133). The lineup builder
+    # eagerly creates a draft so every edit persists; the profile list filters
+    # status=active so half-built drafts don't show.
+    status: orm.Mapped[types_module.ProfileStatus] = orm.mapped_column(
+        sa.Enum(types_module.ProfileStatus, native_enum=False),
+        nullable=False,
+        default=types_module.ProfileStatus.DRAFT,
+        server_default=types_module.ProfileStatus.DRAFT.name,
+    )
+    # Optimistic-concurrency token (#133). The builder (PATCH), the CLI/agent,
+    # and the enrich worker all write input_references; an assert-and-bump on
+    # this column turns the lost-update race into a 409/retry. The column lands
+    # here; the mapper version_id_col wiring + 409/retry handling is in #133 T5.
+    version: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=1, server_default="1"
+    )
     input_references: orm.Mapped[dict[str, object]] = orm.mapped_column(
         sa.JSON, nullable=False, insert_default=dict
     )

@@ -8,6 +8,8 @@ applied last to the union (issue #128). The stored shape is::
       "sources": [
         {"kind": "event",   "event_id": "<uuid>", "enabled": true},
         {"kind": "artist",  "artist_id": "<uuid>", "enabled": true},
+        {"kind": "artist",  "artist_id": "<uuid>", "enabled": true,
+         "via_seed": "lineup"},
         {"kind": "related", "seed": "target", "amount": 5, "enabled": true}
       ],
       "exclude_artist_ids": ["<uuid>"]
@@ -61,10 +63,20 @@ class EventSource:
 
 @dataclasses.dataclass(frozen=True)
 class ArtistSource:
-    """Add a single artist directly to the pool."""
+    """Add a single artist directly to the pool.
+
+    ``via_seed`` records enrichment provenance (#133): ``None`` for a manual or
+    event-origin artist the user added, ``"<artist_id>"`` for one discovered by
+    "find similar" from that seed artist, and ``"lineup"`` for one discovered by
+    the global "add N related from the whole lineup" sweep. It drives
+    replace-by-scope (re-running a scope's enrich drops only that scope's prior
+    discovered sources) and lets the builder group discovered artists under the
+    seed that produced them.
+    """
 
     artist_id: uuid.UUID
     enabled: bool = True
+    via_seed: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,6 +122,20 @@ def _parse_enabled(raw: Mapping[str, object]) -> bool:
     return value
 
 
+def _parse_via_seed(value: object) -> str | None:
+    """Parse the optional ``via_seed`` provenance tag on an artist source.
+
+    Absent or null means a user-added (manual/event-origin) artist. A present
+    value must be a non-empty string (a seed ``<artist_id>`` or ``"lineup"``).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        msg = f"Artist source 'via_seed' must be a non-empty string, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
 def _parse_source(raw: object) -> PoolSource:
     """Parse one source entry into a typed source.
 
@@ -135,7 +161,9 @@ def _parse_source(raw: object) -> PoolSource:
         )
     if kind is PoolSourceKind.ARTIST:
         return ArtistSource(
-            artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"), enabled=enabled
+            artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"),
+            enabled=enabled,
+            via_seed=_parse_via_seed(raw.get("via_seed")),
         )
     # RELATED
     amount_raw = raw.get("amount")
@@ -232,11 +260,16 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
             "enabled": source.enabled,
         }
     if isinstance(source, ArtistSource):
-        return {
+        payload: dict[str, object] = {
             "kind": PoolSourceKind.ARTIST.value,
             "artist_id": str(source.artist_id),
             "enabled": source.enabled,
         }
+        # Omit via_seed when None so user-added artists keep the lean shape and
+        # round-trip cleanly (None -> absent -> None).
+        if source.via_seed is not None:
+            payload["via_seed"] = source.via_seed
+        return payload
     return {
         "kind": PoolSourceKind.RELATED.value,
         "seed": source.seed,
