@@ -4623,3 +4623,81 @@ class TestEnrichRelatedArtists:
         }
         assert tagged[new] == str(seed_id)  # discovered artist tagged by seed
         assert tagged[seed_id] is None  # original seed untouched
+
+    @pytest.mark.asyncio
+    async def test_version_conflict_reloads_and_merges(self) -> None:
+        """A concurrent edit during commit is merged, not clobbered (#133 T5)."""
+        import sqlalchemy.orm.exc as orm_exc
+
+        core_id = uuid.uuid4()
+        new_id = uuid.uuid4()
+        editor_id = uuid.uuid4()  # an artist the editor adds concurrently
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=core_id)]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+        )
+        core_artist = _artist_ns("Core", id=core_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [core_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+        # Commits in order: phase-0 RUNNING, phase-1 edges, phase-2 attempt 0
+        # (conflict), phase-2 attempt 1 (succeeds after reload + merge).
+        session.commit.side_effect = [None, None, orm_exc.StaleDataError("x"), None]
+
+        async def _refresh(obj: Any) -> None:
+            # Simulate the concurrent editor: a manual artist was added and the
+            # version advanced. The worker must merge onto this, not overwrite it.
+            if obj is profile:
+                profile.input_references = pool_module.serialize_input_references(
+                    [
+                        pool_module.ArtistSource(artist_id=core_id),
+                        pool_module.ArtistSource(artist_id=editor_id),
+                    ]
+                )
+
+        session.refresh = AsyncMock(side_effect=_refresh)
+
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=core_id, via=pool_module.PoolProvenance.ARTIST
+                        )
+                    ]
+                ),
+            ),
+            patch.object(
+                worker_module, "_collect_related", AsyncMock(return_value=[new_id])
+            ),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # The merge preserves the editor's artist AND adds the discovered one.
+        sources = pool_module.normalize_sources(profile.input_references)
+        by_id = {
+            s.artist_id: s.via_seed
+            for s in sources
+            if isinstance(s, pool_module.ArtistSource)
+        }
+        assert by_id[core_id] is None
+        assert by_id[editor_id] is None  # concurrent edit NOT clobbered
+        assert by_id[new_id] == "lineup"  # enrichment applied
+        session.rollback.assert_awaited_once()

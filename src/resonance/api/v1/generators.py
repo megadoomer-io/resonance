@@ -9,6 +9,7 @@ import fastapi
 import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import sqlalchemy.orm.exc as orm_exc
 import structlog
 
 import resonance.dependencies as deps_module
@@ -421,7 +422,17 @@ async def update_profile(
             raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
         profile.input_references = dict(body.input_references)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except orm_exc.StaleDataError as exc:
+        # The profile was modified concurrently (e.g. an enrich worker rewrote
+        # input_references) after this request loaded it. The client should
+        # reload and reapply — surfaced in the builder as a version-conflict banner.
+        await db.rollback()
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Profile was modified concurrently; reload and retry",
+        ) from exc
 
     logger.info(
         "generator_profile_updated",

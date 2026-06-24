@@ -351,6 +351,41 @@ class TestEnrichEndpoint:
         assert exc.value.status_code == 409
 
 
+class TestUpdateProfileConcurrency:
+    """update_profile surfaces an optimistic-version conflict as a 409 (#133)."""
+
+    async def test_stale_data_returns_409(self) -> None:
+        import sqlalchemy.orm.exc as orm_exc
+
+        profile = SimpleNamespace(
+            id=uuid.uuid4(),
+            name="old",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references={},
+            parameter_values={},
+        )
+
+        class _StaleSession:
+            def __init__(self) -> None:
+                self.rolled_back = False
+
+            async def execute(self, *_a: Any, **_k: Any) -> Any:
+                return _FakeResult([profile])
+
+            async def commit(self) -> None:
+                raise orm_exc.StaleDataError("conflict")
+
+            async def rollback(self) -> None:
+                self.rolled_back = True
+
+        db = _StaleSession()
+        body = generators_module.UpdateProfileRequest(name="new")
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await generators_module.update_profile(profile.id, body, uuid.uuid4(), db)
+        assert exc.value.status_code == 409
+        assert db.rolled_back is True
+
+
 class TestMutualExclusion:
     """Generation and enrichment block each other via the shared helper."""
 

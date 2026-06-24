@@ -32,6 +32,7 @@ import httpx
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
+import sqlalchemy.orm.exc as orm_exc
 import structlog
 
 import resonance.concerts.sync as concert_sync
@@ -1581,6 +1582,10 @@ async def _import_adjacent_candidates(
 # fetched_at drives refresh (re-fetch + replace), not eviction.
 _SIMILARITY_REFRESH_AGE = datetime.timedelta(days=30)
 
+# How many times the enrich task re-applies its result after an optimistic
+# version conflict before giving up (#133).
+_MAX_VERSION_RETRIES = 3
+
 
 async def _fetch_similar_with_store(
     session: sa_async.AsyncSession,
@@ -1833,13 +1838,18 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     session, connector, artist, limit=limit, now=now
                 )
 
+            # Phase 1: resolve each scope's new artists, persisting similarity
+            # edges + any imported artists. Commit so that work survives a later
+            # optimistic-version retry on the profile row.
+            scope_results: list[tuple[str, list[uuid.UUID]]] = []
+            running_pool_ids = set(current_pool_ids)
             total_found = 0
             for scope, seed_artists, target_n in scopes:
                 scope_prior = set(pool_module.scope_artist_ids(refs, scope))
                 # Exclude everything currently in the pool EXCEPT this scope's
                 # own prior discoveries (so they can be re-found on replace), plus
                 # the seeds themselves (an artist is never its own neighbor).
-                exclude = (current_pool_ids - scope_prior) | {
+                exclude = (running_pool_ids - scope_prior) | {
                     a.id for a in seed_artists
                 }
                 new_ids = await _collect_related(
@@ -1852,20 +1862,44 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     _store_fetch,
                     log,
                 )
-                refs = pool_module.replace_via_seed_sources(refs, scope, new_ids)
-                current_pool_ids = (current_pool_ids - scope_prior) | set(new_ids)
+                scope_results.append((scope, new_ids))
+                running_pool_ids = (running_pool_ids - scope_prior) | set(new_ids)
                 total_found += len(new_ids)
-
-            # Reassign a new dict so SQLAlchemy detects the JSON column change.
-            profile.input_references = refs
-            task.progress_total = target_total
-            task.progress_current = total_found
-            await lifecycle_module.complete_task(
-                session,
-                task,
-                {"found": total_found, "requested": target_total},
-            )
             await session.commit()
+
+            # Phase 2: apply the discovered artists to the profile under optimistic
+            # concurrency. If a concurrent writer (editor PATCH, CLI, agent)
+            # advanced the version, reload the fresh input_references and re-apply
+            # our scopes onto it -- a merge that never clobbers the other change --
+            # then retry.
+            for attempt in range(_MAX_VERSION_RETRIES):
+                merged: dict[str, object] = dict(profile.input_references)
+                for scope, new_ids in scope_results:
+                    merged = pool_module.replace_via_seed_sources(
+                        merged, scope, new_ids
+                    )
+                profile.input_references = merged
+                task.progress_total = target_total
+                task.progress_current = total_found
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {"found": total_found, "requested": target_total},
+                )
+                try:
+                    await session.commit()
+                    break
+                except orm_exc.StaleDataError:
+                    await session.rollback()
+                    if attempt == _MAX_VERSION_RETRIES - 1:
+                        raise
+                    log.warning(
+                        "enrich_related_artists_version_conflict", attempt=attempt
+                    )
+                    # Reload fresh state (input_references + version) so the next
+                    # attempt re-applies onto the concurrent writer's result.
+                    await session.refresh(profile)
+                    await session.refresh(task)
             log.info(
                 "enrich_related_artists_completed",
                 found=total_found,
