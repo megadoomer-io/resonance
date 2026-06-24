@@ -1,0 +1,127 @@
+/* Lineup builder (New Playlist) — see DESIGN.md. Tokens from theme.css. */
+
+.lineup-hint { color: var(--text-muted); }
+
+/* Add controls row: event dropdown + artist search */
+.lineup-add {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  align-items: flex-start;
+  margin-bottom: var(--space-md);
+}
+.lineup-add > * { margin-bottom: 0; }
+.lineup-add .add-event { flex: 1 1 16rem; min-width: 12rem; }
+.lineup-add .picker { flex: 1 1 16rem; min-width: 12rem; }
+
+/* Empty state */
+.lineup-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: var(--space-md);
+  text-align: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+/* Lineup groups */
+.lineup-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-sm);
+  overflow: hidden;
+}
+.lineup-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  background: var(--surface-alt);
+  padding: var(--space-xs) var(--space-md);
+}
+.lineup-group-head .gtitle { font-weight: 700; font-size: 0.9rem; }
+.lineup-group-head .gsub { color: var(--text-muted); font-size: 0.78rem; font-weight: 400; }
+.lineup-group-head .gremove {
+  border: none; background: none; color: var(--text-muted);
+  cursor: pointer; font-size: 1.05rem; line-height: 1; padding: 2px 6px;
+}
+.lineup-group-head .gremove:hover { color: var(--error); }
+
+/* Artist rows */
+.artist-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  border-top: 1px solid var(--border);
+}
+.artist-row:first-of-type { border-top: none; }
+.artist-row input[type="checkbox"] {
+  width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--primary);
+}
+.artist-row .aname { flex: 1; min-width: 0; }
+.artist-row .aname .n { font-weight: 500; }
+.artist-row .aname .m { color: var(--text-muted); font-size: 0.78rem; margin-left: 6px; }
+.artist-row.excluded .aname .n { text-decoration: line-through; color: var(--text-muted); }
+.artist-row .extag {
+  font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--error); border: 1px solid var(--error); border-radius: var(--radius-full);
+  padding: 1px 8px; white-space: nowrap;
+}
+.artist-row .aremove {
+  border: none; background: none; color: var(--text-muted);
+  cursor: pointer; font-size: 1.05rem; line-height: 1; padding: 2px 6px;
+}
+.artist-row .aremove:hover { color: var(--error); }
+
+/* Artist search picker */
+.picker { position: relative; }
+.picker-dropdown {
+  position: absolute;
+  z-index: 20;
+  left: 0; right: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+  margin-top: 4px;
+  overflow: hidden;
+}
+.picker-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.picker-item:last-child { border-bottom: none; }
+.picker-item:hover, .picker-item.active { background: var(--primary-subtle); }
+.picker-item .pname { font-weight: 500; }
+.picker-item .pmeta { font-size: 0.78rem; color: var(--text-muted); }
+.picker-item .ptag {
+  font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: var(--radius-full); padding: 2px 8px; white-space: nowrap;
+}
+.picker-item .ptag.lib { color: var(--success); border-color: var(--success); }
+.picker-empty { padding: var(--space-sm) var(--space-md); color: var(--text-muted); font-size: 0.85rem; }
+
+/* Parameter sliders */
+.param { margin-bottom: var(--space-lg); }
+.param .prow {
+  display: grid;
+  grid-template-columns: 8rem 1fr 2.5rem 8rem;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.param .prow small { white-space: nowrap; }
+.param .prow .val { text-align: center; font-weight: 700; }
+
+@media (max-width: 600px) {
+  .param .prow { grid-template-columns: 1fr 2.5rem; }
+  .param .prow .lbl-lo { grid-row: 2; }
+  .param .prow .lbl-hi { grid-row: 2; text-align: right; }
+}

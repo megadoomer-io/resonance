@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import uuid
 from typing import Annotated
 
@@ -12,6 +13,7 @@ import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
+import resonance.api.v1.generators as generators_api
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
 import resonance.models.generator as generator_models
@@ -141,15 +143,20 @@ async def playlists_page(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/playlists/new", response_model=None)
-async def new_playlist_page(
+async def _new_playlist_context(
     request: fastapi.Request,
-    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
-    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-    event_id: str = "",
-    type: str = "",
-) -> fastapi.responses.HTMLResponse:
-    """Render the New Playlist form."""
+    db: sa_async.AsyncSession,
+    *,
+    selected_event_id: str = "",
+    selected_type: str = "",
+    error: str | None = None,
+) -> dict[str, object]:
+    """Build the template context for the lineup builder (GET and error re-render).
+
+    The builder fetches an event's artists and searches artists live via the API,
+    so the page only needs the upcoming-events list for the "Add event" dropdown
+    plus the parameter and generator-type registries.
+    """
     import resonance.generators.parameters as params_module
 
     events_result = await db.execute(
@@ -169,10 +176,61 @@ async def new_playlist_page(
         events=events,
         generator_types=params_module.GENERATOR_TYPE_CONFIG,
         parameters=params_module.PARAMETER_REGISTRY,
-        selected_event_id=event_id,
-        selected_type=type or "",
+        selected_event_id=selected_event_id,
+        selected_type=selected_type or "",
+        error=error,
     )
+    return ctx
 
+
+async def _default_playlist_name(
+    db: sa_async.AsyncSession, input_references: dict[str, object]
+) -> str:
+    """Derive a playlist name when the user leaves it blank.
+
+    Names from the first event source's event (the common concert-prep case),
+    otherwise falls back to a timestamped label.
+    """
+    sources = input_references.get("sources")
+    first_event_id: str | None = None
+    if isinstance(sources, list):
+        for source in sources:
+            if isinstance(source, dict) and source.get("kind") == "event":
+                event_id = source.get("event_id")
+                if event_id:
+                    first_event_id = str(event_id)
+                    break
+
+    if first_event_id is not None:
+        try:
+            event = await db.get(concert_models.Event, uuid.UUID(first_event_id))
+        except ValueError:
+            event = None
+        if event is not None:
+            venue = (
+                await db.get(concert_models.Venue, event.venue_id)
+                if (event.venue_id)
+                else None
+            )
+            venue_str = f" @ {venue.name}" if venue else ""
+            return f"Concert Prep: {event.title}{venue_str}"
+
+    now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M")
+    return f"Playlist {now_str}"
+
+
+@router.get("/playlists/new", response_model=None)
+async def new_playlist_page(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    event_id: str = "",
+    type: str = "",
+) -> fastapi.responses.HTMLResponse:
+    """Render the lineup builder (New Playlist) page."""
+    ctx = await _new_playlist_context(
+        request, db, selected_event_id=event_id, selected_type=type
+    )
     return common.templates.TemplateResponse(request, "playlists_new.html", ctx)
 
 
@@ -181,40 +239,57 @@ async def create_playlist(
     request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-) -> fastapi.responses.RedirectResponse:
-    """Handle New Playlist form submission."""
+) -> fastapi.responses.Response:
+    """Handle lineup builder submission.
+
+    The builder serializes the lineup into a single ``input_references_json``
+    hidden field carrying the layered source spec
+    (``{"sources": [...], "exclude_artist_ids": [...]}``). This replaces the old
+    single-event ``{"event_id": ...}`` shape (#128). Validation reuses the same
+    ``validate_profile_inputs`` path as the JSON API so the UI and CLI/API agree
+    on what a valid pool is.
+    """
     form = await request.form()
 
-    gen_type = str(form.get("generator_type", ""))
-    event_id_str = str(form.get("event_id", ""))
-    max_tracks = int(str(form.get("max_tracks", "30")))
+    gen_type = str(form.get("generator_type", "") or "concert_prep")
+    max_tracks = int(str(form.get("max_tracks", "30")) or "30")
     name = str(form.get("name", "")).strip()
+    raw_json = str(form.get("input_references_json", "")).strip()
 
     param_values: dict[str, int] = {}
     for key, val in form.items():
         if key.startswith("param_"):
-            param_name = key[6:]
-            param_values[param_name] = int(str(val))
+            param_values[key[6:]] = int(str(val))
+
+    try:
+        gen_type_enum = types_module.GeneratorType(gen_type)
+    except ValueError:
+        gen_type_enum = types_module.GeneratorType.CONCERT_PREP
+
+    try:
+        parsed = json.loads(raw_json) if raw_json else {}
+    except json.JSONDecodeError:
+        parsed = None
+    input_references: dict[str, object] = parsed if isinstance(parsed, dict) else {}
+
+    try:
+        generators_api.validate_profile_inputs(input_references, gen_type_enum)
+    except ValueError as exc:
+        ctx = await _new_playlist_context(
+            request, db, selected_type=gen_type, error=str(exc)
+        )
+        return common.templates.TemplateResponse(
+            request, "playlists_new.html", ctx, status_code=400
+        )
 
     if not name:
-        event_result = await db.execute(
-            sa.select(concert_models.Event)
-            .where(concert_models.Event.id == uuid.UUID(event_id_str))
-            .options(sa_orm.joinedload(concert_models.Event.venue))
-        )
-        event = event_result.unique().scalar_one_or_none()
-        if event:
-            venue_str = f" @ {event.venue.name}" if event.venue else ""
-            name = f"Concert Prep: {event.title}{venue_str}"
-        else:
-            now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M")
-            name = f"Playlist {now_str}"
+        name = await _default_playlist_name(db, input_references)
 
     profile = generator_models.GeneratorProfile(
         user_id=user_id,
         name=name,
-        generator_type=types_module.GeneratorType(gen_type),
-        input_references={"event_id": event_id_str},
+        generator_type=gen_type_enum,
+        input_references=input_references,
         parameter_values=param_values,
     )
     db.add(profile)

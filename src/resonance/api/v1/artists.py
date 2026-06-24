@@ -30,6 +30,27 @@ def _escape_ilike(q: str) -> str:
     return q.replace("%", r"\%").replace("_", r"\_")
 
 
+async def artists_in_library(
+    db: sa_async.AsyncSession, artist_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Return the subset of ``artist_ids`` we have catalog tracks for.
+
+    Used as a lightweight "in library" signal in pickers: an artist we have
+    tracks for is far more likely to be the one the user means than a cold
+    external match of the same name. This is the disambiguation aid behind the
+    lineup builder's artist picker (#136 — ambiguous short names like "nite"
+    resolving to the wrong artist).
+    """
+    if not artist_ids:
+        return set()
+    result = await db.execute(
+        sa.select(music_models.Track.artist_id)
+        .where(music_models.Track.artist_id.in_(artist_ids))
+        .distinct()
+    )
+    return set(result.scalars().all())
+
+
 def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
     return {
         "id": str(artist.id),
@@ -97,7 +118,13 @@ async def search_artists(
     )
     result = await db.execute(stmt)
     artists = list(result.scalars().all())
-    return {"items": [_format_artist_summary(a) for a in artists]}
+    in_library = await artists_in_library(db, [a.id for a in artists])
+    items = []
+    for a in artists:
+        summary = _format_artist_summary(a)
+        summary["in_library"] = a.id in in_library
+        items.append(summary)
+    return {"items": items}
 
 
 @router.get(
