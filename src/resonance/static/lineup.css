@@ -108,20 +108,31 @@
 .picker-item .ptag.lib { color: var(--success); border-color: var(--success); }
 .picker-empty { padding: var(--space-sm) var(--space-md); color: var(--text-muted); font-size: 0.85rem; }
 
-/* Parameter sliders */
+/* Parameter sliders — mobile-first stacked layout that never overflows.
+ * Label row (name + description) → full-width slider → low/value/high scale row. */
 .param { margin-bottom: var(--space-lg); }
-.param .prow {
-  display: grid;
-  grid-template-columns: 8rem 1fr 2.5rem 8rem;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.25rem;
+.param-head { margin-bottom: var(--space-2xs); }
+.param-head strong { font-weight: 700; }
+.param input[type="range"] {
+  display: block;
+  width: 100%;
+  margin: 0;
 }
-.param .prow small { white-space: nowrap; }
-.param .prow .val { text-align: center; font-weight: 700; }
-
-@media (max-width: 600px) {
-  .param .prow { grid-template-columns: 1fr 2.5rem; }
-  .param .prow .lbl-lo { grid-row: 2; }
-  .param .prow .lbl-hi { grid-row: 2; text-align: right; }
+.slider-scale {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-sm);
+  margin-top: var(--space-2xs);
+  font-size: 0.78rem;
+}
+.slider-scale small { color: var(--text-muted); }
+.slider-scale .lbl-lo { text-align: left; }
+.slider-scale .lbl-hi { text-align: right; }
+.slider-scale .val {
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  flex: none;
 }

@@ -50,13 +50,15 @@
         <header>Parameters</header>
         {% for name, param in parameters.items() %}
         <div class="param">
-            <strong>{{ param.display_name }}</strong>
-            <small class="lineup-hint" style="margin-left: 0.5rem;">{{ param.description }}</small>
-            <div class="prow">
-                <small class="lbl-lo" style="text-align: right;">{{ param.labels[0] }}</small>
-                <input type="range" name="param_{{ name }}" min="0" max="100"
-                       value="{{ param.default_value }}" style="margin: 0;"
-                       oninput="this.parentElement.querySelector('.val').textContent = this.value">
+            <div class="param-head">
+                <strong>{{ param.display_name }}</strong>
+                <small class="lineup-hint">{{ param.description }}</small>
+            </div>
+            <input type="range" name="param_{{ name }}" min="0" max="100"
+                   value="{{ param.default_value }}"
+                   oninput="this.parentElement.querySelector('.val').textContent = this.value">
+            <div class="slider-scale">
+                <small class="lbl-lo">{{ param.labels[0] }}</small>
                 <small class="val">{{ param.default_value }}</small>
                 <small class="lbl-hi">{{ param.labels[1] }}</small>
             </div>
