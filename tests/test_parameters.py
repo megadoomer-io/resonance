@@ -30,10 +30,17 @@ class TestGeneratorTypeConfig:
         assert "familiarity" in config.featured_parameters
         assert "hit_depth" in config.featured_parameters
 
-    def test_concert_prep_required_inputs(self) -> None:
+    def test_concert_prep_no_legacy_required_key(self) -> None:
+        # Pool sufficiency is structural now (#128): concert_prep no longer
+        # hard-requires the legacy "event_id" key.
         gen_type = types_module.GeneratorType.CONCERT_PREP
         config = params_module.GENERATOR_TYPE_CONFIG[gen_type]
-        assert "event_id" in config.required_inputs
+        assert config.required_inputs == frozenset()
+
+    def test_concert_prep_seeds_from_event(self) -> None:
+        gen_type = types_module.GeneratorType.CONCERT_PREP
+        config = params_module.GENERATOR_TYPE_CONFIG[gen_type]
+        assert config.default_pool_seed == "event"
 
 
 class TestApplyDefaults:

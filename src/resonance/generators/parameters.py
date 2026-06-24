@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
+import resonance.generators.pool as pool_module
 import resonance.types as types_module
 
 
@@ -21,11 +22,29 @@ class ParameterDefinition:
 
 @dataclasses.dataclass(frozen=True)
 class GeneratorTypeConfig:
-    """Configuration for a generator type."""
+    """Configuration / preset for a generator type.
+
+    A generator type is a *preset* over the single generation engine, not a
+    distinct engine (#128). It declares which parameters the UI features, the
+    default parameter values and default pool seed a new profile of this type
+    starts from, and a human description.
+
+    ``required_inputs`` is retained for any type that still wants a specific key
+    present, but pool sufficiency is now enforced structurally (a non-empty set of
+    enabled sources) rather than by a hard-coded key like ``event_id`` -- see
+    ``api.v1.generators.validate_profile_inputs``.
+    """
 
     featured_parameters: frozenset[str]
     required_inputs: frozenset[str]
     description: str
+    # Parameter values a new profile of this type starts from (overrides registry
+    # defaults). Empty means "use the registry defaults".
+    default_param_values: dict[str, int] = dataclasses.field(default_factory=dict)
+    # The source kind a new profile of this type seeds its pool from (e.g. an
+    # event for concert prep). None means no default seed -- the caller supplies
+    # sources. Value is a ``pool.PoolSourceKind``.
+    default_pool_seed: str | None = None
 
 
 PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
@@ -62,8 +81,12 @@ PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
 GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
     types_module.GeneratorType.CONCERT_PREP: GeneratorTypeConfig(
         featured_parameters=frozenset({"familiarity", "hit_depth"}),
-        required_inputs=frozenset({"event_id"}),
+        # Pool sufficiency is checked structurally now (#128); concert_prep no
+        # longer hard-requires the legacy "event_id" key -- it seeds from an event
+        # source by default but accepts any non-empty pool.
+        required_inputs=frozenset(),
         description="Generate a playlist to prepare for a concert",
+        default_pool_seed=pool_module.PoolSourceKind.EVENT.value,
     ),
 }
 
