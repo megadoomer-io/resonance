@@ -12,6 +12,7 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 import structlog
 
+import resonance.api.v1.artists as artists_api
 import resonance.dependencies as deps_module
 import resonance.models.concert as concert_models
 import resonance.models.music as music_models
@@ -92,6 +93,92 @@ async def list_events(
         "page_size": _PAGE_SIZE,
         "has_next": has_next,
     }
+
+
+@router.get(
+    "/{event_id}/lineup",
+    summary="Resolve an event's lineup to artists",
+    description=(
+        "Return the artists an event resolves to (confirmed lineup plus accepted"
+        " candidate matches), with disambiguation metadata and an in-library flag."
+        " Powers the playlist lineup builder's 'Add event' action so each artist"
+        " can be individually included or excluded."
+    ),
+)
+async def event_lineup(
+    event_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    """Resolve an event's lineup to displayable artists for the lineup builder.
+
+    Mirrors the event-resolution that ``worker.resolve_pool`` performs (confirmed
+    ``EventArtist`` rows plus accepted ``EventArtistCandidate`` matches), but
+    returns full artist summaries so the builder can list each artist with an
+    include/exclude toggle.
+
+    Args:
+        event_id: The event to resolve.
+        user_id: The authenticated user's ID.
+        db: The async database session.
+
+    Returns:
+        A dict with the event id and an ordered, deduplicated ``artists`` list.
+
+    Raises:
+        HTTPException: 404 if the event does not exist.
+    """
+    event = await db.get(concert_models.Event, event_id)
+    if event is None:
+        raise fastapi.HTTPException(status_code=404, detail="Event not found")
+
+    # Confirmed lineup first, then accepted candidate matches (mirrors resolve_pool).
+    ea_result = await db.execute(
+        sa.select(concert_models.EventArtist.artist_id).where(
+            concert_models.EventArtist.event_id == event_id
+        )
+    )
+    ordered_ids: list[uuid.UUID] = list(ea_result.scalars().all())
+
+    cand_result = await db.execute(
+        sa.select(concert_models.EventArtistCandidate.matched_artist_id).where(
+            concert_models.EventArtistCandidate.event_id == event_id,
+            concert_models.EventArtistCandidate.status
+            == types_module.CandidateStatus.ACCEPTED,
+            concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
+        )
+    )
+    for cand_id in cand_result.scalars().all():
+        if cand_id is not None:
+            ordered_ids.append(cand_id)
+
+    # Dedup preserving first-seen order.
+    seen: set[uuid.UUID] = set()
+    unique_ids: list[uuid.UUID] = []
+    for aid in ordered_ids:
+        if aid not in seen:
+            seen.add(aid)
+            unique_ids.append(aid)
+
+    if not unique_ids:
+        return {"event_id": str(event_id), "artists": []}
+
+    artist_result = await db.execute(
+        sa.select(music_models.Artist).where(music_models.Artist.id.in_(unique_ids))
+    )
+    artist_map = {a.id: a for a in artist_result.scalars().all()}
+    in_library = await artists_api.artists_in_library(db, unique_ids)
+
+    artists: list[dict[str, Any]] = []
+    for aid in unique_ids:
+        artist = artist_map.get(aid)
+        if artist is None:
+            continue
+        summary = artists_api._format_artist_summary(artist)
+        summary["in_library"] = aid in in_library
+        artists.append(summary)
+
+    return {"event_id": str(event_id), "artists": artists}
 
 
 @router.get(
