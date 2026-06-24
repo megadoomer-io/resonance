@@ -165,9 +165,13 @@ function relatedGroupHtml(g) {
       '" title="Re-run this set">↻ replace</button>'
     : "";
   // Related groups render collapsed by default (core-first hierarchy); native
-  // <details> handles the toggle accessibly.
+  // <details> handles the toggle accessibly. The data-group-key lets render()
+  // preserve each group's open/closed state across re-renders (so toggling a
+  // checkbox inside a group doesn't snap it shut).
   return (
-    '<details class="lineup-group related">' +
+    '<details class="lineup-group related" data-group-key="' +
+    escapeHtml(key) +
+    '">' +
     '<summary class="lineup-group-head">' +
     '<span><span class="gtitle">' +
     escapeHtml(g.title) +
@@ -188,6 +192,13 @@ function relatedGroupHtml(g) {
 }
 
 function render() {
+  // Preserve which related groups are expanded so a re-render (e.g. after a
+  // checkbox toggle) doesn't collapse them back to their default-closed state.
+  const openKeys = new Set();
+  for (const d of groupsEl.querySelectorAll("details[data-group-key]")) {
+    if (d.open) openKeys.add(d.getAttribute("data-group-key"));
+  }
+
   let html = "";
   // Core (event + manual) first, then related groups (collapsed).
   for (const g of state.groups) {
@@ -200,6 +211,10 @@ function render() {
     if (g.kind === "related") html += relatedGroupHtml(g);
   }
   groupsEl.innerHTML = html;
+
+  for (const d of groupsEl.querySelectorAll("details[data-group-key]")) {
+    if (openKeys.has(d.getAttribute("data-group-key"))) d.open = true;
+  }
   if (emptyEl) emptyEl.hidden = !isEmpty(state.groups);
 }
 
