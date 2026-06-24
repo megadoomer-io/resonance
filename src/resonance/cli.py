@@ -66,7 +66,11 @@ async def _set_role(user_id_str: str, role_str: str) -> None:
 # ---------------------------------------------------------------------------
 
 _USAGE = """\
-Usage: resonance-api <command> [args]
+Usage: resonance-api [--as-user <id>] <command> [args]
+
+Global flags:
+  --as-user <id>               Assume a user identity on user-scoped endpoints
+                               (admin token only; for agent live testing)
 
 Commands:
   healthz                      Health + deployed revision
@@ -120,11 +124,17 @@ def _api_request(
     """Make an authenticated API request."""
     base_url, token = _get_api_config()
     url = f"{base_url}{path}"
+    headers = {"Authorization": f"Bearer {token}"}
+    # Assume a user identity for user-scoped endpoints (#135). Set via the
+    # global --as-user flag or RESONANCE_ASSUME_USER. Requires the admin token.
+    assume_user = os.environ.get("RESONANCE_ASSUME_USER")
+    if assume_user:
+        headers["X-Assume-User"] = assume_user
     try:
         response = httpx.request(
             method,
             url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
             timeout=timeout,
             follow_redirects=True,
             **kwargs,  # type: ignore[arg-type]
@@ -959,6 +969,9 @@ def _cmd_api() -> None:
     base_url, token = _get_api_config()
     url = f"{base_url}{path}"
     headers = {"Authorization": f"Bearer {token}"}
+    assume_user = os.environ.get("RESONANCE_ASSUME_USER")
+    if assume_user:
+        headers["X-Assume-User"] = assume_user
     headers.update(extra_headers)
 
     kwargs: dict[str, object] = {}
@@ -1162,8 +1175,31 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
 }
 
 
+def _extract_as_user() -> None:
+    """Strip a global ``--as-user <id>`` flag from argv into the environment.
+
+    Commands parse ``sys.argv`` positionally, so the flag is pulled out before
+    dispatch and surfaced to ``_api_request`` via ``RESONANCE_ASSUME_USER``.
+    Supports both ``--as-user <id>`` and ``--as-user=<id>``.
+    """
+    argv = sys.argv
+    for i, arg in enumerate(argv[1:], start=1):
+        if arg == "--as-user":
+            if i + 1 >= len(argv):
+                print("Error: --as-user requires a user id")
+                sys.exit(1)
+            os.environ["RESONANCE_ASSUME_USER"] = argv[i + 1]
+            del argv[i : i + 2]
+            return
+        if arg.startswith("--as-user="):
+            os.environ["RESONANCE_ASSUME_USER"] = arg.split("=", 1)[1]
+            del argv[i]
+            return
+
+
 def api() -> None:
     """Entry point for ``resonance-api <command> [args]``."""
+    _extract_as_user()
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
         print(_USAGE)
         sys.exit(0 if len(sys.argv) >= 2 else 1)

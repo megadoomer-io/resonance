@@ -150,6 +150,10 @@ uv run resonance-api playlist <playlist-id>     # Show playlist details
 uv run resonance-api import concert_archives --file <path> [--export-date YYYY-MM-DD] [--wait]
 uv run resonance-api api [METHOD] PATH [-d DATA] [-H HDR]  # Raw API request
 uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
+
+# Global flag: --as-user <id> assumes a user identity on user-scoped endpoints
+# (admin token only; for agent live testing). Sends the X-Assume-User header.
+uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d '{...}'
 ```
 
 ### CLI Testing Guidelines
@@ -204,6 +208,7 @@ App config is loaded via Pydantic `Settings`. Key variables:
 - `MUSICBRAINZ_CLIENT_ID`, `MUSICBRAINZ_CLIENT_SECRET` — MusicBrainz OAuth credentials (for ListenBrainz)
 - `LASTFM_API_KEY`, `LASTFM_SHARED_SECRET` — Last.fm API credentials
 - `ADMIN_API_TOKEN` — Bearer token for admin API access (CLI and programmatic use)
+- `ADMIN_ASSUME_USER_ENABLED` — when true (default), the admin token may assume a user identity on user-scoped endpoints via the `X-Assume-User` header or `?as_user=` query param (agent-first live testing, #135). Every assumption is audit-logged. Set false to disable.
 - `DEX_CLIENT_ID`, `DEX_CLIENT_SECRET` — Dex OIDC credentials (for GitHub login via Dex broker)
 - `DEX_ISSUER_URL` — Dex issuer URL (e.g., `https://dex.megadoomer.io`). When empty, the GitHub connector is not registered and the login button does not appear.
 

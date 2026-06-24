@@ -6,14 +6,19 @@ import uuid
 from typing import TYPE_CHECKING, Annotated
 
 import fastapi
+import sqlalchemy as sa
+import structlog
 
 import resonance.middleware.session as session_module
+import resonance.models.user as user_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     import sqlalchemy.ext.asyncio as sa_async
+
+logger = structlog.get_logger()
 
 
 def get_session(request: fastapi.Request) -> session_module.SessionData:
@@ -31,34 +36,93 @@ async def get_db(request: fastapi.Request) -> AsyncIterator[sa_async.AsyncSessio
         yield db
 
 
+def _assume_user_selector(request: fastapi.Request) -> str | None:
+    """Return the requested assume-user identity, if any.
+
+    Honors the ``X-Assume-User`` header first, then the ``?as_user=`` query
+    param. Returns None when neither is present.
+    """
+    header = request.headers.get("x-assume-user")
+    if header:
+        return header
+    query = request.query_params.get("as_user")
+    return query or None
+
+
+async def _resolve_assumed_user(request: fastapi.Request, selector: str) -> uuid.UUID:
+    """Resolve an admin-token assume-user selector to a real user ID.
+
+    Args:
+        request: The incoming request (for settings + DB factory + path).
+        selector: The requested user identity (a UUID string).
+
+    Returns:
+        The assumed user's UUID.
+
+    Raises:
+        HTTPException: 403 if assume-user is disabled, 400 if the selector is
+            not a UUID, 404 if no such user exists.
+    """
+    settings = request.app.state.settings
+    if not settings.admin_assume_user_enabled:
+        raise fastapi.HTTPException(status_code=403, detail="Assume-user is disabled")
+    try:
+        assumed_id = uuid.UUID(selector)
+    except ValueError as exc:
+        raise fastapi.HTTPException(
+            status_code=400, detail="Invalid assume-user identity"
+        ) from exc
+
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        result = await db.execute(
+            sa.select(user_models.User.id).where(user_models.User.id == assumed_id)
+        )
+        found = result.scalar_one_or_none()
+    if found is None:
+        raise fastapi.HTTPException(status_code=404, detail="Assumed user not found")
+
+    logger.info(
+        "admin_assume_user",
+        assumed_user_id=str(assumed_id),
+        path=request.url.path,
+    )
+    return assumed_id
+
+
 async def get_current_user_id(
     request: fastapi.Request,
     session: Annotated[session_module.SessionData, fastapi.Depends(get_session)],
 ) -> uuid.UUID:
     """Extract the authenticated user ID from the session or bearer token.
 
-    Checks session first. If no session, checks for a valid admin API
-    token and resolves to the owner user.
+    Checks session first. If no session, checks for a valid admin API token.
+    A valid admin token resolves to the owner user, unless the request carries
+    an assume-user selector (``X-Assume-User`` header or ``?as_user=`` query
+    param), in which case it resolves to that user instead (#135). Assume-user
+    is gated by ``admin_assume_user_enabled`` and audit-logged.
 
     Raises:
-        HTTPException: 401 if not authenticated.
+        HTTPException: 401 if not authenticated; 403 if assume-user is disabled
+            or the token is invalid; 400 for a malformed selector; 404 if the
+            assumed user does not exist.
     """
     # 1. Try session auth
     user_id = session.get("user_id")
     if user_id is not None:
         return uuid.UUID(user_id)
 
-    # 2. Try bearer token → resolve to owner user
+    # 2. Try bearer token → assumed user (if selected) or owner
     auth_header = request.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         settings = request.app.state.settings
         if settings.admin_api_token and token == settings.admin_api_token:
-            # Look up the owner user
-            import sqlalchemy as sa
+            selector = _assume_user_selector(request)
+            if selector is not None:
+                return await _resolve_assumed_user(request, selector)
 
-            import resonance.models.user as user_models
-
+            # Default: resolve to the owner user
             factory = request.app.state.session_factory
             async with factory() as db:
                 result = await db.execute(

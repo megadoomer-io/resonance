@@ -56,6 +56,13 @@ class Settings(pydantic_settings.BaseSettings):
     # Admin API token (for CLI/programmatic access)
     admin_api_token: str = ""
 
+    # Allow the admin token to assume a user identity on user-scoped endpoints
+    # (X-Assume-User header / ?as_user=) for agent-first live testing (#135).
+    # The admin token is already omnipotent, so this is not a privilege
+    # escalation; the flag exists so it can be disabled. Every assumption is
+    # audit-logged regardless.
+    admin_assume_user_enabled: bool = True
+
     # Dex OIDC (GitHub identity via Dex broker)
     dex_client_id: str = ""
     dex_client_secret: str = ""

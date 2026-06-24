@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -492,3 +493,76 @@ class TestParsePoolSources:
     def test_related_non_integer_exits(self) -> None:
         with pytest.raises(SystemExit):
             cli_module._parse_pool_sources(["--source", "related:lots"])
+
+
+class TestApiCommandAsUser:
+    """The global --as-user flag sends X-Assume-User and is stripped from argv."""
+
+    _UID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_as_user_space_form_sets_header(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_request(m: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["headers"] = kwargs.get("headers", {})
+            captured["url"] = url
+            return _fake_response(json_body={})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "--as-user", self._UID, "api", "/healthz"]
+        )
+        try:
+            cli_module.api()
+        finally:
+            monkeypatch.delenv("RESONANCE_ASSUME_USER", raising=False)
+
+        assert captured["headers"]["X-Assume-User"] == self._UID
+        # Command still parsed correctly after the flag was stripped.
+        assert captured["url"].endswith("/healthz")
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_as_user_equals_form_sets_header(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_request(m: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["headers"] = kwargs.get("headers", {})
+            return _fake_response(json_body={})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", f"--as-user={self._UID}", "api", "/healthz"]
+        )
+        try:
+            cli_module.api()
+        finally:
+            monkeypatch.delenv("RESONANCE_ASSUME_USER", raising=False)
+
+        assert captured["headers"]["X-Assume-User"] == self._UID
+
+    def test_extract_strips_argv_and_sets_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "--as-user", self._UID, "status"]
+        )
+        try:
+            cli_module._extract_as_user()
+            assert sys.argv == ["resonance-api", "status"]
+            assert os.environ["RESONANCE_ASSUME_USER"] == self._UID
+        finally:
+            monkeypatch.delenv("RESONANCE_ASSUME_USER", raising=False)
+
+    def test_no_flag_leaves_argv_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("RESONANCE_ASSUME_USER", raising=False)
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "status"])
+        cli_module._extract_as_user()
+        assert sys.argv == ["resonance-api", "status"]
+        assert "RESONANCE_ASSUME_USER" not in os.environ
