@@ -296,3 +296,94 @@ class TestSerialize:
     def test_serialize_input_references_empty(self) -> None:
         stored = pool_module.serialize_input_references([])
         assert stored == {"sources": [], "exclude_artist_ids": []}
+
+
+class TestScopeArtistIds:
+    """scope_artist_ids (#133)."""
+
+    def test_returns_only_matching_scope(self) -> None:
+        a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [
+                pool_module.ArtistSource(artist_id=a, via_seed="lineup"),
+                pool_module.ArtistSource(artist_id=b, via_seed="lineup"),
+                pool_module.ArtistSource(artist_id=c, via_seed=str(a)),
+            ]
+        )
+        assert pool_module.scope_artist_ids(refs, "lineup") == [a, b]
+        assert pool_module.scope_artist_ids(refs, str(a)) == [c]
+
+    def test_ignores_untagged_and_other_kinds(self) -> None:
+        a = uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [
+                pool_module.ArtistSource(artist_id=a),  # via_seed=None
+                pool_module.EventSource(event_id=uuid.uuid4()),
+            ]
+        )
+        assert pool_module.scope_artist_ids(refs, "lineup") == []
+
+
+class TestReplaceViaSeedSources:
+    """replace_via_seed_sources (#133)."""
+
+    def test_appends_new_scope_sources(self) -> None:
+        core = uuid.uuid4()
+        n1, n2 = uuid.uuid4(), uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [pool_module.ArtistSource(artist_id=core)]
+        )
+        out = pool_module.replace_via_seed_sources(refs, "lineup", [n1, n2])
+        sources = pool_module.normalize_sources(out)
+        assert pool_module.ArtistSource(artist_id=core, via_seed=None) in sources
+        assert pool_module.ArtistSource(artist_id=n1, via_seed="lineup") in sources
+        assert pool_module.ArtistSource(artist_id=n2, via_seed="lineup") in sources
+
+    def test_replaces_only_target_scope(self) -> None:
+        seed_a = uuid.uuid4()
+        old_lineup = uuid.uuid4()
+        other_scope = uuid.uuid4()
+        new = uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [
+                pool_module.ArtistSource(artist_id=old_lineup, via_seed="lineup"),
+                pool_module.ArtistSource(artist_id=other_scope, via_seed=str(seed_a)),
+            ]
+        )
+        out = pool_module.replace_via_seed_sources(refs, "lineup", [new])
+        ids_by_scope = {
+            s.via_seed: s.artist_id
+            for s in pool_module.normalize_sources(out)
+            if isinstance(s, pool_module.ArtistSource)
+        }
+        assert ids_by_scope["lineup"] == new  # old_lineup dropped
+        assert ids_by_scope[str(seed_a)] == other_scope  # other scope untouched
+
+    def test_empty_new_batch_just_drops_scope(self) -> None:
+        old = uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [pool_module.ArtistSource(artist_id=old, via_seed="lineup")]
+        )
+        out = pool_module.replace_via_seed_sources(refs, "lineup", [])
+        assert pool_module.normalize_sources(out) == []
+
+    def test_preserves_excludes(self) -> None:
+        core = uuid.uuid4()
+        excl = uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [pool_module.ArtistSource(artist_id=core)], [excl]
+        )
+        out = pool_module.replace_via_seed_sources(refs, "lineup", [uuid.uuid4()])
+        assert pool_module.extract_excludes(out) == {excl}
+
+    def test_does_not_mutate_input(self) -> None:
+        core = uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [pool_module.ArtistSource(artist_id=core)]
+        )
+        snapshot = {
+            "sources": list(refs["sources"]),  # type: ignore[arg-type]
+            "exclude_artist_ids": list(refs["exclude_artist_ids"]),  # type: ignore[arg-type]
+        }
+        pool_module.replace_via_seed_sources(refs, "lineup", [uuid.uuid4()])
+        assert refs == snapshot

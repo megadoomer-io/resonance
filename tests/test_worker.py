@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import resonance.generators.pool as pool_module
+import resonance.models.generator as generator_models
 import resonance.models.task as task_module
+import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
 import resonance.types as types_module
@@ -44,7 +47,7 @@ class TestWorkerSettings:
 
     def test_functions_registered(self) -> None:
         funcs = worker_module.WorkerSettings.functions
-        assert len(funcs) == 12
+        assert len(funcs) == 13
         names = {f.name for f in funcs}
         assert names == {
             "plan_sync",
@@ -59,6 +62,7 @@ class TestWorkerSettings:
             "export_playlist",
             "backfill_mbids",
             "backfill_popularity",
+            "enrich_related_artists",
         }
 
     def test_lifecycle_hooks(self) -> None:
@@ -4255,3 +4259,367 @@ class TestResolvePool:
         pool = await worker_module.resolve_pool(session, refs)
 
         assert [r.artist_id for r in pool] == [a1]  # event wins, artist dup dropped
+
+
+# ---------------------------------------------------------------------------
+# Related-artist enrichment (#133)
+# ---------------------------------------------------------------------------
+
+
+def _artist_ns(name: str = "Seed", **over: Any) -> Any:
+    base: dict[str, Any] = {"id": uuid.uuid4(), "name": name, "service_links": {}}
+    base.update(over)
+    return MagicMock(**base)
+
+
+class TestFetchSimilarWithStore:
+    """_fetch_similar_with_store: stored-first, live fallback, refresh-if-old."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_edges_returned_without_live_call(self) -> None:
+        now = datetime.datetime.now(datetime.UTC)
+        artist = _artist_ns()
+        connector = AsyncMock()
+        connector.service_type = types_module.ServiceType.LISTENBRAINZ
+        row = MagicMock(neighbor_name="Elder", neighbor_mbid="m1", fetched_at=now)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [row]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        out = await worker_module._fetch_similar_with_store(
+            session, connector, artist, limit=30, now=now
+        )
+
+        assert out == [{"name": "Elder", "mbid": "m1"}]
+        connector.get_similar_artists.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_miss_fetches_live_and_records_named_only(self) -> None:
+        now = datetime.datetime.now(datetime.UTC)
+        artist = _artist_ns()
+        connector = AsyncMock()
+        connector.service_type = types_module.ServiceType.LISTENBRAINZ
+        connector.get_similar_artists.return_value = [
+            {"name": "Elder", "mbid": "m1"},
+            {"name": "", "mbid": "skip"},  # nameless -> not recorded
+        ]
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []  # no stored edges
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        out = await worker_module._fetch_similar_with_store(
+            session, connector, artist, limit=30, now=now
+        )
+
+        connector.get_similar_artists.assert_awaited_once()
+        assert out == [{"name": "Elder", "mbid": "m1"}, {"name": "", "mbid": "skip"}]
+        added = [c.args[0] for c in session.add.call_args_list]
+        assert len(added) == 1  # only the named neighbor recorded
+        assert isinstance(added[0], taste_models.ArtistSimilarity)
+        assert added[0].neighbor_name == "Elder"
+        assert added[0].rank == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_edges_trigger_refetch(self) -> None:
+        now = datetime.datetime.now(datetime.UTC)
+        stale = now - datetime.timedelta(days=60)
+        artist = _artist_ns()
+        connector = AsyncMock()
+        connector.service_type = types_module.ServiceType.LISTENBRAINZ
+        connector.get_similar_artists.return_value = [{"name": "Fresh", "mbid": "m2"}]
+        row = MagicMock(neighbor_name="Old", neighbor_mbid="m1", fetched_at=stale)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [row]
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        out = await worker_module._fetch_similar_with_store(
+            session, connector, artist, limit=30, now=now
+        )
+
+        connector.get_similar_artists.assert_awaited_once()
+        assert out == [{"name": "Fresh", "mbid": "m2"}]
+
+
+class TestCollectRelated:
+    """_collect_related: early-stop, library-first, import top-up."""
+
+    @pytest.mark.asyncio
+    async def test_early_stops_when_library_target_met(self) -> None:
+        a, b = uuid.uuid4(), uuid.uuid4()
+        seeds = [_artist_ns("s1"), _artist_ns("s2"), _artist_ns("s3")]
+        resolve = AsyncMock(
+            return_value=worker_module._AdjacentResolution(
+                library_ids=[a, b], import_candidates=[]
+            )
+        )
+        with patch.object(worker_module, "_resolve_adjacent_artists", resolve):
+            out = await worker_module._collect_related(
+                AsyncMock(),
+                [AsyncMock()],
+                None,
+                seeds,
+                set(),
+                2,
+                AsyncMock(),
+                MagicMock(),
+            )
+        assert out == [a, b]
+        resolve.assert_awaited_once()  # stopped after first seed
+
+    @pytest.mark.asyncio
+    async def test_tops_up_from_imports_when_short(self) -> None:
+        a = uuid.uuid4()
+        imp = uuid.uuid4()
+        seeds = [_artist_ns("s1")]
+        resolve = AsyncMock(
+            return_value=worker_module._AdjacentResolution(
+                library_ids=[a], import_candidates=[("New", "mbid-new")]
+            )
+        )
+        imports = AsyncMock(return_value=[imp])
+        lb = AsyncMock()
+        with (
+            patch.object(worker_module, "_resolve_adjacent_artists", resolve),
+            patch.object(worker_module, "_import_adjacent_candidates", imports),
+        ):
+            out = await worker_module._collect_related(
+                AsyncMock(),
+                [AsyncMock()],
+                lb,
+                seeds,
+                set(),
+                3,
+                AsyncMock(),
+                MagicMock(),
+            )
+        assert out == [a, imp]
+        imports.assert_awaited_once()
+        assert imports.await_args.kwargs["limit"] == 2  # 3 target - 1 library
+
+    @pytest.mark.asyncio
+    async def test_no_imports_without_lb_connector(self) -> None:
+        a = uuid.uuid4()
+        seeds = [_artist_ns("s1")]
+        resolve = AsyncMock(
+            return_value=worker_module._AdjacentResolution(
+                library_ids=[a], import_candidates=[("New", "mbid-new")]
+            )
+        )
+        imports = AsyncMock()
+        with (
+            patch.object(worker_module, "_resolve_adjacent_artists", resolve),
+            patch.object(worker_module, "_import_adjacent_candidates", imports),
+        ):
+            out = await worker_module._collect_related(
+                AsyncMock(),
+                [AsyncMock()],
+                None,
+                seeds,
+                set(),
+                3,
+                AsyncMock(),
+                MagicMock(),
+            )
+        assert out == [a]
+        imports.assert_not_awaited()
+
+
+def _enrich_ctx(session: AsyncMock, *, has_similar: bool = True) -> dict[str, Any]:
+    registry = MagicMock()
+    registry.get_by_capability.return_value = [AsyncMock()] if has_similar else []
+    registry.get_base_connector.return_value = AsyncMock()
+    return {
+        "session_factory": _mock_session_factory(session),
+        "settings": MagicMock(),
+        "connector_registry": registry,
+        "strategies": {},
+        "redis": AsyncMock(),
+    }
+
+
+def _enrich_task(params: dict[str, Any]) -> task_module.Task:
+    return task_module.Task(
+        user_id=uuid.uuid4(),
+        task_type=types_module.TaskType.RELATED_ARTIST_ENRICHMENT,
+        status=types_module.SyncStatus.PENDING,
+        params=params,
+    )
+
+
+class TestEnrichRelatedArtists:
+    """enrich_related_artists orchestration."""
+
+    @pytest.mark.asyncio
+    async def test_task_not_found_returns(self) -> None:
+        session = AsyncMock()
+        load = MagicMock()
+        load.scalar_one_or_none.return_value = None
+        session.execute.return_value = load
+        await worker_module.enrich_related_artists(
+            _enrich_ctx(session), str(uuid.uuid4())
+        )
+        session.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_profile_not_found_fails(self) -> None:
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+        )
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = None
+        session.execute.side_effect = [task_res, profile_res]
+        await worker_module.enrich_related_artists(
+            _enrich_ctx(session), str(task.id or uuid.uuid4())
+        )
+        assert task.status == types_module.SyncStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_no_connector_completes_with_message(self) -> None:
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=uuid.uuid4())]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+        )
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = []
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+        with patch.object(worker_module, "resolve_pool", AsyncMock(return_value=[])):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session, has_similar=False), str(task.id or uuid.uuid4())
+            )
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result["found"] == 0
+        assert task.result["message"] == "no connector connected"
+
+    @pytest.mark.asyncio
+    async def test_lineup_success_replaces_scope(self) -> None:
+        core_id = uuid.uuid4()
+        new1, new2 = uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=core_id)]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+        )
+        core_artist = _artist_ns("Core", id=core_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [core_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[new1, new2])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=core_id, via=pool_module.PoolProvenance.ARTIST
+                        )
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result["found"] == 2
+        assert task.progress_total == 5
+        assert task.progress_current == 2
+        # Lineup scope now holds the two discovered artists; core preserved.
+        sources = pool_module.normalize_sources(profile.input_references)
+        lineup_ids = {
+            s.artist_id
+            for s in sources
+            if isinstance(s, pool_module.ArtistSource) and s.via_seed == "lineup"
+        }
+        assert lineup_ids == {new1, new2}
+        assert pool_module.ArtistSource(artist_id=core_id, via_seed=None) in sources
+        # Seed (core) is excluded from its own neighbor search.
+        assert core_id in collect.await_args.args[4]
+
+    @pytest.mark.asyncio
+    async def test_per_seed_success_tags_each_scope(self) -> None:
+        seed_id = uuid.uuid4()
+        new = uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=seed_id)]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 4}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=seed_id, via=pool_module.PoolProvenance.ARTIST
+                        )
+                    ]
+                ),
+            ),
+            patch.object(
+                worker_module, "_collect_related", AsyncMock(return_value=[new])
+            ),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result["found"] == 1
+        sources = pool_module.normalize_sources(profile.input_references)
+        tagged = {
+            s.artist_id: s.via_seed
+            for s in sources
+            if isinstance(s, pool_module.ArtistSource)
+        }
+        assert tagged[new] == str(seed_id)  # discovered artist tagged by seed
+        assert tagged[seed_id] is None  # original seed untouched

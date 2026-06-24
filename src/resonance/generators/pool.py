@@ -287,3 +287,47 @@ def serialize_input_references(
         "sources": [serialize_source(s) for s in sources],
         "exclude_artist_ids": [str(aid) for aid in exclude_ids],
     }
+
+
+def scope_artist_ids(
+    input_references: Mapping[str, object], scope: str
+) -> list[uuid.UUID]:
+    """Return the artist ids of every ``ArtistSource`` tagged ``via_seed == scope``.
+
+    Used by the enrich worker to know which previously-discovered artists belong
+    to a scope (so they can be re-discovered on replace rather than excluded).
+    """
+    return [
+        s.artist_id
+        for s in normalize_sources(input_references)
+        if isinstance(s, ArtistSource) and s.via_seed == scope
+    ]
+
+
+def replace_via_seed_sources(
+    input_references: Mapping[str, object],
+    scope: str,
+    artist_ids: Sequence[uuid.UUID],
+) -> dict[str, object]:
+    """Replace a scope's discovered artist sources with a fresh batch (#133).
+
+    Drops every ``ArtistSource`` whose ``via_seed == scope``, then appends one
+    enabled ``ArtistSource(via_seed=scope)`` per id in ``artist_ids`` (in order).
+    All other sources (events, manual artists, other scopes) and the global
+    ``exclude_artist_ids`` set are preserved. Pure: returns a new stored
+    ``input_references`` dict, leaving the input untouched.
+
+    This is how per-seed and global enrichment are "batch + replace": re-running a
+    scope removes only that scope's prior discoveries before adding the new ones,
+    so curation in other scopes and the core pool is never disturbed.
+    """
+    kept: list[PoolSource] = [
+        s
+        for s in normalize_sources(input_references)
+        if not (isinstance(s, ArtistSource) and s.via_seed == scope)
+    ]
+    kept.extend(
+        ArtistSource(artist_id=aid, enabled=True, via_seed=scope) for aid in artist_ids
+    )
+    excludes = extract_excludes(input_references)
+    return serialize_input_references(kept, sorted(excludes, key=str))

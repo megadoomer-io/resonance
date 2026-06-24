@@ -14,6 +14,18 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import collections.abc
 
+    # Fetches similar-artist neighbors for one (connector, artist): returns
+    # ``[{"name": str, "mbid": str | None}, ...]``. Injectable so the enrich task
+    # can read/record persistent similarity edges while generation uses the live
+    # connector directly.
+    # Slots are (connector, artist, limit); typed Any here because the artist
+    # model is imported below this block. The concrete fetch functions are fully
+    # typed at their own definitions.
+    NeighborFetch = collections.abc.Callable[
+        [Any, Any, int],
+        collections.abc.Awaitable[list[dict[str, Any]]],
+    ]
+
 import arq
 import arq.connections as arq_connections
 import httpx
@@ -110,6 +122,10 @@ _TASK_DISPATCH: dict[
     ),
     types_module.TaskType.POPULARITY_BACKFILL: (
         "backfill_popularity",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.RELATED_ARTIST_ENRICHMENT: (
+        "enrich_related_artists",
         lambda t: (str(t.id),),
     ),
 }
@@ -1388,6 +1404,19 @@ class _AdjacentResolution:
     import_candidates: list[tuple[str, str]]
 
 
+async def _default_neighbor_fetch(
+    connector: Any, artist: music_models.Artist, limit: int
+) -> list[dict[str, Any]]:
+    """Live similar-artists fetch (no persistence).
+
+    The default for :func:`_resolve_adjacent_artists`; the enrich task injects a
+    store-backed variant (:func:`_fetch_similar_with_store`) instead.
+    """
+    mbid = artist_utils.get_mbid(artist.service_links)
+    result = await connector.get_similar_artists(artist.name, mbid=mbid, limit=limit)
+    return list(result)
+
+
 async def _resolve_adjacent_artists(
     session: sa_async.AsyncSession,
     connectors: collections.abc.Sequence[Any],
@@ -1395,6 +1424,7 @@ async def _resolve_adjacent_artists(
     exclude_ids: set[uuid.UUID],
     *,
     per_artist_limit: int = 30,
+    neighbor_fetch: NeighborFetch | None = None,
 ) -> _AdjacentResolution:
     """Resolve similar artists into library matches AND import candidates.
 
@@ -1415,6 +1445,9 @@ async def _resolve_adjacent_artists(
         target_artists: The event's target (lineup) artists.
         exclude_ids: Artist IDs to exclude (the target set).
         per_artist_limit: Max neighbors to request per target.
+        neighbor_fetch: Optional ``(connector, artist, limit) -> [neighbor]``
+            override. Defaults to a live connector fetch; the enrich task injects
+            a store-backed fetch that reads/records persistent similarity edges.
 
     Returns:
         An ``_AdjacentResolution`` with library IDs and import candidates, both
@@ -1423,13 +1456,11 @@ async def _resolve_adjacent_artists(
     # First-seen order of lowercased neighbor names = approximate similarity
     # rank across providers/targets. Track the original name + best-known MBID
     # per neighbor (a later provider may supply an MBID an earlier one lacked).
+    fetch = neighbor_fetch or _default_neighbor_fetch
     ordered: dict[str, dict[str, str | None]] = {}
     for artist in target_artists:
-        mbid = artist_utils.get_mbid(artist.service_links)
         for connector in connectors:
-            neighbors = await connector.get_similar_artists(
-                artist.name, mbid=mbid, limit=per_artist_limit
-            )
+            neighbors = await fetch(connector, artist, per_artist_limit)
             for neighbor in neighbors:
                 name = neighbor.get("name")
                 if not name:
@@ -1540,6 +1571,312 @@ async def _import_adjacent_candidates(
             seen.add(imported.id)
             imported_ids.append(imported.id)
     return imported_ids
+
+
+# ---------------------------------------------------------------------------
+# Related-artist enrichment (#133)
+# ---------------------------------------------------------------------------
+
+# Re-fetch a source artist's similarity edges once they are older than this.
+# fetched_at drives refresh (re-fetch + replace), not eviction.
+_SIMILARITY_REFRESH_AGE = datetime.timedelta(days=30)
+
+
+async def _fetch_similar_with_store(
+    session: sa_async.AsyncSession,
+    connector: Any,
+    artist: music_models.Artist,
+    *,
+    limit: int,
+    now: datetime.datetime,
+) -> list[dict[str, Any]]:
+    """Read a source artist's similarity edges, falling back to a live fetch (#133).
+
+    Returns ``[{"name": str, "mbid": str | None}, ...]`` for ``artist`` from the
+    given connector. Stored ``ArtistSimilarity`` edges are returned when present
+    and fresh (younger than :data:`_SIMILARITY_REFRESH_AGE`); otherwise the
+    connector is queried live and the edges are replaced. Durable domain data,
+    not a cache: ``fetched_at`` drives refresh, never eviction.
+    """
+    service = connector.service_type
+    stored = await session.execute(
+        sa.select(taste_models.ArtistSimilarity)
+        .where(
+            taste_models.ArtistSimilarity.source_artist_id == artist.id,
+            taste_models.ArtistSimilarity.connector == service,
+        )
+        .order_by(taste_models.ArtistSimilarity.rank)
+    )
+    rows = list(stored.scalars().all())
+    if rows and rows[0].fetched_at > now - _SIMILARITY_REFRESH_AGE:
+        return [{"name": r.neighbor_name, "mbid": r.neighbor_mbid} for r in rows]
+
+    mbid = artist_utils.get_mbid(artist.service_links)
+    neighbors = list(
+        await connector.get_similar_artists(artist.name, mbid=mbid, limit=limit)
+    )
+
+    # Replace this (artist, connector)'s edges wholesale with the fresh batch.
+    await session.execute(
+        sa.delete(taste_models.ArtistSimilarity).where(
+            taste_models.ArtistSimilarity.source_artist_id == artist.id,
+            taste_models.ArtistSimilarity.connector == service,
+        )
+    )
+    for rank, neighbor in enumerate(neighbors):
+        name = neighbor.get("name")
+        if not name:
+            continue
+        session.add(
+            taste_models.ArtistSimilarity(
+                source_artist_id=artist.id,
+                connector=service,
+                neighbor_name=name,
+                neighbor_mbid=neighbor.get("mbid") or None,
+                rank=rank,
+                fetched_at=now,
+            )
+        )
+    return neighbors
+
+
+async def _collect_related(
+    session: sa_async.AsyncSession,
+    similar_connectors: collections.abc.Sequence[Any],
+    lb_connector: Any,
+    seeds: collections.abc.Sequence[music_models.Artist],
+    exclude_ids: set[uuid.UUID],
+    target_n: int,
+    neighbor_fetch: NeighborFetch,
+    log: Any,
+) -> list[uuid.UUID]:
+    """Collect up to ``target_n`` new related artist ids for a scope (#133).
+
+    Iterates ``seeds`` (one seed for per-seed enrich, the whole lineup core for
+    global enrich), resolving similar artists via the persistent-edge fetch.
+    Library-adjacent matches are preferred; once ``target_n`` of them are found
+    the seed loop early-stops (so a global sweep does not fan out to every seed).
+    Any shortfall is topped up with freshly imported recommendations by rank.
+
+    Returns the new artist ids (library matches first, then imports), capped at
+    ``target_n``, deduped against ``exclude_ids`` and each other.
+    """
+    seen = set(exclude_ids)
+    library: list[uuid.UUID] = []
+    import_candidates: list[tuple[str, str]] = []
+    for seed in seeds:
+        if len(library) >= target_n:
+            break  # early stop: enough library matches already
+        resolution = await _resolve_adjacent_artists(
+            session,
+            similar_connectors,
+            [seed],
+            seen,
+            neighbor_fetch=neighbor_fetch,
+        )
+        for lid in resolution.library_ids:
+            if lid not in seen:
+                seen.add(lid)
+                library.append(lid)
+        import_candidates.extend(resolution.import_candidates)
+
+    new_ids = library[:target_n]
+    remaining = target_n - len(new_ids)
+    if remaining > 0 and lb_connector is not None and import_candidates:
+        imported = await _import_adjacent_candidates(
+            session,
+            lb_connector,
+            import_candidates,
+            limit=remaining,
+            exclude_ids=seen,
+            log=log,
+        )
+        new_ids.extend(imported)
+    return new_ids[:target_n]
+
+
+async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
+    """Resolve related artists for a scope and persist them into the pool (#133).
+
+    Loads the RELATED_ARTIST_ENRICHMENT task and its profile, resolves similar
+    artists for the requested scope (a single seed, several seeds, or the whole
+    lineup), imports the new ones, and replaces that scope's prior discovered
+    artist sources in ``profile.input_references`` with the fresh batch. The
+    discovered artists become concrete, curatable ``artist`` sources tagged with
+    ``via_seed``; a later generate re-scores tracks against this fixed pool.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the RELATED_ARTIST_ENRICHMENT Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("enrich_related_artists_task_not_found")
+                return
+
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                log.info("enrich_related_artists_cancelled")
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            profile_id = str(task.params.get("profile_id", ""))
+            scope_param = task.params.get("seed_artist_ids")
+            n_raw = task.params.get("n", 10)
+            requested_n = n_raw if isinstance(n_raw, int) else 10
+            log = log.bind(profile_id=profile_id)
+
+            profile_result = await session.execute(
+                sa.select(generator_models.GeneratorProfile).where(
+                    generator_models.GeneratorProfile.id == uuid.UUID(profile_id)
+                )
+            )
+            profile = profile_result.scalar_one_or_none()
+            if profile is None:
+                await lifecycle_module.fail_task(
+                    session, task, f"Profile not found: {profile_id}"
+                )
+                await session.commit()
+                return
+
+            # Plan the scopes: a global "lineup" sweep over the curated core, or
+            # one independent scope per requested seed.
+            is_lineup = scope_param == "lineup"
+            refs: dict[str, object] = dict(profile.input_references)
+            sources = pool_module.normalize_sources(refs)
+            discovered_ids = {
+                s.artist_id
+                for s in sources
+                if isinstance(s, pool_module.ArtistSource) and s.via_seed is not None
+            }
+            pool = await resolve_pool(session, refs)
+            current_pool_ids = {r.artist_id for r in pool}
+
+            # Load every artist we might seed from (pool + explicit seeds).
+            seed_id_list: list[uuid.UUID] = []
+            if not is_lineup and isinstance(scope_param, list):
+                seed_id_list = [uuid.UUID(str(s)) for s in scope_param]
+            wanted_ids = current_pool_ids | set(seed_id_list)
+            artists_by_id: dict[uuid.UUID, music_models.Artist] = {}
+            if wanted_ids:
+                artists_result = await session.execute(
+                    sa.select(music_models.Artist).where(
+                        music_models.Artist.id.in_(wanted_ids)
+                    )
+                )
+                artists_by_id = {a.id: a for a in artists_result.scalars().all()}
+
+            if is_lineup:
+                # Lineup seeds = the curated core (everything not itself a
+                # discovered artist), so a global sweep expands from what the
+                # user chose, not from prior discoveries.
+                core = [
+                    artists_by_id[aid]
+                    for aid in current_pool_ids
+                    if aid not in discovered_ids and aid in artists_by_id
+                ]
+                scopes: list[tuple[str, list[music_models.Artist], int]] = [
+                    ("lineup", core, requested_n)
+                ]
+            else:
+                scopes = [
+                    (
+                        str(sid),
+                        [artists_by_id[sid]] if sid in artists_by_id else [],
+                        requested_n,
+                    )
+                    for sid in seed_id_list
+                ]
+
+            similar_connectors = wctx["connector_registry"].get_by_capability(
+                base_module.ConnectorCapability.SIMILAR_ARTISTS
+            )
+            target_total = requested_n * len(scopes)
+            if not similar_connectors:
+                task.progress_total = target_total
+                task.progress_current = 0
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {
+                        "found": 0,
+                        "requested": target_total,
+                        "message": "no connector connected",
+                    },
+                )
+                await session.commit()
+                log.info("enrich_related_artists_no_connector")
+                return
+
+            lb_connector = wctx["connector_registry"].get_base_connector(
+                types_module.ServiceType.LISTENBRAINZ
+            )
+            now = datetime.datetime.now(datetime.UTC)
+
+            async def _store_fetch(
+                connector: Any, artist: music_models.Artist, limit: int
+            ) -> list[dict[str, Any]]:
+                return await _fetch_similar_with_store(
+                    session, connector, artist, limit=limit, now=now
+                )
+
+            total_found = 0
+            for scope, seed_artists, target_n in scopes:
+                scope_prior = set(pool_module.scope_artist_ids(refs, scope))
+                # Exclude everything currently in the pool EXCEPT this scope's
+                # own prior discoveries (so they can be re-found on replace), plus
+                # the seeds themselves (an artist is never its own neighbor).
+                exclude = (current_pool_ids - scope_prior) | {
+                    a.id for a in seed_artists
+                }
+                new_ids = await _collect_related(
+                    session,
+                    similar_connectors,
+                    lb_connector,
+                    seed_artists,
+                    exclude,
+                    target_n,
+                    _store_fetch,
+                    log,
+                )
+                refs = pool_module.replace_via_seed_sources(refs, scope, new_ids)
+                current_pool_ids = (current_pool_ids - scope_prior) | set(new_ids)
+                total_found += len(new_ids)
+
+            # Reassign a new dict so SQLAlchemy detects the JSON column change.
+            profile.input_references = refs
+            task.progress_total = target_total
+            task.progress_current = total_found
+            await lifecycle_module.complete_task(
+                session,
+                task,
+                {"found": total_found, "requested": target_total},
+            )
+            await session.commit()
+            log.info(
+                "enrich_related_artists_completed",
+                found=total_found,
+                requested=target_total,
+            )
+
+        except Exception:
+            log.exception("enrich_related_artists_failed")
+            if task is not None:
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
+                await session.commit()
 
 
 async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
@@ -2749,6 +3086,7 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(export_playlist), timeout=600),
         arq.func(heartbeat_module.with_heartbeat(backfill_mbids), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(backfill_popularity), timeout=3600),
+        arq.func(heartbeat_module.with_heartbeat(enrich_related_artists), timeout=3600),
     ]
     on_startup = startup
     on_shutdown = shutdown
