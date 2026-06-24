@@ -13,6 +13,7 @@ import structlog
 
 import resonance.dependencies as deps_module
 import resonance.generators.parameters as params_module
+import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_models
 import resonance.types as types_module
@@ -25,11 +26,19 @@ router = fastapi.APIRouter(
 
 
 class CreateProfileRequest(pydantic.BaseModel):
-    """Request body for creating a generator profile."""
+    """Request body for creating a generator profile.
+
+    ``input_references`` accepts both the layered source spec
+    (``{"sources": [...], "exclude_artist_ids": [...]}``) and the legacy
+    single-event shape (``{"event_id": "<uuid>"}``); the shape is parsed and
+    validated by :func:`validate_profile_inputs` via ``generators.pool``, so the
+    grammar lives in one place (#128). ``dict[str, Any]`` (not ``dict[str, str]``)
+    is required because the layered shape nests lists/objects under ``sources``.
+    """
 
     name: str
     generator_type: types_module.GeneratorType
-    input_references: dict[str, str]
+    input_references: dict[str, Any]
     parameter_values: dict[str, int] = pydantic.Field(default_factory=dict)
 
 
@@ -38,7 +47,7 @@ class UpdateProfileRequest(pydantic.BaseModel):
 
     name: str | None = None
     parameter_values: dict[str, int] | None = None
-    input_references: dict[str, str] | None = None
+    input_references: dict[str, Any] | None = None
 
 
 class GenerateRequest(pydantic.BaseModel):
@@ -48,22 +57,47 @@ class GenerateRequest(pydantic.BaseModel):
     max_tracks: int = 30
 
 
-def validate_profile_inputs(request: CreateProfileRequest) -> None:
-    """Validate that required inputs are present for the generator type.
+def validate_profile_inputs(
+    input_references: dict[str, Any],
+    generator_type: types_module.GeneratorType,
+) -> None:
+    """Validate that a profile's input_references can resolve to a pool.
+
+    Parses the layered source spec (reusing :func:`pool.normalize_sources`, which
+    also tolerates the legacy ``{"event_id": ...}`` shape), so the grammar is
+    defined in one place. Raises a clear error on a malformed shape, a missing
+    legacy-required key (for types that still declare one), or a structurally
+    empty pool (no enabled source). Resolution-time emptiness -- an event with no
+    lineup, or excludes that empty the pool -- is handled gracefully by the worker,
+    not here.
 
     Args:
-        request: The create profile request to validate.
+        input_references: The profile's input reference spec.
+        generator_type: The generator type (selects the type config).
 
     Raises:
-        ValueError: If a required input is missing.
+        ValueError: If the spec is malformed, a required key is missing, or the
+            pool is structurally empty.
     """
-    config = params_module.GENERATOR_TYPE_CONFIG.get(request.generator_type)
-    if config is None:
-        return
-    for required in config.required_inputs:
-        if required not in request.input_references:
-            msg = f"Missing required input: {required}"
-            raise ValueError(msg)
+    try:
+        sources = pool_module.normalize_sources(input_references)
+    except ValueError as exc:
+        msg = f"Invalid input_references: {exc}"
+        raise ValueError(msg) from exc
+
+    config = params_module.GENERATOR_TYPE_CONFIG.get(generator_type)
+    if config is not None:
+        for required in config.required_inputs:
+            if required not in input_references:
+                msg = f"Missing required input: {required}"
+                raise ValueError(msg)
+
+    if not any(source.enabled for source in sources):
+        msg = (
+            "input_references resolves to an empty pool: add at least one enabled "
+            "source (event, artist, or related)"
+        )
+        raise ValueError(msg)
 
 
 @router.post(
@@ -90,7 +124,7 @@ async def create_profile(
         HTTPException: 400 if required inputs are missing.
     """
     try:
-        validate_profile_inputs(body)
+        validate_profile_inputs(body.input_references, body.generator_type)
     except ValueError as exc:
         raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -267,6 +301,10 @@ async def update_profile(
     if body.parameter_values is not None:
         profile.parameter_values = dict(body.parameter_values)
     if body.input_references is not None:
+        try:
+            validate_profile_inputs(body.input_references, profile.generator_type)
+        except ValueError as exc:
+            raise fastapi.HTTPException(status_code=400, detail=str(exc)) from exc
         profile.input_references = dict(body.input_references)
 
     await db.commit()
