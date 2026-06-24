@@ -566,3 +566,74 @@ class TestApiCommandAsUser:
         cli_module._extract_as_user()
         assert sys.argv == ["resonance-api", "status"]
         assert "RESONANCE_ASSUME_USER" not in os.environ
+
+
+class TestEnrichCommand:
+    """resonance-api enrich builds the right request and reports results."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_lineup_posts_lineup_scope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            calls.append({"method": method, "url": url, "json": kwargs.get("json")})
+            if url.endswith("/enrich"):
+                return _fake_response(json_body={"status": "started", "task_id": "t1"})
+            return _fake_response(
+                json_body={
+                    "status": "completed",
+                    "result": {"found": 4, "requested": 5},
+                }
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "enrich", "p1", "--lineup", "--n", "5"]
+        )
+        cli_module._cmd_enrich()
+
+        post = calls[0]
+        assert post["method"] == "POST"
+        assert post["url"].endswith("/api/v1/generator-profiles/p1/enrich")
+        assert post["json"] == {"n": 5, "seed_artist_ids": "lineup"}
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_seeds_post_id_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            calls.append({"json": kwargs.get("json")})
+            if url.endswith("/enrich"):
+                return _fake_response(json_body={"task_id": "t2"})
+            return _fake_response(
+                json_body={
+                    "status": "completed",
+                    "result": {"found": 2, "requested": 2},
+                }
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["resonance-api", "enrich", "p1", "--seed", "a1", "--seed", "a2"],
+        )
+        cli_module._cmd_enrich()
+
+        assert calls[0]["json"] == {"n": 10, "seed_artist_ids": ["a1", "a2"]}
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_requires_lineup_or_seed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "enrich", "p1"])
+        with pytest.raises(SystemExit):
+            cli_module._cmd_enrich()
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_rejects_lineup_and_seed_together(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "enrich", "p1", "--lineup", "--seed", "a1"]
+        )
+        with pytest.raises(SystemExit):
+            cli_module._cmd_enrich()

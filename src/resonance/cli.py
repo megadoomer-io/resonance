@@ -88,6 +88,7 @@ Commands:
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
   generate <profile-id>        Generate a playlist from a profile
+  enrich <profile-id> ...      Add related artists to a profile's pool
   playlists                    List playlists
   playlist <id> [diff <other>] Show or diff a playlist
   watermark <service> [--reset] View or reset sync watermark (direct DB)
@@ -747,6 +748,62 @@ def _cmd_generate() -> None:
     print(f"Playlist created: {playlist_id}")
 
 
+def _cmd_enrich() -> None:
+    if len(sys.argv) < 3:
+        print(
+            "Usage: resonance-api enrich <profile-id>"
+            " (--lineup | --seed <artist-id> [--seed <artist-id> ...]) [--n N]"
+        )
+        sys.exit(1)
+    profile_id = sys.argv[2]
+    remaining = sys.argv[3:]
+
+    seeds: list[str] = []
+    lineup = False
+    n = 10
+    i = 0
+    while i < len(remaining):
+        if remaining[i] == "--lineup":
+            lineup = True
+            i += 1
+        elif remaining[i] == "--seed" and i + 1 < len(remaining):
+            seeds.append(remaining[i + 1])
+            i += 2
+        elif remaining[i] == "--n" and i + 1 < len(remaining):
+            n = int(remaining[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    if lineup and seeds:
+        print("Specify either --lineup or --seed, not both.")
+        sys.exit(1)
+    if not lineup and not seeds:
+        print("Specify --lineup or at least one --seed.")
+        sys.exit(1)
+
+    body: dict[str, object] = {
+        "n": n,
+        "seed_artist_ids": "lineup" if lineup else seeds,
+    }
+    scope_label = "lineup" if lineup else f"{len(seeds)} seed(s)"
+    print(f"Triggering enrichment ({scope_label}) for profile {profile_id}...")
+    resp = _api_request(
+        "POST",
+        f"/api/v1/generator-profiles/{profile_id}/enrich",
+        json=body,
+    )
+    data = resp.json()
+    task_id = data.get("task_id", "")
+    result = _poll_task(task_id, "Enriching pool")
+    message = result.get("message")
+    if message:
+        print(f"Note: {message}")
+    found = result.get("found", "?")
+    requested = result.get("requested", "?")
+    print(f"Added {found} of {requested} related artists to the pool.")
+
+
 def _cmd_playlists() -> None:
     resp = _api_request("GET", "/api/v1/playlists/")
     playlists = resp.json()
@@ -1166,6 +1223,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "track": ("Search tracks by title", _cmd_track),
     "profile": ("Manage generator profiles", _cmd_profile),
     "generate": ("Generate a playlist", _cmd_generate),
+    "enrich": ("Add related artists to a profile's pool", _cmd_enrich),
     "playlists": ("List playlists", _cmd_playlists),
     "playlist": ("Show or diff a playlist", _cmd_playlist),
     "watermark": ("View/reset sync watermark", _cmd_watermark),
