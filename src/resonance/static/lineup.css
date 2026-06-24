@@ -2,17 +2,37 @@
 
 .lineup-hint { color: var(--text-muted); }
 
-/* Add controls row: event dropdown + artist search */
+/* Add controls row: event dropdown + artist search + add-related */
 .lineup-add {
   display: flex;
   gap: var(--space-sm);
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   margin-bottom: var(--space-md);
 }
 .lineup-add > * { margin-bottom: 0; }
 .lineup-add .add-event { flex: 1 1 16rem; min-width: 12rem; }
 .lineup-add .picker { flex: 1 1 16rem; min-width: 12rem; }
+/* Consistent control sizing so the select, search, number field, and button all
+ * line up at the same height (the shared input sizing from the design spec). */
+.lineup-add select,
+.lineup-add input[type="search"],
+.lineup-add input[type="number"],
+.lineup-add button {
+  height: 38px;
+  box-sizing: border-box;
+  margin: 0;
+  font-size: 0.9rem;
+}
+.lineup-add select,
+.lineup-add input[type="search"],
+.lineup-add input[type="number"] {
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+}
 
 /* Empty state */
 .lineup-empty {
@@ -211,10 +231,13 @@ details.lineup-group > summary {
   cursor: pointer; list-style: none;
 }
 details.lineup-group > summary::-webkit-details-marker { display: none; }
-details.lineup-group > summary::before {
-  content: "▸"; color: var(--text-muted); font-size: 0.75rem; margin-right: 6px;
+details.lineup-group > summary::marker { content: ""; }
+/* Marker rides WITH the title (inside .gtitle), not as a separate flex child of
+ * the space-between header — otherwise it gets pushed to the far edge. */
+details.lineup-group > summary .gtitle::before {
+  content: "▸ "; color: var(--text-muted); font-size: 0.75rem;
 }
-details.lineup-group[open] > summary::before { content: "▾"; }
+details.lineup-group[open] > summary .gtitle::before { content: "▾ "; }
 
 /* Enrich in-progress status (spinner + found M of N) */
 .enrich-status {

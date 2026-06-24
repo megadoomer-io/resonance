@@ -473,8 +473,25 @@ if (eventSelect) {
     const venue = opt.getAttribute("data-venue") || "";
     const sub = "· " + date + (venue ? " · " + venue : "") + " · live lineup";
     addEvent(id, title, sub);
+    maybeAutoName(title, venue);
     eventSelect.selectedIndex = 0;
   });
+}
+
+/* Auto-fill the playlist name from the first event the user adds, UNLESS they've
+ * typed their own. A draft opens named "New Playlist" (empty pool), so without
+ * this it would generate as "New Playlist". */
+function isDefaultName() {
+  if (!nameInput) return false;
+  const v = nameInput.value.trim();
+  return v === "" || v === "New Playlist";
+}
+
+function maybeAutoName(title, venue) {
+  if (!nameInput || !isDefaultName()) return;
+  const derived = "Concert Prep: " + title + (venue ? " @ " + venue : "");
+  nameInput.value = derived;
+  flushSave({ name: derived });
 }
 
 if (searchInput) {
@@ -587,6 +604,17 @@ if (generateBtn) {
       return;
     }
     generateBtn.disabled = true;
+    // Last-resort naming so nothing ever generates as "New Playlist": prefer the
+    // first event, else a dated fallback. (Event-add already auto-names; this
+    // covers an artist-only pool the user never named.)
+    if (isDefaultName()) {
+      const ev = state.groups.find((g) => g.kind === "event");
+      const fallback = ev
+        ? "Concert Prep: " + ev.title
+        : "Playlist " + new Date().toISOString().slice(0, 10);
+      nameInput.value = fallback;
+      await flushSave({ name: fallback });
+    }
     await ensureSaved();
     if (conflicted) {
       generateBtn.disabled = false;
