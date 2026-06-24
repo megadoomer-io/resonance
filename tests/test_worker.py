@@ -4121,3 +4121,137 @@ class TestImportAdjacentCandidates:
 
         assert result == [a2.id]  # one failure does not abort the rest
         log.warning.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# resolve_pool: shared target-resolution path (#128 T6/T14)
+# ---------------------------------------------------------------------------
+
+
+def _scalars_result(rows: list[Any]) -> MagicMock:
+    """Build a mock execute() result whose .scalars().all() returns rows."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = rows
+    return result
+
+
+class TestResolvePool:
+    """resolve_pool turns input_references into a deduped, exclude-filtered pool."""
+
+    async def test_legacy_event_id_shape(self) -> None:
+        import resonance.generators.pool as pool_module
+
+        a1, a2 = uuid.uuid4(), uuid.uuid4()
+        eid = uuid.uuid4()
+        ea = MagicMock()
+        ea.artist_id = a1
+        cand = MagicMock()
+        cand.matched_artist_id = a2
+
+        session = AsyncMock()
+        session.execute.side_effect = [_scalars_result([ea]), _scalars_result([cand])]
+
+        pool = await worker_module.resolve_pool(session, {"event_id": str(eid)})
+
+        assert [r.artist_id for r in pool] == [a1, a2]
+        assert all(r.via is pool_module.PoolProvenance.EVENT for r in pool)
+
+    async def test_sources_event_shape(self) -> None:
+        a1 = uuid.uuid4()
+        eid = uuid.uuid4()
+        ea = MagicMock()
+        ea.artist_id = a1
+
+        session = AsyncMock()
+        session.execute.side_effect = [_scalars_result([ea]), _scalars_result([])]
+
+        refs = {"sources": [{"kind": "event", "event_id": str(eid), "enabled": True}]}
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert [r.artist_id for r in pool] == [a1]
+
+    async def test_artist_source_needs_no_query(self) -> None:
+        import resonance.generators.pool as pool_module
+
+        a3 = uuid.uuid4()
+        session = AsyncMock()
+
+        refs = {"sources": [{"kind": "artist", "artist_id": str(a3), "enabled": True}]}
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert [r.artist_id for r in pool] == [a3]
+        assert pool[0].via is pool_module.PoolProvenance.ARTIST
+        session.execute.assert_not_called()  # no event sources -> no DB hit
+
+    async def test_exclude_applied_last(self) -> None:
+        a1, a2 = uuid.uuid4(), uuid.uuid4()
+        eid = uuid.uuid4()
+        ea1, ea2 = MagicMock(), MagicMock()
+        ea1.artist_id, ea2.artist_id = a1, a2
+
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalars_result([ea1, ea2]),
+            _scalars_result([]),
+        ]
+
+        refs = {
+            "sources": [{"kind": "event", "event_id": str(eid), "enabled": True}],
+            "exclude_artist_ids": [str(a2)],
+        }
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert [r.artist_id for r in pool] == [a1]  # a2 excluded
+
+    async def test_disabled_source_skipped(self) -> None:
+        eid = uuid.uuid4()
+        session = AsyncMock()
+
+        refs = {"sources": [{"kind": "event", "event_id": str(eid), "enabled": False}]}
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert pool == []
+        session.execute.assert_not_called()  # disabled event -> no query
+
+    async def test_multiple_events_batched(self) -> None:
+        """Two event sources resolve in one query per table, not per event (T14)."""
+        a1, a2 = uuid.uuid4(), uuid.uuid4()
+        e1, e2 = uuid.uuid4(), uuid.uuid4()
+        ea1, ea2 = MagicMock(), MagicMock()
+        ea1.artist_id, ea2.artist_id = a1, a2
+
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalars_result([ea1, ea2]),  # both events' EventArtist rows, one query
+            _scalars_result([]),  # both events' candidates, one query
+        ]
+
+        refs = {
+            "sources": [
+                {"kind": "event", "event_id": str(e1), "enabled": True},
+                {"kind": "event", "event_id": str(e2), "enabled": True},
+            ]
+        }
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert {r.artist_id for r in pool} == {a1, a2}
+        assert session.execute.call_count == 2  # batched: not 4
+
+    async def test_dedup_across_event_and_artist(self) -> None:
+        a1 = uuid.uuid4()
+        eid = uuid.uuid4()
+        ea = MagicMock()
+        ea.artist_id = a1
+
+        session = AsyncMock()
+        session.execute.side_effect = [_scalars_result([ea]), _scalars_result([])]
+
+        refs = {
+            "sources": [
+                {"kind": "event", "event_id": str(eid), "enabled": True},
+                {"kind": "artist", "artist_id": str(a1), "enabled": True},
+            ]
+        }
+        pool = await worker_module.resolve_pool(session, refs)
+
+        assert [r.artist_id for r in pool] == [a1]  # event wins, artist dup dropped
