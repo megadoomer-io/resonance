@@ -38,6 +38,7 @@ import resonance.crypto as crypto_module
 import resonance.database as database_module
 import resonance.generators.concert_prep as concert_prep_module
 import resonance.generators.parameters as params_module
+import resonance.generators.pool as pool_module
 import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
 import resonance.migrations as migrations_module
@@ -776,6 +777,87 @@ def _merge_adjacent_discovery_targets(
     return merged
 
 
+async def resolve_pool(
+    session: sa_async.AsyncSession,
+    input_references: collections.abc.Mapping[str, object],
+) -> list[pool_module.ResolvedArtist]:
+    """Resolve a profile's ``input_references`` into a deduplicated artist pool.
+
+    Parses the layered source spec, tolerating the legacy ``{"event_id": ...}``
+    shape via :func:`pool.normalize_sources` (so a pre-#128 profile still resolves
+    during the migration window), resolves the DB-backed sources, then applies the
+    global ``exclude_artist_ids`` set last.
+
+    Resolved here:
+
+    * ``event``  -> the event's confirmed ``EventArtist`` rows plus accepted
+      ``EventArtistCandidate`` matches. Every enabled event source is resolved in
+      one ``event_id IN (...)`` query per table rather than per-event (#128 T14).
+    * ``artist`` -> the artist itself.
+
+    The ``related`` source kind is intentionally NOT resolved here: related /
+    adjacent expansion is driven by the ``similar_artist_ratio`` parameter against
+    the resolved target set (see ``generate_playlist`` / ``score_and_build_playlist``),
+    pending the param-vs-source-count reconciliation deferred to #128 UI work.
+
+    Returns the deduplicated, exclude-filtered artists in first-seen order (event
+    sources before artist sources), each tagged with provenance. This is the single
+    target-resolution path shared by both worker generation functions, replacing the
+    event-resolution blocks that were duplicated across them.
+    """
+    sources = pool_module.normalize_sources(input_references)
+    exclude_ids = pool_module.extract_excludes(input_references)
+
+    resolved: list[pool_module.ResolvedArtist] = []
+
+    # Event sources: batch every enabled event into one IN-query per table (T14).
+    event_ids = [
+        s.event_id
+        for s in sources
+        if isinstance(s, pool_module.EventSource) and s.enabled
+    ]
+    if event_ids:
+        ea_result = await session.execute(
+            sa.select(concert_models.EventArtist).where(
+                concert_models.EventArtist.event_id.in_(event_ids)
+            )
+        )
+        for ea in ea_result.scalars().all():
+            resolved.append(
+                pool_module.ResolvedArtist(
+                    artist_id=ea.artist_id, via=pool_module.PoolProvenance.EVENT
+                )
+            )
+
+        eac_result = await session.execute(
+            sa.select(concert_models.EventArtistCandidate).where(
+                concert_models.EventArtistCandidate.event_id.in_(event_ids),
+                concert_models.EventArtistCandidate.status
+                == types_module.CandidateStatus.ACCEPTED,
+                concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
+            )
+        )
+        for cand in eac_result.scalars().all():
+            if cand.matched_artist_id is not None:
+                resolved.append(
+                    pool_module.ResolvedArtist(
+                        artist_id=cand.matched_artist_id,
+                        via=pool_module.PoolProvenance.EVENT,
+                    )
+                )
+
+    # Artist sources: the artist itself enters the pool directly.
+    for source in sources:
+        if isinstance(source, pool_module.ArtistSource) and source.enabled:
+            resolved.append(
+                pool_module.ResolvedArtist(
+                    artist_id=source.artist_id, via=pool_module.PoolProvenance.ARTIST
+                )
+            )
+
+    return pool_module.build_pool(resolved, exclude_ids)
+
+
 async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
     """Orchestrate playlist generation: create discovery + scoring child tasks.
 
@@ -830,35 +912,16 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 return
 
+            # event_id is retained only for the legacy scoring-child param and
+            # logging; the actual artist set comes from resolve_pool, which handles
+            # both the legacy {"event_id": ...} and layered {"sources": [...]} shapes
+            # and applies the global exclude set (#128).
             event_id = str(profile.input_references.get("event_id", ""))
             log = log.bind(event_id=event_id)
 
-            # Resolve event artists
-            # 1. Confirmed EventArtist rows
-            ea_result = await session.execute(
-                sa.select(concert_models.EventArtist).where(
-                    concert_models.EventArtist.event_id == uuid.UUID(event_id)
-                )
-            )
-            event_artists = ea_result.scalars().all()
-            artist_ids: list[uuid.UUID] = [ea.artist_id for ea in event_artists]
-
-            # 2. Accepted EventArtistCandidate rows
-            eac_result = await session.execute(
-                sa.select(concert_models.EventArtistCandidate).where(
-                    concert_models.EventArtistCandidate.event_id == uuid.UUID(event_id),
-                    concert_models.EventArtistCandidate.status
-                    == types_module.CandidateStatus.ACCEPTED,
-                    concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
-                )
-            )
-            accepted_candidates = eac_result.scalars().all()
-            for cand in accepted_candidates:
-                if (
-                    cand.matched_artist_id is not None
-                    and cand.matched_artist_id not in artist_ids
-                ):
-                    artist_ids.append(cand.matched_artist_id)
+            pool = await resolve_pool(session, profile.input_references)
+            artist_ids: list[uuid.UUID] = [r.artist_id for r in pool]
+            log = log.bind(pool_size=len(artist_ids))
 
             if not artist_ids:
                 await lifecycle_module.complete_task(
@@ -1540,29 +1603,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await _check_parent_completion(session, task, arq_redis, log)
                 return
 
+            # event_id retained for logging only; resolve_pool is the shared
+            # target-resolution path (legacy {"event_id"} + layered {"sources"}
+            # shapes, exclude set applied last) (#128).
             event_id = str(profile.input_references.get("event_id", ""))
             log = log.bind(event_id=event_id)
 
-            # Resolve artist IDs from event
-            ea_result = await session.execute(
-                sa.select(concert_models.EventArtist).where(
-                    concert_models.EventArtist.event_id == uuid.UUID(event_id)
-                )
-            )
-            event_artists = ea_result.scalars().all()
-            artist_ids: set[uuid.UUID] = {ea.artist_id for ea in event_artists}
-
-            eac_result = await session.execute(
-                sa.select(concert_models.EventArtistCandidate).where(
-                    concert_models.EventArtistCandidate.event_id == uuid.UUID(event_id),
-                    concert_models.EventArtistCandidate.status
-                    == types_module.CandidateStatus.ACCEPTED,
-                    concert_models.EventArtistCandidate.matched_artist_id.isnot(None),
-                )
-            )
-            for cand in eac_result.scalars().all():
-                if cand.matched_artist_id is not None:
-                    artist_ids.add(cand.matched_artist_id)
+            pool = await resolve_pool(session, profile.input_references)
+            artist_ids: set[uuid.UUID] = {r.artist_id for r in pool}
 
             # Apply parameter defaults early — adjacent-artist expansion below
             # is gated on similar_artist_ratio.
