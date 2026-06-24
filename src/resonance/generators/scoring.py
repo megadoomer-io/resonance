@@ -42,8 +42,8 @@ def composite_score(
 
     Returns a value clamped to [0.0, 1.0]. Artist relevance (target vs adjacent)
     is intentionally NOT part of this score. There is one ranked pool: provenance
-    is metadata only, and similar_artist_ratio governs pool *composition* (how many
-    related artists are resolved in), not scoring or selection.
+    is metadata only. Pool *composition* (which related artists are in the pool) is
+    decided upstream by enrichment (#133), not by scoring or selection.
     """
     base = 0.5
 

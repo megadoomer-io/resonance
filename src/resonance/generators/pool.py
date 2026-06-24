@@ -9,11 +9,13 @@ applied last to the union (issue #128). The stored shape is::
         {"kind": "event",   "event_id": "<uuid>", "enabled": true},
         {"kind": "artist",  "artist_id": "<uuid>", "enabled": true},
         {"kind": "artist",  "artist_id": "<uuid>", "enabled": true,
-         "via_seed": "lineup"},
-        {"kind": "related", "seed": "target", "amount": 5, "enabled": true}
+         "via_seed": "lineup"}
       ],
       "exclude_artist_ids": ["<uuid>"]
     }
+
+Related artists are no longer a live source kind: enrichment (#133) resolves them
+up front and persists them as concrete ``artist`` sources tagged with ``via_seed``.
 
 This module is **pure** -- no database, no connectors. It does two jobs:
 
@@ -23,9 +25,8 @@ This module is **pure** -- no database, no connectors. It does two jobs:
 2. Assemble a deduplicated, exclude-filtered pool from already-resolved
    ``(artist_id, provenance)`` pairs (:func:`build_pool`).
 
-The DB/connector resolution step (event -> artists, related -> similar artists)
-lives in the worker's ``resolve_pool`` helper, which calls into this module for the
-pure parts.
+The DB/connector resolution step (event -> artists) lives in the worker's
+``resolve_pool`` helper, which calls into this module for the pure parts.
 """
 
 from __future__ import annotations
@@ -41,16 +42,11 @@ class PoolSourceKind(enum.StrEnum):
 
     EVENT = "event"
     ARTIST = "artist"
-    RELATED = "related"
 
 
 # Provenance shares the source vocabulary: an artist enters the pool *via* the kind
-# of source that produced it (event lineup, manual artist add, or related expansion).
+# of source that produced it (event lineup or manual/discovered artist add).
 PoolProvenance = PoolSourceKind
-
-# The only ``seed`` selector today: expand related artists from the non-related
-# ("target") artists already resolved from event + artist sources.
-SEED_TARGET = "target"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -79,21 +75,7 @@ class ArtistSource:
     via_seed: str | None = None
 
 
-@dataclasses.dataclass(frozen=True)
-class RelatedSource:
-    """Fold in artists similar to the already-resolved seed artists.
-
-    ``amount`` caps how many related artists are folded in. ``seed`` selects which
-    already-resolved artists to expand from; only ``"target"`` (the non-related
-    artists) is supported today.
-    """
-
-    amount: int
-    seed: str = SEED_TARGET
-    enabled: bool = True
-
-
-PoolSource = EventSource | ArtistSource | RelatedSource
+PoolSource = EventSource | ArtistSource
 
 
 @dataclasses.dataclass(frozen=True)
@@ -159,25 +141,12 @@ def _parse_source(raw: object) -> PoolSource:
         return EventSource(
             event_id=_parse_uuid(raw.get("event_id"), "event_id"), enabled=enabled
         )
-    if kind is PoolSourceKind.ARTIST:
-        return ArtistSource(
-            artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"),
-            enabled=enabled,
-            via_seed=_parse_via_seed(raw.get("via_seed")),
-        )
-    # RELATED
-    amount_raw = raw.get("amount")
-    if not isinstance(amount_raw, int) or isinstance(amount_raw, bool):
-        msg = f"Related source 'amount' must be an integer, got {amount_raw!r}"
-        raise ValueError(msg)
-    if amount_raw < 0:
-        msg = f"Related source 'amount' must be non-negative, got {amount_raw}"
-        raise ValueError(msg)
-    seed = str(raw.get("seed", SEED_TARGET))
-    if seed != SEED_TARGET:
-        msg = f"Unsupported related 'seed': {seed!r} (only {SEED_TARGET!r})"
-        raise ValueError(msg)
-    return RelatedSource(amount=amount_raw, seed=seed, enabled=enabled)
+    # ARTIST (the only remaining kind; unknown kinds raised above).
+    return ArtistSource(
+        artist_id=_parse_uuid(raw.get("artist_id"), "artist_id"),
+        enabled=enabled,
+        via_seed=_parse_via_seed(raw.get("via_seed")),
+    )
 
 
 def normalize_sources(raw: Mapping[str, object]) -> list[PoolSource]:
@@ -259,23 +228,17 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
             "event_id": str(source.event_id),
             "enabled": source.enabled,
         }
-    if isinstance(source, ArtistSource):
-        payload: dict[str, object] = {
-            "kind": PoolSourceKind.ARTIST.value,
-            "artist_id": str(source.artist_id),
-            "enabled": source.enabled,
-        }
-        # Omit via_seed when None so user-added artists keep the lean shape and
-        # round-trip cleanly (None -> absent -> None).
-        if source.via_seed is not None:
-            payload["via_seed"] = source.via_seed
-        return payload
-    return {
-        "kind": PoolSourceKind.RELATED.value,
-        "seed": source.seed,
-        "amount": source.amount,
+    # ARTIST (the only remaining kind).
+    payload: dict[str, object] = {
+        "kind": PoolSourceKind.ARTIST.value,
+        "artist_id": str(source.artist_id),
         "enabled": source.enabled,
     }
+    # Omit via_seed when None so user-added artists keep the lean shape and
+    # round-trip cleanly (None -> absent -> None).
+    if source.via_seed is not None:
+        payload["via_seed"] = source.via_seed
+    return payload
 
 
 def serialize_input_references(

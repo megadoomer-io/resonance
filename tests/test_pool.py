@@ -17,15 +17,21 @@ class TestNormalizeSources:
             "sources": [
                 {"kind": "event", "event_id": str(eid), "enabled": True},
                 {"kind": "artist", "artist_id": str(aid), "enabled": False},
-                {"kind": "related", "seed": "target", "amount": 5},
             ]
         }
         sources = pool_module.normalize_sources(raw)
         assert sources == [
             pool_module.EventSource(event_id=eid, enabled=True),
             pool_module.ArtistSource(artist_id=aid, enabled=False),
-            pool_module.RelatedSource(amount=5, seed="target", enabled=True),
         ]
+
+    def test_related_kind_now_rejected(self) -> None:
+        # The "related" source kind was removed in #133 (enrichment persists
+        # concrete artist sources instead).
+        with pytest.raises(ValueError, match="Unknown source kind"):
+            pool_module.normalize_sources(
+                {"sources": [{"kind": "related", "amount": 5}]}
+            )
 
     def test_legacy_event_id_shape(self) -> None:
         eid = uuid.uuid4()
@@ -78,37 +84,6 @@ class TestNormalizeSources:
     def test_source_entry_not_a_mapping_raises(self) -> None:
         with pytest.raises(ValueError, match="must be an object"):
             pool_module.normalize_sources({"sources": ["event"]})
-
-    def test_related_amount_required_integer(self) -> None:
-        with pytest.raises(ValueError, match="'amount' must be an integer"):
-            pool_module.normalize_sources(
-                {"sources": [{"kind": "related", "amount": "five"}]}
-            )
-
-    def test_related_amount_rejects_bool(self) -> None:
-        # bool is an int subclass; it must not be accepted as an amount.
-        with pytest.raises(ValueError, match="'amount' must be an integer"):
-            pool_module.normalize_sources(
-                {"sources": [{"kind": "related", "amount": True}]}
-            )
-
-    def test_related_amount_non_negative(self) -> None:
-        with pytest.raises(ValueError, match="must be non-negative"):
-            pool_module.normalize_sources(
-                {"sources": [{"kind": "related", "amount": -1}]}
-            )
-
-    def test_related_seed_default(self) -> None:
-        sources = pool_module.normalize_sources(
-            {"sources": [{"kind": "related", "amount": 3}]}
-        )
-        assert sources[0] == pool_module.RelatedSource(amount=3, seed="target")
-
-    def test_unsupported_seed_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported related 'seed'"):
-            pool_module.normalize_sources(
-                {"sources": [{"kind": "related", "amount": 3, "seed": "genre"}]}
-            )
 
     def test_enabled_must_be_bool(self) -> None:
         with pytest.raises(ValueError, match="'enabled' must be a boolean"):
@@ -233,7 +208,7 @@ class TestBuildPool:
         aid = uuid.uuid4()
         resolved = [
             pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.EVENT),
-            pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.RELATED),
+            pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.ARTIST),
         ]
         pool = pool_module.build_pool(resolved, set())
         assert pool == [
@@ -267,13 +242,13 @@ class TestBuildPool:
         pool = pool_module.build_pool(resolved, set())
         assert [r.artist_id for r in pool] == ids
 
-    def test_provenance_precedence_event_over_related(self) -> None:
-        # An artist resolved both as an event act and as a related expansion keeps
+    def test_provenance_precedence_event_over_artist(self) -> None:
+        # An artist resolved both as an event act and as a manual artist add keeps
         # the event provenance (first-seen), since event sources resolve first.
         aid = uuid.uuid4()
         resolved = [
             pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.EVENT),
-            pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.RELATED),
+            pool_module.ResolvedArtist(aid, pool_module.PoolProvenance.ARTIST),
         ]
         pool = pool_module.build_pool(resolved, set())
         assert pool[0].via is pool_module.PoolProvenance.EVENT
@@ -286,7 +261,6 @@ class TestSerialize:
         sources: list[pool_module.PoolSource] = [
             pool_module.EventSource(event_id=eid, enabled=False),
             pool_module.ArtistSource(artist_id=aid),
-            pool_module.RelatedSource(amount=7, seed="target", enabled=True),
         ]
         excl = uuid.uuid4()
         stored = pool_module.serialize_input_references(sources, [excl])

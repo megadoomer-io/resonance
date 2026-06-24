@@ -723,22 +723,6 @@ _MIN_LIBRARY_TRACKS = 5
 # under-covered ones, so a well-known artist can still surface unheard tracks.
 _DISCOVERY_FAMILIARITY_THRESHOLD = 50
 
-# Max adjacent (similar) library artists to fetch catalogs for on a
-# discovery-leaning playlist (issue #115). A tunable starting cap: enough
-# variety to fill a high similar_artist_ratio quota with fresh tracks without
-# flooding the MusicBrainz rate-limit budget (each adjacent artist adds one
-# sequential TRACK_DISCOVERY fetch). The cap is applied by provider similarity
-# rank, and bounds BOTH the discovery fan-out and the scoring candidate pool.
-_MAX_ADJACENT_DISCOVERY = 10
-
-# Independent ceiling on NEW artist imports per generation (issue #115 Phase 2).
-# Importing a recommended artist who is not yet in the library costs one
-# MusicBrainz artist lookup plus a TRACK_DISCOVERY catalog fetch, so a
-# cold-start library must not silently trigger a flood of imports + fetches
-# every run. Bounds imports separately from the combined adjacent cap above;
-# library-adjacent artists (free) are always preferred first.
-_MAX_IMPORTED_ADJACENT = 10
-
 
 def _artists_needing_discovery(
     artist_ids: collections.abc.Iterable[uuid.UUID],
@@ -763,37 +747,6 @@ def _artists_needing_discovery(
     ]
 
 
-def _merge_adjacent_discovery_targets(
-    target_ids: collections.abc.Sequence[uuid.UUID],
-    adjacent_ids: collections.abc.Sequence[uuid.UUID],
-) -> list[uuid.UUID]:
-    """Merge capped adjacent artist ids into the discovery target set (#115).
-
-    Returns ``target_ids`` followed by up to ``_MAX_ADJACENT_DISCOVERY``
-    adjacent ids in rank order, with every artist appearing exactly once. An
-    adjacent id that is already a target (or repeated) is dropped so it is never
-    enqueued for discovery twice.
-
-    Pure logic (no DB) so the merge/cap/dedup decision is unit-testable.
-    """
-    seen: set[uuid.UUID] = set()
-    merged: list[uuid.UUID] = []
-    for tid in target_ids:
-        if tid not in seen:
-            seen.add(tid)
-            merged.append(tid)
-    added = 0
-    for aid in adjacent_ids:
-        if added >= _MAX_ADJACENT_DISCOVERY:
-            break
-        if aid in seen:
-            continue
-        seen.add(aid)
-        merged.append(aid)
-        added += 1
-    return merged
-
-
 async def resolve_pool(
     session: sa_async.AsyncSession,
     input_references: collections.abc.Mapping[str, object],
@@ -810,12 +763,8 @@ async def resolve_pool(
     * ``event``  -> the event's confirmed ``EventArtist`` rows plus accepted
       ``EventArtistCandidate`` matches. Every enabled event source is resolved in
       one ``event_id IN (...)`` query per table rather than per-event (#128 T14).
-    * ``artist`` -> the artist itself.
-
-    The ``related`` source kind is intentionally NOT resolved here: related /
-    adjacent expansion is driven by the ``similar_artist_ratio`` parameter against
-    the resolved target set (see ``generate_playlist`` / ``score_and_build_playlist``),
-    pending the param-vs-source-count reconciliation deferred to #128 UI work.
+    * ``artist`` -> the artist itself (including artists added by related-artist
+      enrichment, which persists them as concrete ``artist`` sources, #133).
 
     Returns the deduplicated, exclude-filtered artists in first-seen order (event
     sources before artist sources), each tagged with provenance. This is the single
@@ -990,79 +939,13 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 artist_ids, track_coverage, discovery_wanted
             )
 
-            # Adjacent (similar) library artists also get catalog discovery when
-            # the profile wants discovery AND blends in similar artists (#115).
-            # Resolve ONCE here (fan-out and scoring run in separate sessions, so
-            # re-resolving independently would be non-deterministic), cap by
-            # similarity rank, and persist the capped set onto the parent task so
-            # scoring expands the candidate pool to exactly this fetched set.
-            adjacent_artist_ids: list[uuid.UUID] = []
-            library_adjacent_count = 0
-            imported_adjacent_count = 0
-            similar_ratio = gen_params.get("similar_artist_ratio", 0)
-            if similar_ratio > 0 and discovery_wanted:
-                similar_connectors = wctx["connector_registry"].get_by_capability(
-                    base_module.ConnectorCapability.SIMILAR_ARTISTS
-                )
-                if similar_connectors:
-                    resolution = await _resolve_adjacent_artists(
-                        session,
-                        similar_connectors,
-                        list(artists_by_id.values()),
-                        set(artist_ids),
-                    )
-                    # Prefer library-adjacent artists (free: no import, no extra
-                    # MusicBrainz lookup); fill any remaining slots with newly
-                    # imported recommended artists by rank (#115 Phase 2).
-                    library_ids = resolution.library_ids[:_MAX_ADJACENT_DISCOVERY]
-                    library_adjacent_count = len(library_ids)
-                    remaining = _MAX_ADJACENT_DISCOVERY - len(library_ids)
-                    imported_ids: list[uuid.UUID] = []
-                    if remaining > 0 and resolution.import_candidates:
-                        lb_connector = wctx["connector_registry"].get_base_connector(
-                            types_module.ServiceType.LISTENBRAINZ
-                        )
-                        if lb_connector is not None:
-                            imported_ids = await _import_adjacent_candidates(
-                                session,
-                                lb_connector,
-                                resolution.import_candidates,
-                                limit=min(remaining, _MAX_IMPORTED_ADJACENT),
-                                exclude_ids=set(library_ids),
-                                log=log,
-                            )
-                    imported_adjacent_count = len(imported_ids)
-                    adjacent_artist_ids = (library_ids + imported_ids)[
-                        :_MAX_ADJACENT_DISCOVERY
-                    ]
-
-            # Persist the capped adjacent set (possibly empty) so scoring reads
-            # the SAME artists this fan-out fetched, not a fresh re-resolve.
-            # Reassigning a new dict triggers SQLAlchemy change detection.
-            task.params = {
-                **task.params,
-                "adjacent_artist_ids": [str(aid) for aid in adjacent_artist_ids],
-            }
-
-            # Load adjacent artist objects (name + service_links) for the
-            # discovery children; discover_tracks_for_artist needs both.
-            adjacent_artists_by_id: dict[uuid.UUID, music_models.Artist] = {}
-            if adjacent_artist_ids:
-                adjacent_artists_result = await session.execute(
-                    sa.select(music_models.Artist).where(
-                        music_models.Artist.id.in_(adjacent_artist_ids)
-                    )
-                )
-                adjacent_artists_by_id = {
-                    a.id: a for a in adjacent_artists_result.scalars().all()
-                }
-
-            # Merge target discovery candidates with the capped adjacent set,
-            # deduped so no artist is enqueued twice.
-            discovery_artist_ids = _merge_adjacent_discovery_targets(
-                artists_needing_discovery, adjacent_artist_ids
-            )
-            artist_lookup = {**artists_by_id, **adjacent_artists_by_id}
+            # Generation uses exactly the resolved pool -- the concrete artists in
+            # input_references, including any added by related-artist enrichment
+            # (#133). There is no generation-time related/adjacent expansion: that
+            # moved to the explicit enrich task, which persists discovered artists
+            # into the pool as concrete sources beforehand.
+            discovery_artist_ids = artists_needing_discovery
+            artist_lookup = artists_by_id
 
             # Create child tasks
             arq_redis = wctx["redis"]
@@ -1126,9 +1009,6 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 "generate_playlist_planned",
                 discovery_tasks=len(discovery_artist_ids),
                 target_discovery_tasks=len(artists_needing_discovery),
-                adjacent_discovery_tasks=len(adjacent_artist_ids),
-                library_adjacent_count=library_adjacent_count,
-                imported_adjacent_count=imported_adjacent_count,
                 total_children=len(children),
             )
 
@@ -1312,85 +1192,6 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             await _check_parent_completion(session, task, arq_redis, log)
 
 
-async def _resolve_similar_library_artists(
-    session: sa_async.AsyncSession,
-    connectors: collections.abc.Sequence[Any],
-    target_artists: collections.abc.Sequence[music_models.Artist],
-    exclude_ids: set[uuid.UUID],
-    *,
-    per_artist_limit: int = 30,
-) -> list[uuid.UUID]:
-    """Resolve library artists similar to the targets (issue #103, Mode 1).
-
-    For each target artist, ask every similar-artist provider for neighbors and
-    collect their names in first-seen order, then match those names against
-    artists already in the library. Returns the matching local artist IDs in
-    provider similarity rank (first-seen order across the providers/targets),
-    deduped, excluding ``exclude_ids`` (the target set). Similar artists not
-    already in the library are ignored (importing their tracks is out of scope;
-    that is track discovery, a separate feature).
-
-    Ordering matters for issue #115: callers take the top-N adjacent artists by
-    rank for catalog discovery, so the result must be a deterministic ordered
-    list rather than an unordered set. Providers return neighbors most-similar
-    first, so preserving first-seen order approximates a cross-provider ranking
-    good enough to cap on.
-
-    Multiple providers are complementary: a name-based provider (Last.fm) covers
-    artists by name, while an MBID-keyed provider (ListenBrainz) only resolves
-    artists carrying a MusicBrainz ID. Merging the results widens recall.
-
-    Args:
-        session: Async DB session.
-        connectors: Connectors exposing ``get_similar_artists``.
-        target_artists: The event's target (lineup) artists.
-        exclude_ids: Artist IDs to exclude from the result (the target set).
-        per_artist_limit: Max similar artists to request per target artist.
-
-    Returns:
-        Ordered list of local artist IDs similar to the target artists, in
-        provider similarity rank, deduped, minus ``exclude_ids``.
-    """
-    # First-seen order of lowercased neighbor names = approximate similarity
-    # rank across providers/targets. A dict preserves insertion order and dedups.
-    ordered_names: dict[str, None] = {}
-    for artist in target_artists:
-        mbid: str | None = None
-        links = artist.service_links or {}
-        mb = links.get("musicbrainz")
-        if isinstance(mb, dict):
-            raw_id = mb.get("id")
-            mbid = str(raw_id) if raw_id else None
-        for connector in connectors:
-            neighbors = await connector.get_similar_artists(
-                artist.name, mbid=mbid, limit=per_artist_limit
-            )
-            for neighbor in neighbors:
-                name = neighbor.get("name")
-                if name:
-                    ordered_names.setdefault(name.lower(), None)
-
-    if not ordered_names:
-        return []
-
-    result = await session.execute(
-        sa.select(
-            sa.func.lower(music_models.Artist.name), music_models.Artist.id
-        ).where(sa.func.lower(music_models.Artist.name).in_(ordered_names.keys()))
-    )
-    # Map each lowercased library-artist name to its id (the DB query order is
-    # arbitrary), then walk the names in similarity rank to build the result.
-    id_by_name: dict[str, uuid.UUID] = {row[0]: row[1] for row in result.all()}
-    ordered_ids: list[uuid.UUID] = []
-    seen: set[uuid.UUID] = set(exclude_ids)
-    for name in ordered_names:
-        aid = id_by_name.get(name)
-        if aid is not None and aid not in seen:
-            seen.add(aid)
-            ordered_ids.append(aid)
-    return ordered_ids
-
-
 @dataclasses.dataclass(frozen=True)
 class _AdjacentResolution:
     """Resolved adjacent artists for discovery (issue #115 Phase 2).
@@ -1429,10 +1230,10 @@ async def _resolve_adjacent_artists(
 ) -> _AdjacentResolution:
     """Resolve similar artists into library matches AND import candidates.
 
-    Phase 2 of issue #115. Where ``_resolve_similar_library_artists`` returns
-    only neighbors already in the library, this also surfaces neighbors NOT in
-    the library as import candidates (name + MBID), so the caller can import
-    them and run the same catalog discovery the library-adjacent artists get.
+    Splits each target's neighbors into those already in the library (returned as
+    ids) and those NOT in the library (returned as ``(name, MBID)`` import
+    candidates), so the caller can import the new ones. Used by the related-artist
+    enrich task (#133); origin issue #115 Phase 2.
 
     Dedup follows design decision (d): a neighbor whose MBID matches a library
     artist is treated as a library match even under a different name (MBID
@@ -1983,14 +1784,10 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             pool = await resolve_pool(session, profile.input_references)
             artist_ids: set[uuid.UUID] = {r.artist_id for r in pool}
 
-            # Apply parameter defaults early — adjacent-artist expansion below
-            # is gated on similar_artist_ratio.
             params = params_module.apply_defaults(dict(profile.parameter_values))
 
-            # Load the parent PLAYLIST_GENERATION task up front. It carries both
-            # generation-time options (max_tracks, freshness_target) and, when
-            # the fan-out ran adjacent discovery (#115), the capped, ranked
-            # adjacent_artist_ids that scoring must use verbatim.
+            # Load the parent PLAYLIST_GENERATION task for its generation-time
+            # options (max_tracks, freshness_target).
             parent_params: dict[str, object] = {}
             if task.parent_id is not None:
                 parent_result = await session.execute(
@@ -2002,53 +1799,13 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 if parent is not None:
                     parent_params = parent.params or {}
 
-            # Expand the candidate pool with adjacent (similar) library artists.
-            # Their tracks enter as is_target_artist=False candidates, which the
-            # scoring engine scales by similar_artist_ratio.
-            #
-            # Resolve-once-and-persist (#115): when the fan-out already resolved
-            # and capped the adjacent set, read it from the parent params so the
-            # pool spans EXACTLY the artists whose catalogs were fetched. The cap
-            # therefore bounds pool membership too: low-rank adjacent artists
-            # outside the cap are not pulled in with stale heard tracks. Fall
-            # back to a fresh re-resolve only for older tasks / paths that
-            # persisted nothing (key absent), preserving prior behavior (#103).
+            # Scoring spans exactly the resolved pool (#133): the concrete artists
+            # in input_references, including any the enrich task added. There is no
+            # generation-time similar-artist expansion -- discovery happens up front
+            # via the enrich task, which persists found artists into the pool.
             query_artist_ids: set[uuid.UUID] = set(artist_ids)
-            persisted_adjacent_raw = parent_params.get("adjacent_artist_ids")
-            if persisted_adjacent_raw is not None:
-                if isinstance(persisted_adjacent_raw, list):
-                    persisted_adjacent = {
-                        uuid.UUID(str(aid)) for aid in persisted_adjacent_raw
-                    }
-                    query_artist_ids |= persisted_adjacent
-                    log.info(
-                        "similar_artists_from_parent",
-                        adjacent_count=len(persisted_adjacent),
-                    )
-            elif params.get("similar_artist_ratio", 0) > 0:
-                similar_connectors = wctx["connector_registry"].get_by_capability(
-                    base_module.ConnectorCapability.SIMILAR_ARTISTS
-                )
-                if similar_connectors:
-                    target_artists_result = await session.execute(
-                        sa.select(music_models.Artist).where(
-                            music_models.Artist.id.in_(artist_ids)
-                        )
-                    )
-                    adjacent_ids = await _resolve_similar_library_artists(
-                        session,
-                        similar_connectors,
-                        list(target_artists_result.scalars().all()),
-                        artist_ids,
-                    )
-                    query_artist_ids |= set(adjacent_ids)
-                    log.info(
-                        "similar_artists_resolved",
-                        adjacent_count=len(adjacent_ids),
-                        provider_count=len(similar_connectors),
-                    )
 
-            # Query all tracks by these artists (target + any adjacent)
+            # Query all tracks by the pool artists.
             tracks_result = await session.execute(
                 sa.select(music_models.Track)
                 .where(music_models.Track.artist_id.in_(query_artist_ids))
@@ -2132,9 +1889,8 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     )
                 )
 
-            # max_tracks and freshness_target are generation-time options
-            # stored on the parent PLAYLIST_GENERATION task (loaded earlier as
-            # parent_params, alongside the persisted adjacent_artist_ids).
+            # max_tracks and freshness_target are generation-time options stored
+            # on the parent PLAYLIST_GENERATION task (loaded earlier).
             max_tracks = int(str(parent_params.get("max_tracks", 50)))
             freshness_target_raw = parent_params.get("freshness_target")
             freshness_target: int | None = (
@@ -2179,23 +1935,12 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 (time_module.monotonic() - generation_start) * 1000
             )
             # Snapshot the resolved pool for reproducibility/audit (#128): sources
-            # re-resolve live, so record the exact artists that fed this run. The
-            # source pool keeps its provenance (event/artist); adjacent artists
-            # folded in by similar_artist_ratio are tagged related.
+            # re-resolve live, so record the exact artists that fed this run, each
+            # with its provenance (event/artist).
             pool_snapshot: list[dict[str, str]] = [
                 {"artist_id": str(resolved.artist_id), "via": resolved.via.value}
                 for resolved in pool
             ]
-            pool_snapshot.extend(
-                {
-                    "artist_id": str(adjacent_id),
-                    "via": pool_module.PoolProvenance.RELATED.value,
-                }
-                for adjacent_id in sorted(
-                    query_artist_ids - {resolved.artist_id for resolved in pool},
-                    key=str,
-                )
-            )
             gen_record = generator_models.GenerationRecord(
                 id=uuid.uuid4(),
                 profile_id=uuid.UUID(profile_id),

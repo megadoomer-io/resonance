@@ -27,7 +27,7 @@ class TestBuildCandidateList:
         ]
         result = concert_prep_module.score_and_select(
             candidates=library_tracks,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids=set(),
             freshness_target=None,
@@ -52,7 +52,7 @@ class TestBuildCandidateList:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=20,
             previous_track_ids=set(),
             freshness_target=None,
@@ -90,7 +90,7 @@ class TestFreshnessFilter:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids={prev_id},
             freshness_target=100,
@@ -116,7 +116,7 @@ class TestFreshnessFilter:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids={prev_id},
             freshness_target=0,
@@ -156,7 +156,7 @@ class TestFreshnessFilter:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=10,
             previous_track_ids=set(prev_ids),
             freshness_target=50,
@@ -183,7 +183,7 @@ class TestFreshnessFilter:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids={prev_id},
             freshness_target=None,
@@ -209,7 +209,7 @@ class TestSelectionResult:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 80, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 80, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids=set(),
             freshness_target=None,
@@ -244,7 +244,7 @@ class TestSelectionResult:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids=set(),
             freshness_target=None,
@@ -269,7 +269,7 @@ class TestSelectionResult:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids=set(),
             freshness_target=None,
@@ -306,7 +306,7 @@ class TestSelectionResult:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids={prev_id},
             freshness_target=None,
@@ -318,7 +318,7 @@ class TestSelectionResult:
         """Empty candidate list produces empty result."""
         result = concert_prep_module.score_and_select(
             candidates=[],
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=30,
             previous_track_ids=set(),
             freshness_target=None,
@@ -345,7 +345,7 @@ class TestSelectionResult:
         ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=10,
             previous_track_ids=set(),
             freshness_target=None,
@@ -358,7 +358,7 @@ class TestSelectionResult:
 # listen_count: familiarity=100 gives familiarity full positive weight, hit_depth=50
 # makes popularity neutral. So higher listen_count => strictly higher score, which
 # lets the selection tests control ranking deterministically.
-_FAMILIARITY_DRIVEN = {"familiarity": 100, "hit_depth": 50, "similar_artist_ratio": 0}
+_FAMILIARITY_DRIVEN = {"familiarity": 100, "hit_depth": 50}
 
 
 def _artist_candidate(
@@ -581,7 +581,7 @@ class TestKnownVsDiscoveryDistribution:
             candidates=candidates,
             # Favor known tracks: heard artist wins the fill, unheard stays at its
             # one guaranteed token.
-            params={"familiarity": 100, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 100, "hit_depth": 50},
             max_tracks=8,
             previous_track_ids=set(),
             freshness_target=None,
@@ -597,7 +597,7 @@ class TestKnownVsDiscoveryDistribution:
         result = concert_prep_module.score_and_select(
             candidates=candidates,
             # Favor discovery: unheard tracks win the fill slots.
-            params={"familiarity": 0, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 0, "hit_depth": 50},
             max_tracks=8,
             previous_track_ids=set(),
             freshness_target=None,
@@ -638,7 +638,7 @@ class TestHitDepthReorders:
         candidates = self._popularity_pool()
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 100, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 100},
             max_tracks=10,
             previous_track_ids=set(),
             freshness_target=None,
@@ -651,7 +651,7 @@ class TestHitDepthReorders:
         candidates = self._popularity_pool()
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 0, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 0},
             max_tracks=10,
             previous_track_ids=set(),
             freshness_target=None,
@@ -680,7 +680,7 @@ class TestEventProfileRegression:
             ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            params={"familiarity": 50, "hit_depth": 50, "similar_artist_ratio": 0},
+            params={"familiarity": 50, "hit_depth": 50},
             max_tracks=20,
             previous_track_ids=set(),
             freshness_target=None,
