@@ -17,6 +17,9 @@ def _make_request(
     request = MagicMock(spec=fastapi.Request)
     request.state = MagicMock()
     request.state.session = session or {}
+    # No Authorization header by default, so require_user's admin-bearer fallback
+    # (#133) is a no-op and unauthenticated requests still redirect to /login.
+    request.headers = {}
     return request
 
 

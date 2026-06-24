@@ -112,34 +112,55 @@ async def get_current_user_id(
     if user_id is not None:
         return uuid.UUID(user_id)
 
-    # 2. Try bearer token → assumed user (if selected) or owner
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        settings = request.app.state.settings
-        if settings.admin_api_token and token == settings.admin_api_token:
-            selector = _assume_user_selector(request)
-            if selector is not None:
-                return await _resolve_assumed_user(request, selector)
-
-            # Default: resolve to the owner user
-            factory = request.app.state.session_factory
-            async with factory() as db:
-                result = await db.execute(
-                    sa.select(user_models.User.id)
-                    .where(user_models.User.role == types_module.UserRole.OWNER)
-                    .limit(1)
-                )
-                owner_id = result.scalar_one_or_none()
-                if owner_id is not None:
-                    return uuid.UUID(str(owner_id))
-            raise fastapi.HTTPException(status_code=500, detail="No owner user found")
-        raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
+    # 2. Try the admin bearer token (assumed user or owner).
+    resolved = await resolve_bearer_user(request)
+    if resolved is not None:
+        return resolved
 
     raise fastapi.HTTPException(
         status_code=401,
         detail="Not authenticated",
     )
+
+
+async def resolve_bearer_user(request: fastapi.Request) -> uuid.UUID | None:
+    """Resolve a request's admin bearer token to a user id, else None.
+
+    Returns ``None`` when there is no ``Authorization: Bearer`` header (the caller
+    decides what unauthenticated means — 401 for the API, a login redirect for the
+    UI). A valid admin token resolves to the assume-user selector (#135) when
+    present, otherwise the owner. An invalid token raises 403 — a wrong token is an
+    explicit auth failure, not "unauthenticated", so it never falls through to a
+    session/login path.
+
+    Shared by ``get_current_user_id`` (API) and ``ui.common.require_user`` (UI) so
+    agents can drive the UI with the admin token exactly as they drive the API.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header[7:]
+    settings = request.app.state.settings
+    if not settings.admin_api_token or token != settings.admin_api_token:
+        raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
+
+    selector = _assume_user_selector(request)
+    if selector is not None:
+        return await _resolve_assumed_user(request, selector)
+
+    # Default: resolve to the owner user.
+    factory = request.app.state.session_factory
+    async with factory() as db:
+        result = await db.execute(
+            sa.select(user_models.User.id)
+            .where(user_models.User.role == types_module.UserRole.OWNER)
+            .limit(1)
+        )
+        owner_id = result.scalar_one_or_none()
+        if owner_id is not None:
+            return uuid.UUID(str(owner_id))
+    raise fastapi.HTTPException(status_code=500, detail="No owner user found")
 
 
 def verify_admin_access(request: fastapi.Request) -> None:

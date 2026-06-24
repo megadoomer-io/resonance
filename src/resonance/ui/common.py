@@ -13,6 +13,7 @@ import fastapi.templating
 
 import resonance.connectors.registry as registry_module
 import resonance.database as database_module
+import resonance.dependencies as deps_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -101,16 +102,23 @@ templates.env.filters["service_color"] = _service_color
 
 
 async def require_user(request: fastapi.Request) -> uuid.UUID:
-    """Return authenticated user_id or redirect to /login.
+    """Return authenticated user_id, or redirect to /login.
+
+    Session cookie first (browser users), then the admin bearer token + assume-user
+    path (#133) so an agent can drive UI pages with the admin token exactly as it
+    drives the API. Only a request with neither redirects to /login.
 
     Use as a FastAPI dependency::
 
         user_id: Annotated[uuid.UUID, Depends(require_user)]
     """
     user_id = request.state.session.get("user_id")
-    if not user_id:
-        raise fastapi.HTTPException(status_code=307, headers={"Location": "/login"})
-    return uuid.UUID(user_id)
+    if user_id:
+        return uuid.UUID(user_id)
+    resolved = await deps_module.resolve_bearer_user(request)
+    if resolved is not None:
+        return resolved
+    raise fastapi.HTTPException(status_code=307, headers={"Location": "/login"})
 
 
 async def require_admin(request: fastapi.Request) -> uuid.UUID:

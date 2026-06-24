@@ -174,3 +174,58 @@ class TestAssumeUser:
         await dependencies.get_current_user_id(req, {})
         assert fake_logger.info.called
         assert fake_logger.info.call_args.args[0] == "admin_assume_user"
+
+
+class TestRequireUserBearer:
+    """UI require_user honors the admin bearer + assume path (#133)."""
+
+    @staticmethod
+    def _ui_request(**kw: Any) -> fastapi.Request:
+        req = _make_request(**kw)
+        req.state.session = {}  # no cookie session
+        return req
+
+    async def test_session_wins_over_bearer(self) -> None:
+        import resonance.ui.common as common
+
+        req = _make_request(settings=_settings(), db_scalar=_OWNER)
+        req.state.session = {"user_id": str(_OWNER)}
+        assert await common.require_user(req) == _OWNER
+
+    async def test_bearer_plus_assume_resolves_user(self) -> None:
+        import resonance.ui.common as common
+
+        req = self._ui_request(
+            settings=_settings(),
+            db_scalar=_ASSUMED,
+            auth=f"Bearer {_ADMIN_TOKEN}",
+            assume_header=str(_ASSUMED),
+        )
+        assert await common.require_user(req) == _ASSUMED
+
+    async def test_bearer_without_selector_resolves_owner(self) -> None:
+        import resonance.ui.common as common
+
+        req = self._ui_request(
+            settings=_settings(), db_scalar=_OWNER, auth=f"Bearer {_ADMIN_TOKEN}"
+        )
+        assert await common.require_user(req) == _OWNER
+
+    async def test_no_auth_redirects_to_login(self) -> None:
+        import resonance.ui.common as common
+
+        req = self._ui_request(settings=_settings(), db_scalar=None)
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await common.require_user(req)
+        assert exc.value.status_code == 307
+        assert exc.value.headers["Location"] == "/login"
+
+    async def test_invalid_token_is_403(self) -> None:
+        import resonance.ui.common as common
+
+        req = self._ui_request(
+            settings=_settings(), db_scalar=None, auth="Bearer wrong-token"
+        )
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await common.require_user(req)
+        assert exc.value.status_code == 403
