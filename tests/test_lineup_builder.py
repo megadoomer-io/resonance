@@ -10,7 +10,7 @@ import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import fastapi
 import httpx
@@ -166,99 +166,66 @@ def user_id() -> uuid.UUID:
     return uuid.uuid4()
 
 
-# --- create_playlist POST (direct call) ---
+# --- server-backed editor: new (create-draft) + edit (#133) ---
 
 
-class TestCreatePlaylistLayeredReferences:
-    async def test_builds_layered_input_references(self, user_id: uuid.UUID) -> None:
-        event_id = str(uuid.uuid4())
-        artist_a = str(uuid.uuid4())
-        artist_b = str(uuid.uuid4())
-        payload = {
-            "sources": [
-                {"kind": "event", "event_id": event_id, "enabled": True},
-                {"kind": "artist", "artist_id": artist_a, "enabled": True},
-                {"kind": "artist", "artist_id": artist_b, "enabled": True},
-            ],
-            "exclude_artist_ids": [artist_b],
-        }
-        form = {
-            "generator_type": "concert_prep",
-            "max_tracks": "40",
-            "name": "My Mix",
-            "input_references_json": json.dumps(payload),
-            "param_familiarity": "70",
-            "param_hit_depth": "30",
-        }
+class TestNewPlaylistCreatesDraft:
+    async def test_creates_empty_draft_and_redirects_to_editor(
+        self, user_id: uuid.UUID
+    ) -> None:
         request = MagicMock(spec=fastapi.Request)
-        request.form = AsyncMock(return_value=form)
-        request.app.state.arq_redis.enqueue_job = AsyncMock()
         db = FakeAsyncSession()
 
-        resp = await playlists_ui.create_playlist(request, user_id, db)
+        resp = await playlists_ui.new_playlist_page(request, user_id, db, "", "")
 
         assert resp.status_code == 303
-        assert "/playlists/generating/" in resp.headers["location"]
-
+        assert resp.headers["location"].endswith("/edit")
         profiles = [a for a in db.added if hasattr(a, "input_references")]
         assert len(profiles) == 1
         profile = profiles[0]
-        assert profile.input_references == payload
-        assert profile.parameter_values == {"familiarity": 70, "hit_depth": 30}
-        assert profile.name == "My Mix"
-        assert profile.generator_type == types_module.GeneratorType.CONCERT_PREP
+        assert profile.status == types_module.ProfileStatus.DRAFT
+        assert profile.input_references == {"sources": [], "exclude_artist_ids": []}
+        # No generation is triggered on open.
+        assert not any(hasattr(a, "task_type") for a in db.added)
 
-        tasks = [a for a in db.added if hasattr(a, "task_type")]
-        assert len(tasks) == 1
-        assert tasks[0].params["profile_id"] == str(profile.id)
-        assert tasks[0].params["max_tracks"] == 40
-        request.app.state.arq_redis.enqueue_job.assert_awaited_once()
-
-    async def test_excludes_carry_through(self, user_id: uuid.UUID) -> None:
-        """An unchecked event artist is stored in exclude_artist_ids."""
+    async def test_preseeds_event_source(self, user_id: uuid.UUID) -> None:
         event_id = str(uuid.uuid4())
-        opener = str(uuid.uuid4())
-        payload = {
-            "sources": [{"kind": "event", "event_id": event_id, "enabled": True}],
-            "exclude_artist_ids": [opener],
-        }
-        form = {
-            "generator_type": "concert_prep",
-            "max_tracks": "30",
-            "name": "Concert",
-            "input_references_json": json.dumps(payload),
-        }
-        request = MagicMock(spec=fastapi.Request)
-        request.form = AsyncMock(return_value=form)
-        request.app.state.arq_redis.enqueue_job = AsyncMock()
         db = FakeAsyncSession()
+        # _default_playlist_name resolves the event via db.get (no venue).
+        db.set_get_returns([SimpleNamespace(title="Big Show", venue_id=None)])
+        request = MagicMock(spec=fastapi.Request)
 
-        resp = await playlists_ui.create_playlist(request, user_id, db)
+        resp = await playlists_ui.new_playlist_page(request, user_id, db, event_id, "")
 
         assert resp.status_code == 303
         profile = next(a for a in db.added if hasattr(a, "input_references"))
-        assert profile.input_references["exclude_artist_ids"] == [opener]
+        assert profile.input_references["sources"] == [
+            {"kind": "event", "event_id": event_id, "enabled": True}
+        ]
+        assert profile.name == "Concert Prep: Big Show"
 
-    async def test_empty_pool_is_rejected(self, user_id: uuid.UUID) -> None:
-        """A lineup with no enabled sources must not create a profile."""
-        form = {
-            "generator_type": "concert_prep",
-            "max_tracks": "30",
-            "name": "Empty",
-            "input_references_json": json.dumps({"sources": []}),
-        }
-        request = MagicMock(spec=fastapi.Request)
-        request.form = AsyncMock(return_value=form)
-        request.app.state.arq_redis.enqueue_job = AsyncMock()
-        # Error path re-renders the form, which queries upcoming events.
+    async def test_ignores_bad_event_id(self, user_id: uuid.UUID) -> None:
         db = FakeAsyncSession()
-        db.set_results([FakeResult([])])
+        request = MagicMock(spec=fastapi.Request)
 
-        resp = await playlists_ui.create_playlist(request, user_id, db)
+        resp = await playlists_ui.new_playlist_page(
+            request, user_id, db, "not-a-uuid", ""
+        )
 
-        assert resp.status_code == 400
-        assert not any(hasattr(a, "input_references") for a in db.added)
-        request.app.state.arq_redis.enqueue_job.assert_not_called()
+        assert resp.status_code == 303
+        profile = next(a for a in db.added if hasattr(a, "input_references"))
+        assert profile.input_references["sources"] == []
+
+
+class TestEditPlaylistPage:
+    async def test_404_for_missing_profile(self, user_id: uuid.UUID) -> None:
+        db = FakeAsyncSession()
+        db.set_results([FakeResult([])])  # profile lookup -> none
+        request = MagicMock(spec=fastapi.Request)
+
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await playlists_ui.edit_playlist_page(request, user_id, db, uuid.uuid4())
+        assert exc.value.status_code == 404
 
 
 # --- event lineup endpoint ---

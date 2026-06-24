@@ -386,6 +386,59 @@ class TestUpdateProfileConcurrency:
         assert db.rolled_back is True
 
 
+class TestUpdateProfileExpectedVersion:
+    """update_profile honors the client's optimistic-version token (#133)."""
+
+    async def test_stale_expected_version_returns_409(self) -> None:
+        profile = SimpleNamespace(
+            id=uuid.uuid4(),
+            name="old",
+            version=3,
+            status=types_module.ProfileStatus.ACTIVE,
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references={},
+            parameter_values={},
+        )
+        db = _FakeSession([_FakeResult([profile])])
+        body = generators_module.UpdateProfileRequest(name="new", expected_version=1)
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await generators_module.update_profile(profile.id, body, uuid.uuid4(), db)
+        assert exc.value.status_code == 409
+
+    async def test_matching_expected_version_updates(self) -> None:
+        profile = SimpleNamespace(
+            id=uuid.uuid4(),
+            name="old",
+            version=3,
+            status=types_module.ProfileStatus.ACTIVE,
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references={},
+            parameter_values={},
+        )
+        db = _FakeSession([_FakeResult([profile])])
+        body = generators_module.UpdateProfileRequest(name="new", expected_version=3)
+        result = await generators_module.update_profile(
+            profile.id, body, uuid.uuid4(), db
+        )
+        assert result["status"] == "updated"
+        assert profile.name == "new"
+
+
+class TestGenerateFlipsDraftActive:
+    """First generate flips a draft profile to active (#133)."""
+
+    async def test_draft_becomes_active(self) -> None:
+        profile = SimpleNamespace(
+            id=uuid.uuid4(), status=types_module.ProfileStatus.DRAFT
+        )
+        db = _FakeSession([_FakeResult([profile]), _FakeResult([])])
+        result = await generators_module.trigger_generation(
+            profile.id, _fake_request(), uuid.uuid4(), db, None
+        )
+        assert result["status"] == "started"
+        assert profile.status == types_module.ProfileStatus.ACTIVE
+
+
 class TestMutualExclusion:
     """Generation and enrichment block each other via the shared helper."""
 
@@ -403,7 +456,9 @@ class TestMutualExclusion:
         assert exc.value.status_code == 409
 
     async def test_generate_blocked_by_running_enrichment(self) -> None:
-        profile = SimpleNamespace(id=uuid.uuid4())
+        profile = SimpleNamespace(
+            id=uuid.uuid4(), status=types_module.ProfileStatus.ACTIVE
+        )
         running_enrich = SimpleNamespace(
             id=uuid.uuid4(),
             task_type=types_module.TaskType.RELATED_ARTIST_ENRICHMENT,

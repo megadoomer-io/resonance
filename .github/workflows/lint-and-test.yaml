@@ -29,3 +29,14 @@ jobs:
 
       - name: Tests
         run: uv run pytest --tb=short
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Front-end unit tests (vitest)
+        run: npm test

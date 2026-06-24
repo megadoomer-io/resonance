@@ -11,3 +11,6 @@ dist/
 .gstack/
 data/
 .env
+
+# Node / front-end tests (vitest)
+node_modules/

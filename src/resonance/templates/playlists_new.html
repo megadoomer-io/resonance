@@ -1,91 +1,109 @@
 {% extends "base.html" %}
-{% block title %}New Playlist — resonance{% endblock %}
+{% block title %}Edit Playlist — resonance{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="/static/lineup.css">
 {% endblock %}
 {% block content %}
-<p><a href="/playlists">&larr; Back to Playlists</a></p>
-<h2>New Playlist</h2>
+<p><a class="backlink" href="/playlists">&larr; Back to Playlists</a></p>
 
-{% if error %}
-<div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid var(--error); background: var(--surface);">
-    <small style="color: var(--error)">{{ error }}</small>
+<div class="editor-top">
+    <h2>Playlist</h2>
+    <span class="autosave" id="autosave" hidden><span class="dot"></span> <span class="autosave-label">Saved</span></span>
 </div>
-{% endif %}
 
-<form method="post" action="/playlists/new" id="lineup-form">
-    <input type="hidden" name="generator_type" value="{{ selected_type or 'concert_prep' }}">
-    <input type="hidden" name="input_references_json" id="input-references-json" value="">
+<div class="lineup-conflict" id="lineup-conflict" hidden>
+    <span>This playlist was changed elsewhere. Reload to see the latest before editing.</span>
+    <button type="button" id="conflict-reload">Reload</button>
+</div>
 
-    <!-- Lineup -->
-    <article>
-        <header>Lineup <small class="lineup-hint">— who's in this playlist. Uncheck an artist to leave them out.</small></header>
+<!-- Lineup -->
+<article>
+    <header>Lineup <small class="lineup-hint">— who's in this playlist. Uncheck an artist to leave them out.</small></header>
 
-        <div class="lineup-add">
-            <select class="add-event" id="add-event-select" aria-label="Add an event">
-                <option value="">+ Add event…</option>
-                {% for event in events %}
-                <option value="{{ event.id }}"
-                        data-title="{{ event.title }}"
-                        data-date="{{ event.event_date }}"
-                        data-venue="{% if event.venue %}{{ event.venue.name }}{% endif %}">
-                    {{ event.title }} — {{ event.event_date }}{% if event.venue %} @ {{ event.venue.name }}{% endif %}
-                </option>
-                {% endfor %}
-            </select>
+    <div class="lineup-add">
+        <select class="add-event" id="add-event-select" aria-label="Add an event">
+            <option value="">+ Add event…</option>
+            {% for event in events %}
+            <option value="{{ event.id }}"
+                    data-title="{{ event.title }}"
+                    data-date="{{ event.event_date }}"
+                    data-venue="{% if event.venue %}{{ event.venue.name }}{% endif %}">
+                {{ event.title }} — {{ event.event_date }}{% if event.venue %} @ {{ event.venue.name }}{% endif %}
+            </option>
+            {% endfor %}
+        </select>
 
-            <div class="picker">
-                <input type="search" id="artist-search" autocomplete="off"
-                       placeholder="+ Add artist…" aria-label="Search artists to add">
-                <div class="picker-dropdown" id="artist-results" hidden></div>
-            </div>
+        <div class="picker">
+            <input type="search" id="artist-search" autocomplete="off"
+                   placeholder="+ Add artist…" aria-label="Search artists to add">
+            <div class="picker-dropdown" id="artist-results" hidden></div>
         </div>
 
-        <div class="lineup-empty" id="lineup-empty">No artists yet — add an event or artist above.</div>
-        <div id="lineup-groups"></div>
-    </article>
-
-    <!-- Parameters -->
-    <article>
-        <header>Parameters</header>
-        {% for name, param in parameters.items() %}
-        <div class="param">
-            <div class="param-head">
-                <strong>{{ param.display_name }}</strong>
-                <small class="lineup-hint">{{ param.description }}</small>
-            </div>
-            <input type="range" name="param_{{ name }}" min="0" max="100"
-                   value="{{ param.default_value }}"
-                   oninput="this.parentElement.querySelector('.val').textContent = this.value">
-            <div class="slider-scale">
-                <small class="lbl-lo">{{ param.labels[0] }}</small>
-                <small class="val">{{ param.default_value }}</small>
-                <small class="lbl-hi">{{ param.labels[1] }}</small>
-            </div>
+        {% if similar_available %}
+        <div class="add-related">
+            <span class="lbl">Add related</span>
+            <input type="number" id="add-related-n" value="5" min="1" max="20"
+                   aria-label="How many related artists to add">
+            <button type="button" class="ghost" id="add-related-btn">+ Add from lineup</button>
         </div>
-        {% endfor %}
+        {% endif %}
+    </div>
 
-        <div style="max-width: 12rem;">
-            <label for="max_tracks">
-                Max Tracks
-                <input type="number" id="max_tracks" name="max_tracks" value="50" min="5" max="200">
-            </label>
+    {% if not similar_available %}
+    <div class="enrich-note" id="no-connector-note"
+         style="border:1px dashed var(--border-strong);border-radius:var(--radius-md);">
+        Connect a similar-artists service (ListenBrainz) to find related artists.
+        <a href="/connections">Connect →</a>
+    </div>
+    {% endif %}
+
+    <div class="lineup-empty" id="lineup-empty" hidden>No artists yet — add an event or artist above.</div>
+    <div id="lineup-groups"></div>
+</article>
+
+<!-- Parameters -->
+<article>
+    <header>Parameters</header>
+    {% for name, param in parameters.items() %}
+    <div class="param">
+        <div class="param-head">
+            <strong>{{ param.display_name }}</strong>
+            <small class="lineup-hint">{{ param.description }}</small>
         </div>
-    </article>
+        <input type="range" data-param="{{ name }}" min="0" max="100"
+               value="{{ parameter_values.get(name, param.default_value) }}"
+               oninput="this.parentElement.querySelector('.val').textContent = this.value">
+        <div class="slider-scale">
+            <small class="lbl-lo">{{ param.labels[0] }}</small>
+            <small class="val">{{ parameter_values.get(name, param.default_value) }}</small>
+            <small class="lbl-hi">{{ param.labels[1] }}</small>
+        </div>
+    </div>
+    {% endfor %}
 
-    <!-- Name -->
-    <article>
-        <label for="name">
-            Playlist Name
-            <input type="text" id="name" name="name" placeholder="Auto-generated if blank">
+    <div style="max-width: 12rem;">
+        <label for="max_tracks">
+            Max Tracks
+            <input type="number" id="max_tracks" name="max_tracks" value="50" min="5" max="200">
         </label>
-    </article>
+    </div>
+</article>
 
-    <button type="submit" id="lineup-submit">Generate Playlist</button>
-</form>
+<!-- Name -->
+<article>
+    <label for="name">
+        Playlist Name
+        <input type="text" id="name" name="name" value="{{ profile_name }}"
+               placeholder="Auto-generated if blank" style="width:100%;">
+    </label>
+</article>
 
+<button type="button" class="primary" id="generate-btn">Generate Playlist</button>
+
+<script id="lineup-data" type="application/json">{{ lineup_json | safe }}</script>
 <script>
-  window.LINEUP_PRESEED_EVENT = "{{ selected_event_id or '' }}";
+  window.LINEUP_PROFILE_ID = "{{ profile_id }}";
+  window.LINEUP_SIMILAR_AVAILABLE = {{ 'true' if similar_available else 'false' }};
 </script>
-<script src="/static/lineup.js" defer></script>
+<script type="module" src="/static/lineup.js"></script>
 {% endblock %}

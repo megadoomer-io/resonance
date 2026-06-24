@@ -63,11 +63,18 @@ class CreateProfileRequest(pydantic.BaseModel):
 
 
 class UpdateProfileRequest(pydantic.BaseModel):
-    """Request body for updating a generator profile."""
+    """Request body for updating a generator profile.
+
+    ``expected_version`` is the optimistic-concurrency token the client last saw
+    (#133). When provided and stale, the update is rejected with 409 before any
+    write, so a builder edit never clobbers a concurrent enrich worker's pool
+    rewrite. Omit it for unconditional updates (e.g. the CLI).
+    """
 
     name: str | None = None
     parameter_values: dict[str, int] | None = None
     input_references: dict[str, Any] | None = None
+    expected_version: int | None = None
 
 
 class GenerateRequest(pydantic.BaseModel):
@@ -264,6 +271,8 @@ async def create_profile(
         "profile_id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "profile_status": profile.status.value,
+        "version": profile.version,
     }
 
 
@@ -285,9 +294,16 @@ async def list_profiles(
     Returns:
         A list of profile summary dicts.
     """
+    # Only active profiles are listed; drafts (builder work-in-progress) are
+    # reached directly by id via the editor until first generate flips them
+    # active (#133).
     stmt = (
         sa.select(generator_models.GeneratorProfile)
-        .where(generator_models.GeneratorProfile.user_id == user_id)
+        .where(
+            generator_models.GeneratorProfile.user_id == user_id,
+            generator_models.GeneratorProfile.status
+            == types_module.ProfileStatus.ACTIVE,
+        )
         .order_by(generator_models.GeneratorProfile.created_at.desc())
     )
     result = await db.execute(stmt)
@@ -298,6 +314,8 @@ async def list_profiles(
             "id": str(profile.id),
             "name": profile.name,
             "generator_type": profile.generator_type.value,
+            "status": profile.status.value,
+            "version": profile.version,
             "input_references": profile.input_references,
             "parameter_values": profile.parameter_values,
             "created_at": profile.created_at.isoformat(),
@@ -354,6 +372,8 @@ async def get_profile(
         "id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "status": profile.status.value,
+        "version": profile.version,
         "input_references": profile.input_references,
         "parameter_values": profile.parameter_values,
         "auto_sync_targets": profile.auto_sync_targets,
@@ -411,6 +431,14 @@ async def update_profile(
     if profile is None:
         raise fastapi.HTTPException(status_code=404, detail="Profile not found")
 
+    # Optimistic-concurrency precheck: reject a stale edit before writing, so the
+    # builder never overwrites a concurrent enrich worker's pool rewrite (#133).
+    if body.expected_version is not None and body.expected_version != profile.version:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="Profile was modified concurrently; reload and retry",
+        )
+
     if body.name is not None:
         profile.name = body.name
     if body.parameter_values is not None:
@@ -445,6 +473,8 @@ async def update_profile(
         "id": str(profile.id),
         "name": profile.name,
         "generator_type": profile.generator_type.value,
+        "profile_status": profile.status.value,
+        "version": profile.version,
         "input_references": profile.input_references,
         "parameter_values": profile.parameter_values,
     }
@@ -537,6 +567,10 @@ async def trigger_generation(
 
     if profile is None:
         raise fastapi.HTTPException(status_code=404, detail="Profile not found")
+
+    # First generate flips a draft profile active so it appears in the list (#133).
+    if profile.status == types_module.ProfileStatus.DRAFT:
+        profile.status = types_module.ProfileStatus.ACTIVE
 
     gen_params = body or GenerateRequest()
 
