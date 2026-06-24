@@ -169,6 +169,9 @@ uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d
 - Small or straightforward changes can go directly to main
 - Use a feature branch + PR for larger or riskier changes
 - Single maintainer — in-session review is sufficient; no need to wait for async PR review
+- PRs can be opened ready for review (not draft) — no need to default to draft here
+- Use merge commits when merging PRs (not squash or rebase) — keeps related commits grouped so it's clear which commits belong to the same feature
+- These overrides supersede the global "always use a feature branch" and "prefer draft PRs" rules
 
 ## Conventions
 
