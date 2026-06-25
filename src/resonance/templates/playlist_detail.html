@@ -62,6 +62,14 @@
 {% if spotify_connections %}
 <article>
     <h3>Spotify Export</h3>
+    {% if export_in_progress %}
+    {# An export is already running -- show progress, not another Export button,
+       so a re-click can't spawn a duplicate Spotify playlist. #}
+    <p aria-busy="true" style="margin: 0;">
+        Exporting to Spotify…
+        <a href="/playlists/exporting/{{ playlist.id }}?task_ids={{ export_task_ids }}" style="font-size: 0.8rem;">View progress</a>
+    </p>
+    {% else %}
     {% for conn in spotify_connections %}
     {% set conn_id = conn.id | string %}
     {% set export_info = (playlist.service_links or {}).get('spotify', {}).get(conn_id) %}
@@ -91,6 +99,7 @@
         {% endif %}
     </div>
     {% endfor %}
+    {% endif %}
 </article>
 {% elif not spotify_connections and spotify_connections is defined %}
 <p><small>No Spotify connections. <a href="/account">Connect Spotify</a> to export playlists.</small></p>

@@ -18,6 +18,7 @@ import resonance.models.music as music_models
 import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.services.playlist_export as playlist_export_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -415,6 +416,22 @@ async def export_playlist(
                 detail="No Spotify connections found for user",
             )
 
+    # Skip connections that already have an in-flight export -- a duplicate
+    # request (e.g. an impatient re-click) must not create a second Spotify
+    # playlist. Already-running tasks are reported back as already_running.
+    active_tasks = await playlist_export_module.in_progress_export_tasks(
+        db, user_id, playlist_id
+    )
+    busy_connection_ids = playlist_export_module.export_connection_ids(active_tasks)
+    already_running = [
+        {
+            "task_id": str(t.id),
+            "connection_id": str((t.params or {}).get("connection_id")),
+        }
+        for t in active_tasks
+    ]
+    connections = [c for c in connections if c.id not in busy_connection_ids]
+
     # Create one task per connection and enqueue
     tasks_info: list[dict[str, str]] = []
     arq_redis = request.app.state.arq_redis
@@ -455,4 +472,4 @@ async def export_playlist(
 
     await db.commit()
 
-    return {"tasks": tasks_info}
+    return {"tasks": tasks_info, "already_running": already_running}

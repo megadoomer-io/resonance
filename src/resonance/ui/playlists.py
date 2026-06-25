@@ -22,6 +22,7 @@ import resonance.models.music as music_models
 import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.services.playlist_export as playlist_export_module
 import resonance.types as types_module
 import resonance.ui.common as common
 import resonance.ui.filters as filters_module
@@ -636,8 +637,18 @@ async def export_playlist_submit(
             status_code=400, detail="No Spotify connections found"
         )
 
-    task_ids: list[str] = []
-    for conn in connections:
+    # Don't start a second export for a connection that's already exporting --
+    # re-clicking while one is in flight is what produces duplicate Spotify
+    # playlists. Land the user on the in-progress page for those instead.
+    active_tasks = await playlist_export_module.in_progress_export_tasks(
+        db, user_id, playlist_id
+    )
+    busy_connection_ids = playlist_export_module.export_connection_ids(active_tasks)
+    new_connections = [c for c in connections if c.id not in busy_connection_ids]
+    existing_task_ids = [str(t.id) for t in active_tasks]
+
+    new_task_ids: list[str] = []
+    for conn in new_connections:
         task = task_models.Task(
             id=uuid.uuid4(),
             user_id=user_id,
@@ -650,18 +661,20 @@ async def export_playlist_submit(
             description=f"Export to Spotify ({conn.external_user_id or 'account'})",
         )
         db.add(task)
-        task_ids.append(str(task.id))
+        new_task_ids.append(str(task.id))
     await db.commit()
 
     arq_redis = request.app.state.arq_redis
-    for tid in task_ids:
+    for tid in new_task_ids:
         await arq_redis.enqueue_job(
             "export_playlist",
             tid,
             _job_id=f"export_playlist:{tid}",
         )
 
-    task_ids_param = ",".join(task_ids)
+    # Track both the newly-started and already-running tasks so the progress
+    # page reflects everything in flight for this playlist.
+    task_ids_param = ",".join(new_task_ids + existing_task_ids)
     return fastapi.responses.RedirectResponse(
         url=f"/playlists/exporting/{playlist_id}?task_ids={task_ids_param}",
         status_code=303,
@@ -814,6 +827,13 @@ async def playlist_detail_page(
     )
     spotify_connections = list(spotify_conn_result.scalars().all())
 
+    # Surface any in-flight export so the page shows "in progress" instead of a
+    # plain Export button (which invites a duplicate-creating re-click).
+    active_export_tasks = await playlist_export_module.in_progress_export_tasks(
+        db, user_id, playlist_id
+    )
+    export_task_ids = ",".join(str(t.id) for t in active_export_tasks)
+
     ctx = common.base_context(request)
     ctx.update(
         playlist=playlist,
@@ -821,6 +841,8 @@ async def playlist_detail_page(
         tracks=tracks,
         generation=generation,
         spotify_connections=spotify_connections,
+        export_in_progress=bool(active_export_tasks),
+        export_task_ids=export_task_ids,
         page=page,
         has_next=has_next,
         has_prev=page > 1,
