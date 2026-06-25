@@ -98,6 +98,7 @@
     {% if user_role in ("admin", "owner") %}
     <button
         hx-post="/api/v1/admin/test/connect"
+        hx-swap="none"
         hx-on::after-request="location.reload()"
         class="outline contrast"
     >Connect Test Service</button>

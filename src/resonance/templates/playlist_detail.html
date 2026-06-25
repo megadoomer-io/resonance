@@ -11,6 +11,7 @@
     <small>{{ playlist.track_count }} tracks &middot; {{ playlist.created_at | localtime(user_tz) }}</small>
     <button
         hx-delete="/api/v1/playlists/{{ playlist.id }}"
+        hx-swap="none"
         hx-confirm="Delete this playlist?"
         hx-on::after-request="if(event.detail.successful) window.location='/playlists'"
         class="outline secondary btn-sm"
