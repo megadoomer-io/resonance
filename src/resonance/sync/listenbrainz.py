@@ -291,12 +291,16 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
             max_ts = listens[-1].listened_at
             task.progress_current = items_created
 
-            # Update watermark incrementally
+            # Update the two-ended watermark monotonically. A backfill must not
+            # regress newest_synced_at (see _merge_listens_watermark).
             updated_watermarks = dict(connection.sync_watermark)
-            updated_watermarks["listens"] = {
-                "newest_synced_at": last_listened_at,
-                "oldest_synced_at": max_ts,
-            }
+            updated_watermarks["listens"] = _merge_listens_watermark(
+                dict(connection.sync_watermark.get("listens", {})),
+                is_backfill=max_ts_param is not None,
+                is_incremental_forward=max_ts_param is None and min_ts is not None,
+                newest_seen=last_listened_at,
+                oldest_seen=max_ts,
+            )
             connection.sync_watermark = updated_watermarks
 
             await session.commit()
@@ -319,20 +323,83 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
         result: dict[str, object] = {"items_created": items_created}
         if last_listened_at is not None:
             result["last_listened_at"] = last_listened_at
-            watermark: dict[str, object] = {
-                "newest_synced_at": last_listened_at,
-            }
-            # Only include oldest_synced_at if the backfill is NOT done.
-            # When backfill completes, omitting it signals the worker to
-            # stop creating backfill tasks on future syncs.
-            if not backfill_complete:
-                watermark["oldest_synced_at"] = (
-                    max_ts if max_ts is not None else last_listened_at
-                )
-            result["watermark"] = watermark
+        # The worker replaces the connection's listens watermark with this dict
+        # wholesale, so it must be the complete, monotonic two-ended watermark.
+        final_watermark = _merge_listens_watermark(
+            dict(connection.sync_watermark.get("listens", {})),
+            is_backfill=max_ts_param is not None,
+            is_incremental_forward=max_ts_param is None and min_ts is not None,
+            newest_seen=last_listened_at,
+            oldest_seen=max_ts,
+        )
+        # When a backfill finishes, drop oldest_synced_at so future syncs stop
+        # planning a backfill task.
+        if backfill_complete:
+            final_watermark.pop("oldest_synced_at", None)
+        if final_watermark:
+            result["watermark"] = final_watermark
         if page_limit_reached:
             result["page_limit_reached"] = True
         return result
+
+
+def _merge_listens_watermark(
+    prior: dict[str, object],
+    *,
+    is_backfill: bool,
+    is_incremental_forward: bool,
+    newest_seen: int | None,
+    oldest_seen: int | None,
+) -> dict[str, object]:
+    """Compute the two-ended ``listens`` watermark, monotonically (#bug fix).
+
+    ``newest_synced_at`` only ever moves forward and is owned by forward/initial
+    sync tasks. A backfill task walks OLD listens downward, so it must never
+    stamp ``newest_synced_at`` -- doing so dragged the forward cursor back to
+    ~2015 and made every later sync re-fetch the whole range. ``oldest_synced_at``
+    only ever moves backward and is owned by the initial full sync and backfill;
+    a pure forward-incremental run leaves the existing boundary untouched.
+
+    Args:
+        prior: The existing ``listens`` watermark sub-dict.
+        is_backfill: True when the task is a backfill (``max_ts`` set in params).
+        is_incremental_forward: True for a forward task resuming from a prior
+            ``newest_synced_at`` (``min_ts`` set, not a backfill).
+        newest_seen: Newest listen timestamp seen this run (``last_listened_at``).
+        oldest_seen: Oldest listen timestamp reached this run (``max_ts``).
+
+    Returns:
+        The merged watermark dict, monotonic in both directions.
+    """
+
+    def _as_int(value: object) -> int | None:
+        return int(str(value)) if value is not None else None
+
+    prior_newest = _as_int(prior.get("newest_synced_at"))
+    prior_oldest = _as_int(prior.get("oldest_synced_at"))
+
+    watermark: dict[str, object] = {}
+
+    # newest_synced_at: forward/initial tasks only, and only forward.
+    if is_backfill:
+        newest = prior_newest
+    else:
+        newest_candidates = [t for t in (prior_newest, newest_seen) if t is not None]
+        newest = max(newest_candidates) if newest_candidates else None
+    if newest is not None:
+        watermark["newest_synced_at"] = newest
+
+    # oldest_synced_at: initial + backfill advance it backward; a forward
+    # incremental run introduces no new boundary, so it preserves the prior one.
+    if is_incremental_forward:
+        oldest = prior_oldest
+    else:
+        oldest_candidates = [t for t in (prior_oldest, oldest_seen) if t is not None]
+        oldest = min(oldest_candidates) if oldest_candidates else None
+    if oldest is not None:
+        watermark["oldest_synced_at"] = oldest
+
+    return watermark
 
 
 async def _adaptive_fetch(

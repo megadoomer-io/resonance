@@ -1486,7 +1486,85 @@ class TestBackfillWatermarkCleanup:
             result = await strategy.execute(session, task, connector, connection)
 
         assert "oldest_synced_at" not in result["watermark"]
-        assert result["watermark"]["newest_synced_at"] == 1648000000
+        # A backfill must NOT regress newest_synced_at to the old listens it
+        # fetches -- it preserves the prior forward cursor (1649389960), not the
+        # 1648000000 listen it just backfilled.
+        assert result["watermark"]["newest_synced_at"] == 1649389960
+
+    @pytest.mark.asyncio
+    async def test_backfill_does_not_regress_newest_per_page(self) -> None:
+        """Regression: a backfill page must preserve newest_synced_at.
+
+        The live bug: backfill walks OLD listens downward and stamped
+        newest_synced_at with each old page's first listen, dragging the forward
+        cursor back to ~2015 so every later sync re-fetched the whole range.
+        """
+        strategy = lb_sync_module.ListenBrainzSyncStrategy()
+        session = AsyncMock()
+        session.no_autoflush = MagicMock()
+        session.no_autoflush.__enter__ = MagicMock(return_value=None)
+        session.no_autoflush.__exit__ = MagicMock(return_value=False)
+        # Backfill task: max_ts set, min_ts absent.
+        task = _make_task(params={"username": "testuser", "max_ts": 1648623657})
+        connector = _make_lb_connector()
+        # One page of OLD listens (below the backfill boundary), then exhausted.
+        page = [
+            _make_listen(1648000000, "Old A", "Artist A"),
+            _make_listen(1647000000, "Old B", "Artist B"),
+        ]
+        connector.get_listens = AsyncMock(side_effect=[page, []])
+
+        watermarks_after_commit: list[dict[str, object]] = []
+
+        async def capture_watermark() -> None:
+            watermarks_after_commit.append(
+                dict(connection.sync_watermark.get("listens", {}))
+            )
+
+        session.commit = AsyncMock(side_effect=capture_watermark)
+
+        with (
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_artists",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "bulk_fetch_tracks",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_artist_from_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "_upsert_track",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                lb_sync_module.runner_module,
+                "upsert_listening_events_batch",
+                new_callable=AsyncMock,
+            ),
+        ):
+            connection = _make_connection(
+                sync_watermark={
+                    "listens": {
+                        "newest_synced_at": 1649389960,
+                        "oldest_synced_at": 1648623657,
+                    }
+                },
+            )
+            await strategy.execute(session, task, connector, connection)
+
+        # After the backfill page: newest preserved, oldest advanced downward.
+        assert watermarks_after_commit[0]["newest_synced_at"] == 1649389960
+        assert watermarks_after_commit[0]["oldest_synced_at"] == 1647000000
 
     @pytest.mark.asyncio
     async def test_no_cleanup_for_non_backfill_task(self) -> None:
