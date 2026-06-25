@@ -33,7 +33,19 @@
                 </td>
                 <td>
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
-                        {% if job.children %}
+                        {% if job.task_type.value == 'concert_archives_import' and job.children %}
+                        {# Chunked import: one aggregate bar that fills as chunks finish (order-independent). #}
+                        {% set ns = namespace(done=0, events=0) %}
+                        {% for child in job.children %}
+                            {% if child.status.value == 'completed' %}
+                            {% set ns.done = ns.done + 1 %}
+                            {% if child.result %}{% set ns.events = ns.events + (child.result.get('events_created') or 0) %}{% endif %}
+                            {% endif %}
+                        {% endfor %}
+                        {% set total = job.children | length %}
+                        <progress value="{{ ns.done }}" max="{{ total }}" style="width: 100%;"></progress>
+                        <small>{{ ns.done }} / {{ total }} parts imported{% if ns.events %} · {{ ns.events }} events{% endif %}</small>
+                        {% elif job.children %}
                         {% for child in job.children | sort(attribute='created_at') %}
                             {% if child.status.value == 'completed' %}
                             <div style="margin-bottom: 0.25rem;">
