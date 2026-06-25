@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import datetime
 import uuid
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ import resonance.models as models_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
+    import collections.abc
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -481,16 +484,7 @@ async def _upsert_listening_event(
     listened_at = datetime.datetime.fromisoformat(played_at)
 
     # Fuzzy dedup: skip insert if a matching event exists within a window.
-    # Services record different moments (track start vs scrobble point),
-    # so the window is based on track duration when known. Falls back to
-    # 10 minutes for tracks without duration data.
-    default_dedup_seconds = 600  # 10 minutes
-    dedup_seconds = (
-        (track.duration_ms // 1000 + 60)  # duration + 60s buffer
-        if track.duration_ms
-        else default_dedup_seconds
-    )
-    window = datetime.timedelta(seconds=dedup_seconds)
+    window = datetime.timedelta(seconds=_dedup_window_seconds(track.duration_ms))
     check_stmt = (
         sa.select(models_module.ListeningEvent)
         .where(
@@ -519,3 +513,181 @@ async def _upsert_listening_event(
         )
     )
     await session.execute(stmt)
+
+
+def _dedup_window_seconds(duration_ms: int | None) -> int:
+    """Half-window (seconds) for fuzzy listening-event dedup.
+
+    Services record different moments for the same play (track start vs
+    scrobble point), so two events for one track within ~one track length are
+    treated as the same listen. Falls back to 10 minutes when duration is
+    unknown. Shared by the per-listen and batched upsert paths.
+    """
+    default_dedup_seconds = 600  # 10 minutes
+    if duration_ms:
+        return duration_ms // 1000 + 60  # duration + 60s buffer
+    return default_dedup_seconds
+
+
+def _select_new_events(
+    resolved: collections.abc.Sequence[tuple[uuid.UUID, datetime.datetime, int | None]],
+    existing: dict[uuid.UUID, list[datetime.datetime]],
+) -> list[tuple[uuid.UUID, datetime.datetime]]:
+    """Pick which resolved events to insert, dropping fuzzy-window dups (#6).
+
+    Pure dedup core (no I/O), so the tricky part is unit-testable. Given
+    ``resolved`` ``(track_id, listened_at, duration_ms)`` events and ``existing``
+    (per-track sorted anchor timestamps already in the DB), returns the
+    survivors. Events are processed in time order so an accepted event becomes
+    an anchor for later ones in the same batch -- without that, two same-page
+    near-duplicates would both survive (the per-listen path avoided this by
+    querying the live DB between single-row inserts).
+
+    Mutates ``existing`` in place, inserting each accepted timestamp as a new
+    anchor.
+    """
+    survivors: list[tuple[uuid.UUID, datetime.datetime]] = []
+    for track_id, listened_at, duration_ms in sorted(resolved, key=lambda row: row[1]):
+        window = datetime.timedelta(seconds=_dedup_window_seconds(duration_ms))
+        series = existing.setdefault(track_id, [])
+        idx = bisect.bisect_left(series, listened_at)
+        is_dup = (idx < len(series) and series[idx] - listened_at <= window) or (
+            idx > 0 and listened_at - series[idx - 1] <= window
+        )
+        if is_dup:
+            continue
+        series.insert(idx, listened_at)
+        survivors.append((track_id, listened_at))
+    return survivors
+
+
+async def _resolve_track_by_title_artist(
+    session: AsyncSession,
+    track_data: base_module.TrackData,
+) -> models_module.Track | None:
+    """Resolve a track by exact title + artist name (the event path's fallback)."""
+    stmt = (
+        sa.select(models_module.Track)
+        .join(models_module.Artist)
+        .where(
+            models_module.Track.title == track_data.title,
+            models_module.Artist.name == track_data.artist_name,
+        )
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def upsert_listening_events_batch(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    events: collections.abc.Sequence[tuple[base_module.TrackData, int]],
+    *,
+    service_type: types_module.ServiceType,
+) -> int:
+    """Insert one page of listening events, deduped, in a few queries (#6).
+
+    Replaces per-listen :func:`_upsert_listening_event` on the hot sync path
+    (the LB backfill ran ~3-4 queries per listen, x1000/page). For a page it:
+
+    1. resolves tracks from a single bulk service_links fetch (run *after* the
+       caller's track-upsert pass, so newly-created tracks are included),
+       falling back to a title+artist lookup only for the rare miss;
+    2. loads existing events spanning the page in one range query, widened by
+       the largest dedup window so a near-duplicate straddling a page boundary
+       is still caught;
+    3. applies the same fuzzy cross-service dedup window as the per-listen path,
+       crucially also against events accepted earlier *in this same page* (each
+       accepted event becomes an anchor, matching the serial path's behavior --
+       otherwise two same-page near-duplicates would both survive); and
+    4. bulk-inserts the survivors with ON CONFLICT DO NOTHING on the exact
+       (user, track, time) unique constraint.
+
+    Args:
+        session: Active database session.
+        user_id: The listening user's ID.
+        events: ``(track_data, listened_at_epoch)`` pairs for the page.
+        service_type: The source service for these listens.
+
+    Returns:
+        The number of events actually inserted (excludes dedup-skipped and
+        exact-conflict rows).
+    """
+    if not events:
+        return 0
+    service_key = service_type.value
+
+    # 1. Resolve tracks. Re-fetch here (after the caller's track-upsert pass)
+    #    because that pass does not add newly-created tracks to its cache.
+    external_ids = {td.external_id for td, _ in events if td.external_id}
+    track_cache = await bulk_fetch_tracks(session, service_key, external_ids)
+
+    # (track_id, listened_at, duration_ms)
+    resolved: list[tuple[uuid.UUID, datetime.datetime, int | None]] = []
+    for track_data, listened_at_epoch in events:
+        listened_at = datetime.datetime.fromtimestamp(
+            listened_at_epoch, tz=datetime.UTC
+        )
+        track = (
+            track_cache.get(track_data.external_id) if track_data.external_id else None
+        )
+        if track is None:
+            track = await _resolve_track_by_title_artist(session, track_data)
+        if track is not None:
+            resolved.append((track.id, listened_at, track.duration_ms))
+
+    if not resolved:
+        return 0
+
+    # 2. Load existing events for the page's tracks across a window-widened
+    #    time span (one query). The widening preserves cross-page-boundary
+    #    dedup that the per-listen path got for free by querying the live DB.
+    track_ids = {tid for tid, _, _ in resolved}
+    max_window = max(_dedup_window_seconds(dur) for _, _, dur in resolved)
+    widen = datetime.timedelta(seconds=max_window)
+    min_at = min(at for _, at, _ in resolved) - widen
+    max_at = max(at for _, at, _ in resolved) + widen
+    existing_result = await session.execute(
+        sa.select(
+            models_module.ListeningEvent.track_id,
+            models_module.ListeningEvent.listened_at,
+        ).where(
+            models_module.ListeningEvent.user_id == user_id,
+            models_module.ListeningEvent.track_id.in_(track_ids),
+            models_module.ListeningEvent.listened_at >= min_at,
+            models_module.ListeningEvent.listened_at <= max_at,
+        )
+    )
+    # Per-track sorted anchor timestamps from rows already in the DB.
+    anchors: dict[uuid.UUID, list[datetime.datetime]] = {}
+    for tid, at in existing_result.all():
+        anchors.setdefault(tid, []).append(at)
+    for series in anchors.values():
+        series.sort()
+
+    # 3. Fuzzy-dedup (pure, unit-tested core) then build the insert rows.
+    survivors = _select_new_events(resolved, anchors)
+    to_insert: list[dict[str, object]] = [
+        {
+            "id": uuid.uuid4(),
+            "user_id": user_id,
+            "track_id": track_id,
+            "source_service": service_type,
+            "listened_at": listened_at,
+        }
+        for track_id, listened_at in survivors
+    ]
+
+    if not to_insert:
+        return 0
+
+    # 4. One bulk insert; the unique constraint absorbs any exact collisions.
+    stmt = (
+        pg_dialect.insert(models_module.ListeningEvent)
+        .values(to_insert)
+        .on_conflict_do_nothing(constraint="uq_listening_events_user_track_time")
+        .returning(models_module.ListeningEvent.id)
+    )
+    result = await session.execute(stmt)
+    return len(result.all())

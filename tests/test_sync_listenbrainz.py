@@ -342,7 +342,7 @@ class TestExecute:
             ) as mock_upsert_track,
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ) as mock_upsert_event,
         ):
@@ -353,7 +353,10 @@ class TestExecute:
         assert result["last_listened_at"] == 1700000100
         assert mock_upsert_artist.call_count == 2
         assert mock_upsert_track.call_count == 2
-        assert mock_upsert_event.call_count == 2
+        # Events are now written per-page in one batch, not per-listen: one
+        # page of two listens -> a single batch call carrying both (#6).
+        assert mock_upsert_event.call_count == 1
+        assert len(mock_upsert_event.call_args.args[2]) == 2
         session.commit.assert_called()
 
     @pytest.mark.asyncio
@@ -396,7 +399,7 @@ class TestExecute:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
             patch.object(
@@ -522,7 +525,7 @@ class TestExecute:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
             pytest.raises(sync_base.DeferRequest) as exc_info,
@@ -571,7 +574,7 @@ class TestExecute:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -621,7 +624,7 @@ class TestExecute:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -716,7 +719,7 @@ class TestIncrementalWatermark:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -780,7 +783,7 @@ class TestIncrementalWatermark:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -850,7 +853,7 @@ class TestAdaptivePageSize:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -916,7 +919,7 @@ class TestAdaptivePageSize:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1009,7 +1012,7 @@ class TestAdaptivePageSize:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1068,7 +1071,7 @@ class TestAdaptivePageSize:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1131,7 +1134,7 @@ class TestAdaptivePageSize:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1227,7 +1230,7 @@ class TestGapSkip:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1408,7 +1411,7 @@ class TestBackfillWatermarkCleanup:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1468,7 +1471,7 @@ class TestBackfillWatermarkCleanup:
             ),
             patch.object(
                 lb_sync_module.runner_module,
-                "_upsert_listening_event",
+                "upsert_listening_events_batch",
                 new_callable=AsyncMock,
             ),
         ):

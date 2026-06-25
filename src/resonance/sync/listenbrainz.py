@@ -275,15 +275,17 @@ class ListenBrainzSyncStrategy(sync_base.SyncStrategy):
                     )
             await session.flush()
 
-            # Pass 3: events
-            for listen in listens:
-                played_at = datetime.datetime.fromtimestamp(
-                    listen.listened_at, tz=datetime.UTC
-                ).isoformat()
-                await runner_module._upsert_listening_event(
-                    session, task.user_id, listen.track, played_at
-                )
-                items_created += 1
+            # Pass 3: events. Batched -- one dedup range query + one bulk insert
+            # per page instead of ~3-4 queries per listen, which is what made
+            # the 123k-listen backfill crawl (#6). items_created stays a
+            # processed-listen count so progress tracks the full listen total.
+            await runner_module.upsert_listening_events_batch(
+                session,
+                task.user_id,
+                [(listen.track, listen.listened_at) for listen in listens],
+                service_type=types_module.ServiceType.LISTENBRAINZ,
+            )
+            items_created += len(listens)
 
             # Use the oldest listen's timestamp for next page
             max_ts = listens[-1].listened_at
