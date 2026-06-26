@@ -7,7 +7,9 @@
 <p><a class="backlink" href="/playlists">&larr; Back to Playlists</a></p>
 
 <div class="editor-top">
-    <h2>Playlist</h2>
+    <input type="text" id="name" name="name" value="{{ profile_name }}"
+           placeholder="Auto-generated if blank" aria-label="Playlist name"
+           class="playlist-name-input" style="flex:1; min-width:0;">
     <span class="autosave" id="autosave" hidden><span class="dot"></span> <span class="autosave-label">Saved</span></span>
 </div>
 
@@ -87,15 +89,6 @@
             <input type="number" id="max_tracks" name="max_tracks" value="50" min="5" max="200">
         </label>
     </div>
-</article>
-
-<!-- Name -->
-<article>
-    <label for="name">
-        Playlist Name
-        <input type="text" id="name" name="name" value="{{ profile_name }}"
-               placeholder="Auto-generated if blank" style="width:100%;">
-    </label>
 </article>
 
 <button type="button" class="primary" id="generate-btn">Generate Playlist</button>
