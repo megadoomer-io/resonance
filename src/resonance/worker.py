@@ -1506,10 +1506,14 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
 
     Loads the RELATED_ARTIST_ENRICHMENT task and its profile, resolves similar
     artists for the requested scope (a single seed, several seeds, or the whole
-    lineup), imports the new ones, and replaces that scope's prior discovered
-    artist sources in ``profile.input_references`` with the fresh batch. The
-    discovered artists become concrete, curatable ``artist`` sources tagged with
-    ``via_seed``; a later generate re-scores tracks against this fixed pool.
+    lineup), imports the new ones, and **tops up** that scope to ``n`` active
+    discoveries in ``profile.input_references`` -- counting the non-excluded
+    discoveries already present and appending only the difference, never
+    re-suggesting a globally-excluded artist. A scope already at or over ``n``
+    active is a no-op (curated discoveries are never trimmed); if the connectors
+    return fewer than needed, it is a partial success. The discovered artists
+    become concrete, curatable ``artist`` sources tagged with ``via_seed``; a
+    later generate re-scores tracks against this fixed pool.
 
     Args:
         ctx: arq worker context dict.
@@ -1607,10 +1611,39 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     for sid in seed_id_list
                 ]
 
+            # Plan per-scope top-up: count the active (non-excluded) discoveries
+            # already in each scope and fetch only the difference up to the
+            # requested N. A scope at or over N is a no-op -- we never trim the
+            # user's curated discoveries; we only add. Globally-excluded artists do
+            # not count toward "active" and are never re-suggested below.
+            excluded_ids = pool_module.extract_excludes(refs)
+            scope_plans: list[tuple[str, list[music_models.Artist], int]] = []
+            for scope, seed_artists, target_n in scopes:
+                active = set(pool_module.scope_artist_ids(refs, scope)) - excluded_ids
+                needed = max(0, target_n - len(active))
+                scope_plans.append((scope, seed_artists, needed))
+            target_total = sum(needed for _, _, needed in scope_plans)
+
+            # Every scope already at its target: nothing to fetch, success no-op.
+            if target_total == 0:
+                task.progress_total = 0
+                task.progress_current = 0
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {
+                        "found": 0,
+                        "requested": 0,
+                        "message": "scopes already at target",
+                    },
+                )
+                await session.commit()
+                log.info("enrich_related_artists_already_full")
+                return
+
             similar_connectors = wctx["connector_registry"].get_by_capability(
                 base_module.ConnectorCapability.SIMILAR_ARTISTS
             )
-            target_total = requested_n * len(scopes)
             if not similar_connectors:
                 task.progress_total = target_total
                 task.progress_current = 0
@@ -1645,26 +1678,28 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             scope_results: list[tuple[str, list[uuid.UUID]]] = []
             running_pool_ids = set(current_pool_ids)
             total_found = 0
-            for scope, seed_artists, target_n in scopes:
-                scope_prior = set(pool_module.scope_artist_ids(refs, scope))
-                # Exclude everything currently in the pool EXCEPT this scope's
-                # own prior discoveries (so they can be re-found on replace), plus
-                # the seeds themselves (an artist is never its own neighbor).
-                exclude = (running_pool_ids - scope_prior) | {
-                    a.id for a in seed_artists
-                }
+            for scope, seed_artists, needed in scope_plans:
+                if needed == 0:
+                    scope_results.append((scope, []))
+                    continue
+                # Never re-find anything already in the pool, the seeds themselves
+                # (an artist is not its own neighbor), or a globally-excluded artist
+                # (we must not re-suggest one the user removed). Because we APPEND
+                # (top-up) rather than replace, this scope's existing discoveries
+                # stay put and are excluded from re-discovery too.
+                exclude = running_pool_ids | {a.id for a in seed_artists} | excluded_ids
                 new_ids = await _collect_related(
                     session,
                     similar_connectors,
                     lb_connector,
                     seed_artists,
                     exclude,
-                    target_n,
+                    needed,
                     _store_fetch,
                     log,
                 )
                 scope_results.append((scope, new_ids))
-                running_pool_ids = (running_pool_ids - scope_prior) | set(new_ids)
+                running_pool_ids |= set(new_ids)
                 total_found += len(new_ids)
             await session.commit()
 
@@ -1676,16 +1711,37 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             for attempt in range(_MAX_VERSION_RETRIES):
                 merged: dict[str, object] = dict(profile.input_references)
                 for scope, new_ids in scope_results:
+                    if not new_ids:
+                        continue  # no-op top-up: leave the scope's discoveries
+                    # Top-up (append), not replace: recompute the scope's current
+                    # discoveries from the (possibly reloaded) refs and append only
+                    # the genuinely-new ids, so a concurrent writer's additions to
+                    # this scope are preserved rather than clobbered.
+                    existing = list(pool_module.scope_artist_ids(merged, scope))
+                    existing_set = set(existing)
+                    appended = existing + [
+                        nid for nid in new_ids if nid not in existing_set
+                    ]
                     merged = pool_module.replace_via_seed_sources(
-                        merged, scope, new_ids
+                        merged, scope, appended
                     )
                 profile.input_references = merged
                 task.progress_total = target_total
                 task.progress_current = total_found
+                result_payload: dict[str, object] = {
+                    "found": total_found,
+                    "requested": target_total,
+                }
+                if total_found < target_total:
+                    # Partial success: the connectors had fewer fresh neighbors than
+                    # the top-up needed (neighbors exhausted).
+                    result_payload["message"] = (
+                        f"found {total_found} of {target_total} (neighbors exhausted)"
+                    )
                 await lifecycle_module.complete_task(
                     session,
                     task,
-                    {"found": total_found, "requested": target_total},
+                    result_payload,
                 )
                 try:
                     await session.commit()

@@ -4016,7 +4016,8 @@ class TestEnrichRelatedArtists:
         assert task.result["message"] == "no connector connected"
 
     @pytest.mark.asyncio
-    async def test_lineup_success_replaces_scope(self) -> None:
+    async def test_lineup_tops_up_empty_scope(self) -> None:
+        # Empty discovery scope: top-up from 0 fills it with the full batch.
         core_id = uuid.uuid4()
         new1, new2 = uuid.uuid4(), uuid.uuid4()
         profile = generator_models.GeneratorProfile(
@@ -4208,3 +4209,191 @@ class TestEnrichRelatedArtists:
         assert by_id[editor_id] is None  # concurrent edit NOT clobbered
         assert by_id[new_id] == "lineup"  # enrichment applied
         session.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_top_up_fetches_only_the_difference_and_appends(self) -> None:
+        """A scope with prior discoveries tops up to N: fetch only N - active and
+        append (keep the priors), never replace them."""
+        seed_id = uuid.uuid4()
+        prior1, prior2 = uuid.uuid4(), uuid.uuid4()
+        new1, new2 = uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=prior1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=prior2, via_seed=str(seed_id)),
+                ]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 4}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[new1, new2])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, prior1, prior2)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # 4 wanted, 2 active already -> only 2 fetched (the difference).
+        assert collect.await_args.args[5] == 2
+        assert task.result["found"] == 2
+        assert task.progress_total == 2
+        # Priors are re-excluded from re-discovery (top-up appends, never re-finds).
+        exclude_arg = collect.await_args.args[4]
+        assert prior1 in exclude_arg
+        assert prior2 in exclude_arg
+        # Scope now holds priors AND new -- appended, not replaced.
+        scope_ids = set(
+            pool_module.scope_artist_ids(profile.input_references, str(seed_id))
+        )
+        assert scope_ids == {prior1, prior2, new1, new2}
+
+    @pytest.mark.asyncio
+    async def test_over_count_scope_is_noop(self) -> None:
+        """A scope already at or over N active is a no-op: no fetch, no trim."""
+        seed_id = uuid.uuid4()
+        p1, p2, p3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=p1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=p2, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=p3, via_seed=str(seed_id)),
+                ]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 2}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[uuid.uuid4()])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, p1, p2, p3)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        collect.assert_not_awaited()  # nothing fetched
+        assert task.result["found"] == 0
+        assert task.result["message"] == "scopes already at target"
+        # Discoveries are untouched -- never trimmed.
+        scope_ids = set(
+            pool_module.scope_artist_ids(profile.input_references, str(seed_id))
+        )
+        assert scope_ids == {p1, p2, p3}
+
+    @pytest.mark.asyncio
+    async def test_excluded_artist_not_counted_or_resuggested(self) -> None:
+        """An excluded discovery does not count toward active and is never
+        re-suggested: it is passed in the exclude set and the top-up refetches to
+        replace its missing slot."""
+        seed_id = uuid.uuid4()
+        disc1, disc2 = uuid.uuid4(), uuid.uuid4()  # disc2 is excluded
+        new1 = uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=disc1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=disc2, via_seed=str(seed_id)),
+                ],
+                exclude_ids=[disc2],
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 2}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[new1])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, disc1, disc2)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # 2 wanted, only disc1 active (disc2 excluded) -> 1 fetched.
+        assert collect.await_args.args[5] == 1
+        # The excluded artist is in the exclude set -> never re-suggested.
+        assert disc2 in collect.await_args.args[4]
