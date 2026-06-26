@@ -177,6 +177,25 @@
 .service-badge-lastfm   { background: var(--color-lastfm); }
 .service-badge-lb       { background: var(--color-listenbrainz); }
 
+/* Playlist-detail refine controls (#track-exclude). Reuses the lineup builder's
+   visual vocabulary (.aremove / .extag) but scoped to the tracks table so it
+   does not collide with the flex-based .artist-row selectors. */
+#playlist-tracks .trk-actions { text-align: right; white-space: nowrap; }
+#playlist-tracks .aremove {
+  border: none; background: none; color: var(--text-muted); cursor: pointer;
+  font-size: 1.05rem; line-height: 1; min-width: 44px; min-height: 44px;
+  padding: 2px 6px;
+}
+#playlist-tracks .aremove:hover { color: var(--error); }
+#playlist-tracks .extag {
+  font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--error); border: 1px solid var(--error);
+  border-radius: var(--radius-full); padding: 1px 8px; white-space: nowrap;
+}
+#playlist-tracks tr.excluded td:not(.trk-actions) {
+  text-decoration: line-through; color: var(--text-muted);
+}
+
 /* Truncation utility — click to expand/collapse long values in list views */
 .truncate {
   max-width: 30ch;

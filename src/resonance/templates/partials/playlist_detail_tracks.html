@@ -9,17 +9,46 @@
         {"label": "Artist"},
         {"label": "Score"},
         {"label": "Source"},
+        {"label": "Spotify"},
+        {"label": "", "style": "width: 4rem;"},
     ],
     empty_message="No tracks in this playlist.",
     page=page,
     has_next=has_next,
     has_prev=has_prev
 ) %}
-<tr>
+{% set is_excluded = (pt.track_id | string) in (excluded_track_ids or []) %}
+<tr{% if is_excluded %} class="excluded"{% endif %}>
     <td>{{ pt.position }}</td>
     <td>{{ pt.track.title }}</td>
     <td>{{ pt.track.artist.name }}</td>
     <td>{{ "%.2f" | format(pt.score) if pt.score is not none else "" }}</td>
     <td>{{ pt.source }}</td>
+    <td>
+        {% if pt.spotify_synced_at %}
+        <span class="service-badge service-badge-spotify"
+              title="On Spotify — synced {{ pt.spotify_synced_at | localtime(user_tz) }}">SP</span>
+        {% else %}
+        <span class="text-muted" title="Not synced to Spotify" aria-label="Not synced to Spotify">—</span>
+        {% endif %}
+    </td>
+    <td class="trk-actions">
+        {% if profile_id %}
+        {% if is_excluded %}
+        <span class="extag">excluded</span>
+        <button type="button" class="aremove"
+                title="Undo exclude"
+                aria-label="Undo excluding {{ pt.track.title }}"
+                hx-post="/playlists/{{ playlist_id }}/tracks/{{ pt.track_id }}/toggle-exclude"
+                hx-target="#playlist-tracks" hx-swap="innerHTML">&#8634;</button>
+        {% else %}
+        <button type="button" class="aremove"
+                title="Exclude this track"
+                aria-label="Exclude {{ pt.track.title }}"
+                hx-post="/playlists/{{ playlist_id }}/tracks/{{ pt.track_id }}/toggle-exclude"
+                hx-target="#playlist-tracks" hx-swap="innerHTML">&times;</button>
+        {% endif %}
+        {% endif %}
+    </td>
 </tr>
 {% endcall %}

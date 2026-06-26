@@ -228,3 +228,37 @@ class TestComponentPlayground:
         response = await client.get("/dev/components", follow_redirects=False)
         assert response.status_code == 307
         assert response.headers["location"] == "/login"
+
+
+class TestPlaylistRefineRoutes:
+    """The track-exclude / regenerate refine actions require auth (#track-exclude)."""
+
+    async def test_toggle_exclude_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/playlists/00000000-0000-0000-0000-000000000001/tracks/"
+            "00000000-0000-0000-0000-000000000002/toggle-exclude",
+            follow_redirects=False,
+        )
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
+
+    async def test_regenerate_requires_auth(self, client: httpx.AsyncClient) -> None:
+        response = await client.post(
+            "/playlists/00000000-0000-0000-0000-000000000001/regenerate",
+            follow_redirects=False,
+        )
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"
+
+    async def test_exclude_unsynced_requires_auth(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/playlists/00000000-0000-0000-0000-000000000001/"
+            "exclude-unsynced-and-regenerate",
+            follow_redirects=False,
+        )
+        assert response.status_code == 307
+        assert response.headers["location"] == "/login"

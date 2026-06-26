@@ -39,7 +39,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 
 class PoolSourceKind(enum.StrEnum):
@@ -216,6 +216,27 @@ def extract_track_excludes(raw: Mapping[str, object]) -> set[uuid.UUID]:
         msg = f"'exclude_track_ids' must be a list, got {type(raw_excludes).__name__}"
         raise ValueError(msg)
     return {_parse_uuid(item, "exclude_track_ids[]") for item in raw_excludes}
+
+
+def with_track_excludes(
+    input_references: Mapping[str, object],
+    track_ids: Iterable[uuid.UUID],
+) -> dict[str, object]:
+    """Return a copy of ``input_references`` with ``exclude_track_ids`` set to
+    ``track_ids`` (deduped, order-preserving), leaving every other key intact.
+
+    Used by the playlist-detail refine actions (#track-exclude) to mark/unmark a
+    track on the recipe. The key is omitted when the set is empty so a profile
+    that excludes nothing keeps its lean shape (matching
+    :func:`serialize_input_references`).
+    """
+    refs = dict(input_references)
+    ids = list(dict.fromkeys(str(t) for t in track_ids))
+    if ids:
+        refs["exclude_track_ids"] = ids
+    else:
+        refs.pop("exclude_track_ids", None)
+    return refs
 
 
 def build_pool(

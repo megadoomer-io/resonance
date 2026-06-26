@@ -18,6 +18,15 @@
         class="outline btn-sm"
         style="margin-left: 1rem;"
     >Edit</a>
+    {# Regenerate in place: re-runs selection (refilling any excluded slots) and
+       re-passes the size/freshness this playlist was built with. #}
+    <form method="post" action="/playlists/{{ playlist.id }}/regenerate" class="inline-form" style="margin-left: 0.5rem;">
+        <input type="hidden" name="max_tracks" value="{{ playlist.track_count }}">
+        {% if generation.freshness_target is not none %}
+        <input type="hidden" name="freshness_target" value="{{ generation.freshness_target }}">
+        {% endif %}
+        <button type="submit" class="outline btn-sm">Regenerate</button>
+    </form>
     {% endif %}
     <button
         hx-delete="/api/v1/playlists/{{ playlist.id }}"
@@ -110,6 +119,24 @@
         {% endif %}
     </div>
     {% endfor %}
+    {% endif %}
+    {% if generation and synced_count is defined %}
+    {# Per-track sync visibility: how many tracks are confirmed on Spotify, plus
+       the convergence affordance. Copy is action-descriptive, not a promise --
+       a refill can pull in another unmatched track (re-match is not monotone). #}
+    <p style="margin-top: 0.75rem; font-size: 0.85rem;">
+        <span class="text-muted">{{ synced_count }} of {{ playlist.track_count }} tracks synced</span>
+        {% if synced_count < playlist.track_count %}
+        &middot;
+        <form method="post" action="/playlists/{{ playlist.id }}/exclude-unsynced-and-regenerate" class="inline-form">
+            <input type="hidden" name="max_tracks" value="{{ playlist.track_count }}">
+            {% if generation.freshness_target is not none %}
+            <input type="hidden" name="freshness_target" value="{{ generation.freshness_target }}">
+            {% endif %}
+            <button type="submit" class="outline secondary btn-sm">Exclude unsynced &amp; regenerate</button>
+        </form>
+        {% endif %}
+    </p>
     {% endif %}
 </article>
 {% elif not spotify_connections and spotify_connections is defined %}

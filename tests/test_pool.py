@@ -403,3 +403,29 @@ class TestExtractTrackExcludes:
         # Empty stays lean (no key) — preserves existing profile shape.
         without = pool_module.serialize_input_references([])
         assert "exclude_track_ids" not in without
+
+
+class TestWithTrackExcludes:
+    """with_track_excludes (#track-exclude refine actions)."""
+
+    def test_sets_excludes_preserving_other_keys(self) -> None:
+        t1, t2 = uuid.uuid4(), uuid.uuid4()
+        refs = {"sources": [{"kind": "artist"}], "exclude_artist_ids": ["a"]}
+        out = pool_module.with_track_excludes(refs, [t1, t2])
+        assert pool_module.extract_track_excludes(out) == {t1, t2}
+        # Untouched keys survive.
+        assert out["sources"] == [{"kind": "artist"}]
+        assert out["exclude_artist_ids"] == ["a"]
+        # Input not mutated.
+        assert "exclude_track_ids" not in refs
+
+    def test_empty_drops_the_key(self) -> None:
+        refs = {"exclude_track_ids": [str(uuid.uuid4())], "sources": []}
+        out = pool_module.with_track_excludes(refs, [])
+        assert "exclude_track_ids" not in out
+        assert out["sources"] == []
+
+    def test_dedups(self) -> None:
+        t1 = uuid.uuid4()
+        out = pool_module.with_track_excludes({}, [t1, t1])
+        assert out["exclude_track_ids"] == [str(t1)]
