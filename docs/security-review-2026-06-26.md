@@ -17,10 +17,10 @@ dangerous-pattern sweep across all of `src/`.
 path. Swept the whole tree for `eval`/`exec`/`subprocess`/`pickle`/`yaml.load`,
 `verify=False`, raw SQL interpolation, `| safe`, and outbound URL fetches.
 
-**Not yet covered (recommended next pass):** per-endpoint authz on every API/UI route
-(admin endpoints, playlist generation, account, matching, sync), the playlist
+**Second pass (same day):** per-endpoint authz on every API/UI route, the playlist
 generation input surface, CSV/concert-archives parsing, and a dependency-vulnerability
-scan of `uv.lock`. This review establishes the baseline; it is not exhaustive.
+scan — see the "Second Pass" section below. Result: authz coverage is consistent and
+object-level scoping is correct; deps are clean; one new Low finding (#11).
 
 ## Findings
 
@@ -36,6 +36,7 @@ scan of `uv.lock`. This review establishes the baseline; it is not exhaustive.
 | 8 | Low | No CSP / security-header middleware (compounds #6) | `app.py` |
 | 9 | Low | Swagger `/docs` exposed unconditionally | `app.py:101` |
 | 10 | Low | No rate limiting on auth/admin (compounds #7) | `app.py` |
+| 11 | Low | Dev component playground exposed unauthenticated | `ui/playground.py:64` |
 
 ---
 
@@ -142,6 +143,57 @@ No rate limiting on login/callback or admin-token endpoints. Combined with #7, t
 admin token is brute-forceable given enough requests (mitigated by token length).
 
 **Fix:** rate-limit auth + admin paths (per-IP / per-session).
+
+### 11. Dev component playground exposed unauthenticated — Low
+
+`ui/playground.py:64`: `@router.get("/dev/components")` has no `require_user` gate, so
+the component playground renders to any unauthenticated visitor. It's a dev/demo
+showcase (low impact), but it ships in the prod image and leaks UI structure.
+
+**Fix:** gate `/dev/components` on `settings.debug` (or admin), or don't register the
+playground router in prod.
+
+---
+
+## Second Pass (2026-06-26)
+
+Covers the surfaces the baseline deferred. **No High/Medium issues found; one Low (#11).**
+
+### Per-endpoint authz — PASS
+
+All 65 API routes across the 14 routers carry an authentication dependency — route
+count equals auth-dependency count in every module. The two admin surfaces
+(`admin.py`, `venues.py`) enforce `verify_admin_access` at the **router** level
+(covers every child route); the rest require `get_current_user_id` per route. The only
+unauthenticated routes are intentional: OAuth `/auth/*` (login/callback/logout) and
+`/healthz`.
+
+**Object-level authz (IDOR) — spot-checked, correct.** `playlists.py` (get / diff /
+delete) and `generators.py` (get / act-on profile) filter **every** query by
+`Playlist.user_id == user_id` / `GeneratorProfile.user_id == user_id`, and return
+`404` (not `403`) on a non-owned id, so there's no cross-user object access and no
+existence leak. Related records are fetched only after ownership is established.
+
+> Note: this is a spot-check of the highest-risk ID-taking endpoints, not a proof
+> across all 65 routes. The pattern is consistent where checked.
+
+### Input surfaces
+
+- **Playlist generation** (`generators.py`): pydantic request models with a
+  `field_validator` on `seed_artist_ids`; all generation is user-scoped.
+- **CSV upload** (`concert_archives.py`): enforces `_MAX_FILE_SIZE` before reading,
+  decodes as UTF-8, requires auth. No unbounded read.
+
+### Dependency vulnerability scan — clean
+
+`pip-audit` against the project environment: **No known vulnerabilities found.**
+(Run locally; recommend wiring `pip-audit` or `osv-scanner` into CI to keep it green.)
+
+### Still not covered
+
+A line-by-line authz proof across all 65 routes, deep fuzzing of every input model, and
+the connectors' parsing of untrusted external API responses (Spotify/Last.fm/Songkick/
+ConcertArchives payloads). Lower priority given the consistent patterns above.
 
 ---
 
