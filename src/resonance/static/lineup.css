@@ -165,6 +165,27 @@
   gap: var(--space-md); margin-bottom: var(--space-md);
 }
 
+/* The playlist name doubles as the page title: an editable h2. Borderless
+   until hover/focus, where an underline signals it's editable. */
+.playlist-name-input {
+  font-family: var(--heading-font);
+  font-size: 1.953rem; /* matches h2 */
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  padding: 0 0 2px;
+}
+.playlist-name-input::placeholder { color: var(--text-muted); }
+.playlist-name-input:hover { border-bottom-color: var(--border); }
+.playlist-name-input:focus {
+  outline: none;
+  border-bottom-color: var(--primary);
+}
+
 /* Autosave indicator */
 .autosave {
   font-size: 0.8rem; color: var(--text-muted);
