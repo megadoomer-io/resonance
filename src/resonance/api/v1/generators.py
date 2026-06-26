@@ -202,6 +202,11 @@ def validate_profile_inputs(
     """
     try:
         sources = pool_module.normalize_sources(input_references)
+        # Parse the exclude sets too so a malformed exclude_artist_ids /
+        # exclude_track_ids is rejected at write time (422), not persisted and
+        # only discovered when the worker tries to apply it (#track-exclude).
+        pool_module.extract_excludes(input_references)
+        pool_module.extract_track_excludes(input_references)
     except ValueError as exc:
         msg = f"Invalid input_references: {exc}"
         raise ValueError(msg) from exc

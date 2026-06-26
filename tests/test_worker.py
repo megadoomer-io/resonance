@@ -2929,6 +2929,372 @@ class TestScoreAndBuildPlaylist:
         assert parent_task.status == types_module.SyncStatus.COMPLETED
         assert parent_task.completed_at is not None
 
+    @pytest.mark.asyncio
+    async def test_regenerate_in_place_uses_snapshot_baseline(self) -> None:
+        """CRITICAL (#versions): a regenerate reuses the current Playlist row in
+        place and reads its freshness baseline from the latest
+        GenerationRecord.track_snapshot -- NOT the live PlaylistTrack rows it is
+        about to overwrite. Reading the live rows would compare the new selection
+        against itself (self-poison) and silently break the freshness target.
+
+        Also asserts the in-place contract: the existing Playlist is reused (no new
+        row), its old tracks are deleted, and a fresh track_snapshot is recorded.
+        """
+        import resonance.generators.concert_prep as concert_prep_module
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+        import resonance.models.playlist as playlist_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        track_id = uuid.uuid4()
+        existing_pl_id = uuid.uuid4()
+        snap_a = uuid.uuid4()
+        snap_b = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": 100,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Concert"
+        profile.parameter_values = {"familiarity": 70, "hit_depth": 40}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        mock_track = MagicMock(spec=music_models.Track)
+        mock_track.id = track_id
+        mock_track.title = "Song"
+        mock_track.artist_id = artist_id
+        mock_track.popularity_score = None
+        mock_artist = MagicMock(spec=music_models.Artist)
+        mock_artist.id = artist_id
+        mock_artist.name = "Artist"
+        mock_track.artist = mock_artist
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [mock_track]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        listen_result = MagicMock()
+        listen_result.all.return_value = [(track_id, 10)]
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        # Latest GenerationRecord carries a track_snapshot -> the freshness baseline.
+        # If the code wrongly read live PlaylistTrack rows instead, no mock is
+        # provided for that query and the side_effect would misalign -- the test
+        # would fail rather than pass on a self-poisoned baseline.
+        prev_gen = MagicMock(spec=generator_models.GenerationRecord)
+        prev_gen.playlist_id = existing_pl_id
+        prev_gen.track_snapshot = [str(snap_a), str(snap_b)]
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = prev_gen
+
+        existing_playlist = playlist_models.Playlist(
+            id=existing_pl_id,
+            user_id=user_id,
+            name="old name",
+            description="old",
+            track_count=2,
+        )
+        session.get = AsyncMock(return_value=existing_playlist)
+
+        delete_result = MagicMock()
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            _not_cancelled_result(parent_id),
+            profile_result,
+            ea_result,
+            eac_result,
+            parent_for_params_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            delete_result,  # in-place PlaylistTrack delete
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        captured: dict[str, Any] = {}
+
+        def _fake_select(**kwargs: Any) -> concert_prep_module.SelectionResult:
+            captured.update(kwargs)
+            return concert_prep_module.SelectionResult(
+                tracks=[
+                    concert_prep_module.ScoredTrack(
+                        track_id=track_id,
+                        title="Song",
+                        artist_name="Artist",
+                        position=1,
+                        score=1.0,
+                        source=types_module.TrackSource.LIBRARY,
+                    )
+                ],
+                sources_summary={types_module.TrackSource.LIBRARY: 1},
+                freshness_actual=100.0,
+            )
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(
+            worker_module.concert_prep_module, "score_and_select", _fake_select
+        ):
+            await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        # 1. Freshness baseline is the snapshot, not the (overwritten) live rows.
+        assert captured["previous_track_ids"] == {snap_a, snap_b}
+
+        added_objects = [c.args[0] for c in session.add.call_args_list]
+        # 2. In place: no NEW Playlist row was added (the existing one is reused).
+        playlists_added = [
+            o for o in added_objects if isinstance(o, playlist_models.Playlist)
+        ]
+        assert playlists_added == []
+        # 3. The existing playlist was updated in place.
+        assert existing_playlist.track_count == 1
+        assert existing_playlist.name == "Concert"
+        # 4. Its old tracks were deleted (Core delete against playlist_tracks).
+        assert any(
+            c.args and type(c.args[0]).__name__ == "Delete"
+            for c in session.execute.call_args_list
+        )
+        # 5. A fresh track_snapshot was recorded for the new version.
+        gen_records = [
+            o for o in added_objects if isinstance(o, generator_models.GenerationRecord)
+        ]
+        assert len(gen_records) == 1
+        assert gen_records[0].track_snapshot == [str(track_id)]
+
+    @pytest.mark.asyncio
+    async def test_excluded_tracks_filtered_from_candidates(self) -> None:
+        """#track-exclude: a track listed in exclude_track_ids never becomes a
+        candidate, so its band deals its next-best and the freed slot refills."""
+        import resonance.generators.concert_prep as concert_prep_module
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        excluded_id = uuid.uuid4()
+        kept_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": None,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Concert"
+        profile.parameter_values = {"familiarity": 70, "hit_depth": 40}
+        # The recipe excludes one track.
+        profile.input_references = {
+            "event_id": str(event_id),
+            "exclude_track_ids": [str(excluded_id)],
+        }
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        def _mk_track(tid: uuid.UUID, title: str) -> MagicMock:
+            t = MagicMock(spec=music_models.Track)
+            t.id = tid
+            t.title = title
+            t.artist_id = artist_id
+            t.popularity_score = None
+            a = MagicMock(spec=music_models.Artist)
+            a.id = artist_id
+            a.name = "Artist"
+            t.artist = a
+            return t
+
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [
+            _mk_track(excluded_id, "Excluded"),
+            _mk_track(kept_id, "Kept"),
+        ]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        listen_result = MagicMock()
+        listen_result.all.return_value = [(excluded_id, 5), (kept_id, 5)]
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = None
+
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            _not_cancelled_result(parent_id),
+            profile_result,
+            ea_result,
+            eac_result,
+            parent_for_params_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        captured: dict[str, Any] = {}
+
+        def _fake_select(**kwargs: Any) -> concert_prep_module.SelectionResult:
+            captured.update(kwargs)
+            return concert_prep_module.SelectionResult(
+                tracks=[
+                    concert_prep_module.ScoredTrack(
+                        track_id=kept_id,
+                        title="Kept",
+                        artist_name="Artist",
+                        position=1,
+                        score=1.0,
+                        source=types_module.TrackSource.LIBRARY,
+                    )
+                ],
+                sources_summary={types_module.TrackSource.LIBRARY: 1},
+                freshness_actual=None,
+            )
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(
+            worker_module.concert_prep_module, "score_and_select", _fake_select
+        ):
+            await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        candidate_ids = {c.track_id for c in captured["candidates"]}
+        assert excluded_id not in candidate_ids
+        assert kept_id in candidate_ids
+
 
 # ---------------------------------------------------------------------------
 # ExportPlaylist tests
@@ -2951,6 +3317,102 @@ class TestExportPlaylist:
             types_module.TaskType.PLAYLIST_EXPORT
         ]
         assert job_name == "export_playlist"
+
+    @pytest.mark.asyncio
+    async def test_export_stamps_per_track_sync_status(self) -> None:
+        """A successful export stamps spotify_synced_at on matched tracks and
+        clears it on unmatched ones (#spotify-sync-visibility)."""
+        import resonance.connectors.spotify as spotify_module
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+
+        task_id = uuid.uuid4()
+        playlist_id = uuid.uuid4()
+        connection_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=uuid.uuid4(),
+            parent_id=None,  # no parent -> skips is_cancelled query + parent check
+            task_type=types_module.TaskType.PLAYLIST_EXPORT,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "playlist_id": str(playlist_id),
+                "connection_id": str(connection_id),
+            },
+        )
+
+        # Two tracks: one already has a cached Spotify id (matches), one has no id
+        # and search will fail (skipped).
+        def _pt(spotify_id: str | None) -> MagicMock:
+            track = MagicMock()
+            track.title = "Song"
+            track.service_links = {"spotify": spotify_id} if spotify_id else {}
+            track.artist = MagicMock()
+            track.artist.name = "Artist"
+            pt = MagicMock(spec=playlist_models.PlaylistTrack)
+            pt.track = track
+            pt.track_id = uuid.uuid4()
+            pt.spotify_synced_at = None
+            return pt
+
+        matched_pt = _pt("abc123")
+        unmatched_pt = _pt(None)
+
+        playlist = MagicMock(spec=playlist_models.Playlist)
+        playlist.id = playlist_id
+        playlist.name = "PL"
+        playlist.description = ""
+        playlist.service_links = None
+        playlist.tracks = [matched_pt, unmatched_pt]
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.encrypted_access_token = b"enc"
+        connection.encrypted_refresh_token = None
+        connection.token_expires_at = None
+
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        playlist_res = MagicMock()
+        playlist_res.scalar_one_or_none.return_value = playlist
+        conn_res = MagicMock()
+        conn_res.scalar_one_or_none.return_value = connection
+        session.execute.side_effect = [task_res, playlist_res, conn_res]
+
+        spotify_conn = MagicMock(spec=spotify_module.SpotifyConnector)
+        spotify_conn.search_track = AsyncMock(return_value=None)  # unmatched fails
+        spotify_conn.create_playlist = AsyncMock(return_value="sp_playlist")
+        spotify_conn.add_tracks_to_playlist = AsyncMock()
+        spotify_conn.replace_playlist_tracks = AsyncMock()
+
+        registry = MagicMock()
+
+        def _get_base(stype: Any) -> Any:
+            if stype == types_module.ServiceType.SPOTIFY:
+                return spotify_conn
+            return None  # no ListenBrainz -> skip the MB pass
+
+        registry.get_base_connector.side_effect = _get_base
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "settings": MagicMock(),
+            "redis": AsyncMock(),
+        }
+
+        with patch.object(
+            worker_module.crypto_module, "decrypt_token", lambda *_a, **_k: "access"
+        ):
+            await worker_module.export_playlist(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # Matched track stamped; unmatched cleared.
+        assert matched_pt.spotify_synced_at is not None
+        assert unmatched_pt.spotify_synced_at is None
+        # The completion payload reports which track ids synced.
+        assert task.result["synced_track_ids"] == [str(matched_pt.track_id)]
 
 
 class TestArtistsNeedingDiscovery:
@@ -3650,7 +4112,8 @@ class TestEnrichRelatedArtists:
         assert task.result["message"] == "no connector connected"
 
     @pytest.mark.asyncio
-    async def test_lineup_success_replaces_scope(self) -> None:
+    async def test_lineup_tops_up_empty_scope(self) -> None:
+        # Empty discovery scope: top-up from 0 fills it with the full batch.
         core_id = uuid.uuid4()
         new1, new2 = uuid.uuid4(), uuid.uuid4()
         profile = generator_models.GeneratorProfile(
@@ -3842,3 +4305,191 @@ class TestEnrichRelatedArtists:
         assert by_id[editor_id] is None  # concurrent edit NOT clobbered
         assert by_id[new_id] == "lineup"  # enrichment applied
         session.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_top_up_fetches_only_the_difference_and_appends(self) -> None:
+        """A scope with prior discoveries tops up to N: fetch only N - active and
+        append (keep the priors), never replace them."""
+        seed_id = uuid.uuid4()
+        prior1, prior2 = uuid.uuid4(), uuid.uuid4()
+        new1, new2 = uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=prior1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=prior2, via_seed=str(seed_id)),
+                ]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 4}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[new1, new2])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, prior1, prior2)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # 4 wanted, 2 active already -> only 2 fetched (the difference).
+        assert collect.await_args.args[5] == 2
+        assert task.result["found"] == 2
+        assert task.progress_total == 2
+        # Priors are re-excluded from re-discovery (top-up appends, never re-finds).
+        exclude_arg = collect.await_args.args[4]
+        assert prior1 in exclude_arg
+        assert prior2 in exclude_arg
+        # Scope now holds priors AND new -- appended, not replaced.
+        scope_ids = set(
+            pool_module.scope_artist_ids(profile.input_references, str(seed_id))
+        )
+        assert scope_ids == {prior1, prior2, new1, new2}
+
+    @pytest.mark.asyncio
+    async def test_over_count_scope_is_noop(self) -> None:
+        """A scope already at or over N active is a no-op: no fetch, no trim."""
+        seed_id = uuid.uuid4()
+        p1, p2, p3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=p1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=p2, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=p3, via_seed=str(seed_id)),
+                ]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 2}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[uuid.uuid4()])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, p1, p2, p3)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        collect.assert_not_awaited()  # nothing fetched
+        assert task.result["found"] == 0
+        assert task.result["message"] == "scopes already at target"
+        # Discoveries are untouched -- never trimmed.
+        scope_ids = set(
+            pool_module.scope_artist_ids(profile.input_references, str(seed_id))
+        )
+        assert scope_ids == {p1, p2, p3}
+
+    @pytest.mark.asyncio
+    async def test_excluded_artist_not_counted_or_resuggested(self) -> None:
+        """An excluded discovery does not count toward active and is never
+        re-suggested: it is passed in the exclude set and the top-up refetches to
+        replace its missing slot."""
+        seed_id = uuid.uuid4()
+        disc1, disc2 = uuid.uuid4(), uuid.uuid4()  # disc2 is excluded
+        new1 = uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [
+                    pool_module.ArtistSource(artist_id=seed_id),
+                    pool_module.ArtistSource(artist_id=disc1, via_seed=str(seed_id)),
+                    pool_module.ArtistSource(artist_id=disc2, via_seed=str(seed_id)),
+                ],
+                exclude_ids=[disc2],
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": [str(seed_id)], "n": 2}
+        )
+        seed_artist = _artist_ns("Seed", id=seed_id)
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [seed_artist]
+        session.execute.side_effect = [task_res, profile_res, artists_res]
+
+        collect = AsyncMock(return_value=[new1])
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=aid, via=pool_module.PoolProvenance.ARTIST
+                        )
+                        for aid in (seed_id, disc1, disc2)
+                    ]
+                ),
+            ),
+            patch.object(worker_module, "_collect_related", collect),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # 2 wanted, only disc1 active (disc2 excluded) -> 1 fetched.
+        assert collect.await_args.args[5] == 1
+        # The excluded artist is in the exclude set -> never re-suggested.
+        assert disc2 in collect.await_args.args[4]

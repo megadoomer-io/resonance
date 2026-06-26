@@ -1506,10 +1506,14 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
 
     Loads the RELATED_ARTIST_ENRICHMENT task and its profile, resolves similar
     artists for the requested scope (a single seed, several seeds, or the whole
-    lineup), imports the new ones, and replaces that scope's prior discovered
-    artist sources in ``profile.input_references`` with the fresh batch. The
-    discovered artists become concrete, curatable ``artist`` sources tagged with
-    ``via_seed``; a later generate re-scores tracks against this fixed pool.
+    lineup), imports the new ones, and **tops up** that scope to ``n`` active
+    discoveries in ``profile.input_references`` -- counting the non-excluded
+    discoveries already present and appending only the difference, never
+    re-suggesting a globally-excluded artist. A scope already at or over ``n``
+    active is a no-op (curated discoveries are never trimmed); if the connectors
+    return fewer than needed, it is a partial success. The discovered artists
+    become concrete, curatable ``artist`` sources tagged with ``via_seed``; a
+    later generate re-scores tracks against this fixed pool.
 
     Args:
         ctx: arq worker context dict.
@@ -1607,10 +1611,39 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     for sid in seed_id_list
                 ]
 
+            # Plan per-scope top-up: count the active (non-excluded) discoveries
+            # already in each scope and fetch only the difference up to the
+            # requested N. A scope at or over N is a no-op -- we never trim the
+            # user's curated discoveries; we only add. Globally-excluded artists do
+            # not count toward "active" and are never re-suggested below.
+            excluded_ids = pool_module.extract_excludes(refs)
+            scope_plans: list[tuple[str, list[music_models.Artist], int]] = []
+            for scope, seed_artists, target_n in scopes:
+                active = set(pool_module.scope_artist_ids(refs, scope)) - excluded_ids
+                needed = max(0, target_n - len(active))
+                scope_plans.append((scope, seed_artists, needed))
+            target_total = sum(needed for _, _, needed in scope_plans)
+
+            # Every scope already at its target: nothing to fetch, success no-op.
+            if target_total == 0:
+                task.progress_total = 0
+                task.progress_current = 0
+                await lifecycle_module.complete_task(
+                    session,
+                    task,
+                    {
+                        "found": 0,
+                        "requested": 0,
+                        "message": "scopes already at target",
+                    },
+                )
+                await session.commit()
+                log.info("enrich_related_artists_already_full")
+                return
+
             similar_connectors = wctx["connector_registry"].get_by_capability(
                 base_module.ConnectorCapability.SIMILAR_ARTISTS
             )
-            target_total = requested_n * len(scopes)
             if not similar_connectors:
                 task.progress_total = target_total
                 task.progress_current = 0
@@ -1645,26 +1678,28 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             scope_results: list[tuple[str, list[uuid.UUID]]] = []
             running_pool_ids = set(current_pool_ids)
             total_found = 0
-            for scope, seed_artists, target_n in scopes:
-                scope_prior = set(pool_module.scope_artist_ids(refs, scope))
-                # Exclude everything currently in the pool EXCEPT this scope's
-                # own prior discoveries (so they can be re-found on replace), plus
-                # the seeds themselves (an artist is never its own neighbor).
-                exclude = (running_pool_ids - scope_prior) | {
-                    a.id for a in seed_artists
-                }
+            for scope, seed_artists, needed in scope_plans:
+                if needed == 0:
+                    scope_results.append((scope, []))
+                    continue
+                # Never re-find anything already in the pool, the seeds themselves
+                # (an artist is not its own neighbor), or a globally-excluded artist
+                # (we must not re-suggest one the user removed). Because we APPEND
+                # (top-up) rather than replace, this scope's existing discoveries
+                # stay put and are excluded from re-discovery too.
+                exclude = running_pool_ids | {a.id for a in seed_artists} | excluded_ids
                 new_ids = await _collect_related(
                     session,
                     similar_connectors,
                     lb_connector,
                     seed_artists,
                     exclude,
-                    target_n,
+                    needed,
                     _store_fetch,
                     log,
                 )
                 scope_results.append((scope, new_ids))
-                running_pool_ids = (running_pool_ids - scope_prior) | set(new_ids)
+                running_pool_ids |= set(new_ids)
                 total_found += len(new_ids)
             await session.commit()
 
@@ -1676,16 +1711,37 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             for attempt in range(_MAX_VERSION_RETRIES):
                 merged: dict[str, object] = dict(profile.input_references)
                 for scope, new_ids in scope_results:
+                    if not new_ids:
+                        continue  # no-op top-up: leave the scope's discoveries
+                    # Top-up (append), not replace: recompute the scope's current
+                    # discoveries from the (possibly reloaded) refs and append only
+                    # the genuinely-new ids, so a concurrent writer's additions to
+                    # this scope are preserved rather than clobbered.
+                    existing = list(pool_module.scope_artist_ids(merged, scope))
+                    existing_set = set(existing)
+                    appended = existing + [
+                        nid for nid in new_ids if nid not in existing_set
+                    ]
                     merged = pool_module.replace_via_seed_sources(
-                        merged, scope, new_ids
+                        merged, scope, appended
                     )
                 profile.input_references = merged
                 task.progress_total = target_total
                 task.progress_current = total_found
+                result_payload: dict[str, object] = {
+                    "found": total_found,
+                    "requested": target_total,
+                }
+                if total_found < target_total:
+                    # Partial success: the connectors had fewer fresh neighbors than
+                    # the top-up needed (neighbors exhausted).
+                    result_payload["message"] = (
+                        f"found {total_found} of {target_total} (neighbors exhausted)"
+                    )
                 await lifecycle_module.complete_task(
                     session,
                     task,
-                    {"found": total_found, "requested": target_total},
+                    result_payload,
                 )
                 try:
                     await session.commit()
@@ -1844,7 +1900,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 r.track_id for r in utr_result.scalars().all()
             }
 
-            # Get previous playlist track IDs for freshness
+            # Freshness baseline + in-place target: load the latest GenerationRecord.
+            # CRITICAL (#versions): read the baseline from its track_snapshot, NOT the
+            # live PlaylistTrack rows. On an in-place regenerate the "previous"
+            # playlist IS the row we are about to overwrite, so reading its live rows
+            # would compare the new selection against itself and silently break the
+            # freshness target. The snapshot is captured at generation time and never
+            # mutated, so it is the correct previous-track set. Read here, before any
+            # row replacement below.
             prev_gen_result = await session.execute(
                 sa.select(generator_models.GenerationRecord)
                 .where(
@@ -1857,18 +1920,35 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             prev_gen = prev_gen_result.scalar_one_or_none()
             previous_track_ids: set[uuid.UUID] = set()
             if prev_gen is not None:
-                # Load previous playlist tracks
-                prev_pt_result = await session.execute(
-                    sa.select(playlist_models.PlaylistTrack.track_id).where(
-                        playlist_models.PlaylistTrack.playlist_id
-                        == prev_gen.playlist_id
+                if prev_gen.track_snapshot is not None:
+                    previous_track_ids = {
+                        uuid.UUID(tid) for tid in prev_gen.track_snapshot
+                    }
+                else:
+                    # Backwards-compat: records written before track_snapshot existed
+                    # have no snapshot. Fall back to that generation's live rows --
+                    # safe because this read happens before any replacement below.
+                    prev_pt_result = await session.execute(
+                        sa.select(playlist_models.PlaylistTrack.track_id).where(
+                            playlist_models.PlaylistTrack.playlist_id
+                            == prev_gen.playlist_id
+                        )
                     )
-                )
-                previous_track_ids = {row[0] for row in prev_pt_result.all()}
+                    previous_track_ids = {row[0] for row in prev_pt_result.all()}
+
+            # Recipe-level track exclusions (#track-exclude): an excluded track never
+            # becomes a candidate, so its band deals its next-best track on the next
+            # round-robin pass and the freed slot refills. pool.py is artist-only /
+            # pre-track, so this filter lives here, not in build_pool.
+            exclude_track_ids = pool_module.extract_track_excludes(
+                profile.input_references
+            )
 
             # Build CandidateTrack objects
             candidates: list[concert_prep_module.CandidateTrack] = []
             for track in all_tracks:
+                if track.id in exclude_track_ids:
+                    continue
                 lc = listen_counts.get(track.id, 0)
                 in_library = lc > 0 or track.id in liked_track_ids
                 candidates.append(
@@ -1908,17 +1988,44 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 freshness_target=freshness_target,
             )
 
-            # Create Playlist
-            playlist = playlist_models.Playlist(
-                id=uuid.uuid4(),
-                user_id=task.user_id,
-                name=str(profile.name),
-                description=f"Generated from profile: {profile.name}",
-                track_count=len(selection.tracks),
-            )
-            session.add(playlist)
+            # Regenerate in place (#versions): reuse the current Playlist row when one
+            # exists, so its identity -- and the Spotify export anchor in
+            # service_links -- survives the regenerate. Replace its PlaylistTrack rows
+            # with the new selection; the prior version's tracks live on in the
+            # GenerationRecord.track_snapshot history, not in this row. Only when there
+            # is no prior playlist (first generation, or it was deleted) do we create a
+            # fresh one.
+            existing_playlist: playlist_models.Playlist | None = None
+            if prev_gen is not None:
+                existing_playlist = await session.get(
+                    playlist_models.Playlist, prev_gen.playlist_id
+                )
 
-            # Create PlaylistTrack rows
+            if existing_playlist is not None:
+                playlist = existing_playlist
+                # Drop the old rows first (Core delete executes immediately within the
+                # transaction, before the new inserts below). Keep id, service_links
+                # (Spotify anchor), and is_pinned untouched.
+                await session.execute(
+                    sa.delete(playlist_models.PlaylistTrack).where(
+                        playlist_models.PlaylistTrack.playlist_id == playlist.id
+                    )
+                )
+                playlist.name = str(profile.name)
+                playlist.description = f"Generated from profile: {profile.name}"
+                playlist.track_count = len(selection.tracks)
+            else:
+                playlist = playlist_models.Playlist(
+                    id=uuid.uuid4(),
+                    user_id=task.user_id,
+                    name=str(profile.name),
+                    description=f"Generated from profile: {profile.name}",
+                    track_count=len(selection.tracks),
+                )
+                session.add(playlist)
+
+            # Create PlaylistTrack rows (fresh rows start unsynced -- a regenerated
+            # version has not been exported yet).
             for scored in selection.tracks:
                 pt = playlist_models.PlaylistTrack(
                     id=uuid.uuid4(),
@@ -1951,6 +2058,10 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 track_sources_summary=selection.sources_summary,
                 generation_duration_ms=generation_duration_ms,
                 pool_snapshot=pool_snapshot,
+                # Ordered track ids this generation produced (#versions): the durable
+                # history of this version AND the freshness baseline for the next
+                # regenerate (read above, never the live rows).
+                track_snapshot=[str(scored.track_id) for scored in selection.tracks],
             )
             session.add(gen_record)
 
@@ -2143,8 +2254,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
 
             # Match tracks to Spotify IDs (two-pass: MB URL relations, then text search)
+            export_now = datetime.datetime.now(datetime.UTC)
             spotify_uris: list[str] = []
             skipped_tracks: list[str] = []
+            # Per-track sync status (#spotify-sync-visibility): which PlaylistTrack
+            # rows matched vs not, so we can stamp spotify_synced_at after the push.
+            matched_pts: list[playlist_models.PlaylistTrack] = []
+            unmatched_pts: list[playlist_models.PlaylistTrack] = []
             mb_matched = 0
             search_matched = 0
 
@@ -2179,9 +2295,11 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         search_matched += 1
                     else:
                         skipped_tracks.append(track.title)
+                        unmatched_pts.append(pt)
                         continue
 
                 spotify_uris.append(f"spotify:track:{spotify_id}")
+                matched_pts.append(pt)
 
             log.info(
                 "export_track_matching_summary",
@@ -2248,6 +2366,16 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             updated_playlist_links["spotify"] = spotify_section
             playlist.service_links = updated_playlist_links
 
+            # Persist per-track Spotify sync status (#spotify-sync-visibility): the
+            # push succeeded, so every matched track is now confirmed on Spotify;
+            # an unmatched one is cleared (re-match is not monotone -- a track can
+            # stop matching on a re-export). Drives the per-row badge and the
+            # "exclude unsynced & regenerate" affordance.
+            for matched_pt in matched_pts:
+                matched_pt.spotify_synced_at = export_now
+            for unmatched_pt in unmatched_pts:
+                unmatched_pt.spotify_synced_at = None
+
             await lifecycle_module.complete_task(
                 session,
                 task,
@@ -2256,6 +2384,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     "exported": len(spotify_uris),
                     "skipped": len(skipped_tracks),
                     "skipped_tracks": skipped_tracks,
+                    "synced_track_ids": [str(pt.track_id) for pt in matched_pts],
                 },
             )
             await session.commit()

@@ -11,8 +11,13 @@ applied last to the union (issue #128). The stored shape is::
         {"kind": "artist",  "artist_id": "<uuid>", "enabled": true,
          "via_seed": "lineup"}
       ],
-      "exclude_artist_ids": ["<uuid>"]
+      "exclude_artist_ids": ["<uuid>"],
+      "exclude_track_ids": ["<uuid>"]
     }
+
+``exclude_track_ids`` (optional, #track-exclude) is applied at track-selection time
+as a candidate filter in the worker -- this module only parses it; it never sees
+tracks. ``exclude_artist_ids`` is applied here at pool build (artist level).
 
 Related artists are no longer a live source kind: enrichment (#133) resolves them
 up front and persists them as concrete ``artist`` sources tagged with ``via_seed``.
@@ -34,7 +39,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 
 class PoolSourceKind(enum.StrEnum):
@@ -193,6 +198,47 @@ def extract_excludes(raw: Mapping[str, object]) -> set[uuid.UUID]:
     return {_parse_uuid(item, "exclude_artist_ids[]") for item in raw_excludes}
 
 
+def extract_track_excludes(raw: Mapping[str, object]) -> set[uuid.UUID]:
+    """Parse the ``exclude_track_ids`` set from ``input_references`` (#track-exclude).
+
+    Track exclusions are applied at track-selection time (a candidate filter in the
+    scoring path), NOT at pool build time -- this module never sees tracks. This
+    helper only parses the stored ids; the worker applies them.
+
+    Raises:
+        ValueError: If ``exclude_track_ids`` is present but not a list, or any
+            entry is not a valid UUID.
+    """
+    raw_excludes = raw.get("exclude_track_ids")
+    if raw_excludes is None:
+        return set()
+    if not isinstance(raw_excludes, Sequence) or isinstance(raw_excludes, (str, bytes)):
+        msg = f"'exclude_track_ids' must be a list, got {type(raw_excludes).__name__}"
+        raise ValueError(msg)
+    return {_parse_uuid(item, "exclude_track_ids[]") for item in raw_excludes}
+
+
+def with_track_excludes(
+    input_references: Mapping[str, object],
+    track_ids: Iterable[uuid.UUID],
+) -> dict[str, object]:
+    """Return a copy of ``input_references`` with ``exclude_track_ids`` set to
+    ``track_ids`` (deduped, order-preserving), leaving every other key intact.
+
+    Used by the playlist-detail refine actions (#track-exclude) to mark/unmark a
+    track on the recipe. The key is omitted when the set is empty so a profile
+    that excludes nothing keeps its lean shape (matching
+    :func:`serialize_input_references`).
+    """
+    refs = dict(input_references)
+    ids = list(dict.fromkeys(str(t) for t in track_ids))
+    if ids:
+        refs["exclude_track_ids"] = ids
+    else:
+        refs.pop("exclude_track_ids", None)
+    return refs
+
+
 def build_pool(
     resolved: Sequence[ResolvedArtist],
     exclude_ids: set[uuid.UUID],
@@ -244,12 +290,21 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
 def serialize_input_references(
     sources: Sequence[PoolSource],
     exclude_ids: Sequence[uuid.UUID] = (),
+    exclude_track_ids: Sequence[uuid.UUID] = (),
 ) -> dict[str, object]:
-    """Build a stored ``input_references`` dict from typed sources + excludes."""
-    return {
+    """Build a stored ``input_references`` dict from typed sources + excludes.
+
+    ``exclude_track_ids`` is emitted only when non-empty, so profiles that never
+    exclude a track keep their existing lean shape (and existing round-trips are
+    unchanged).
+    """
+    refs: dict[str, object] = {
         "sources": [serialize_source(s) for s in sources],
         "exclude_artist_ids": [str(aid) for aid in exclude_ids],
     }
+    if exclude_track_ids:
+        refs["exclude_track_ids"] = [str(tid) for tid in exclude_track_ids]
+    return refs
 
 
 def scope_artist_ids(
@@ -293,4 +348,9 @@ def replace_via_seed_sources(
         ArtistSource(artist_id=aid, enabled=True, via_seed=scope) for aid in artist_ids
     )
     excludes = extract_excludes(input_references)
-    return serialize_input_references(kept, sorted(excludes, key=str))
+    track_excludes = extract_track_excludes(input_references)
+    return serialize_input_references(
+        kept,
+        sorted(excludes, key=str),
+        sorted(track_excludes, key=str),
+    )

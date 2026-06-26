@@ -221,6 +221,43 @@ class TestValidateProfileInputs:
             request.input_references, request.generator_type
         )
 
+    def test_valid_exclude_track_ids_pass_validation(self) -> None:
+        """A well-formed exclude_track_ids list round-trips through validation."""
+        body = {
+            "name": "Test",
+            "generator_type": "concert_prep",
+            "input_references": {
+                "sources": [
+                    {"kind": "artist", "artist_id": str(uuid.uuid4()), "enabled": True}
+                ],
+                "exclude_track_ids": [str(uuid.uuid4()), str(uuid.uuid4())],
+            },
+            "parameter_values": {},
+        }
+        request = generators_module.CreateProfileRequest(**body)
+        generators_module.validate_profile_inputs(
+            request.input_references, request.generator_type
+        )
+
+    def test_malformed_exclude_track_ids_raise(self) -> None:
+        """A non-UUID in exclude_track_ids is rejected at write time, not later."""
+        body = {
+            "name": "Test",
+            "generator_type": "concert_prep",
+            "input_references": {
+                "sources": [
+                    {"kind": "artist", "artist_id": str(uuid.uuid4()), "enabled": True}
+                ],
+                "exclude_track_ids": ["not-a-uuid"],
+            },
+            "parameter_values": {},
+        }
+        request = generators_module.CreateProfileRequest(**body)
+        with pytest.raises(ValueError, match="Invalid input_references"):
+            generators_module.validate_profile_inputs(
+                request.input_references, request.generator_type
+            )
+
 
 # --- enrich endpoint (#133) ---
 

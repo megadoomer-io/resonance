@@ -66,8 +66,9 @@ uv run alembic revision --autogenerate -m "description"  # create new
 # Generator profiles and playlists
 uv run resonance-api profile list
 uv run resonance-api profile create --type concert_prep --event <id> --name "name"
-uv run resonance-api generate <profile-id> [--freshness 50]
-uv run resonance-api enrich <profile-id> --lineup [--n 5]          # add related artists
+uv run resonance-api generate <profile-id> [--freshness 50]       # regenerates in place
+uv run resonance-api profile exclude-track <profile-id> <track-id>... [--regenerate]
+uv run resonance-api enrich <profile-id> --lineup [--n 5]          # top up related artists
 uv run resonance-api enrich <profile-id> --seed <artist-id> [--n 5]
 uv run resonance-api playlists
 uv run resonance-api playlist <playlist-id>
@@ -150,7 +151,8 @@ uv run resonance-api task <task_id>             # Check bulk task status
 uv run resonance-api track <query>              # Search tracks by title
 uv run resonance-api profile list               # List generator profiles
 uv run resonance-api profile create ...         # Create a generator profile
-uv run resonance-api generate <profile-id>      # Generate playlist from profile
+uv run resonance-api generate <profile-id>      # Generate (regenerates in place)
+uv run resonance-api profile exclude-track <profile-id> <track-id>... [--regenerate]  # Exclude tracks from the recipe
 uv run resonance-api enrich <profile-id> --lineup | --seed <id>  # Add related artists
 uv run resonance-api playlists                  # List playlists
 uv run resonance-api playlist <playlist-id>     # Show playlist details
@@ -195,9 +197,13 @@ uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d
 - Generator types declared in `generators/parameters.py` via `GENERATOR_TYPE_CONFIG`
 - Scoring logic in `generators/scoring.py`
 - Generator-specific logic in `generators/<type>.py` (e.g., `concert_prep.py`)
+- **Track selection is weighted round-robin (reverses #128)**: `concert_prep._select_one_pool` deals each pool artist's tracks round by round until `max_tracks`, so every artist on the bill gets an even share and a heavy-rotation neighbor can't monopolize the playlist. `composite_score` (familiarity/hit_depth) decides WHICH of an artist's tracks fill its slots, round-robin decides HOW MANY. A short band's slack redistributes to the others; `max_tracks < n_artists` keeps the top by score. `weights` (artist_id → tracks per round, default 1 = even) is a real plumbed seam for future seed/headliner emphasis. This reverses #128's round-0 + pure-score fill, which buried the seed band.
 - **Lineup builder is a server-backed profile editor (#133)**: `/playlists/new` eagerly creates a `draft` `GeneratorProfile` and redirects to `/playlists/{id}/edit`; the same editor edits existing profiles. Every edit PATCHes `input_references` (and parameters/name) via `/api/v1/generator-profiles/{id}`; "Generate" is a separate action that flips a draft `active`. The profile list shows only `active` profiles. Client state logic is the pure ES module `static/lineup.core.js` (unit-tested with **vitest** under `tests/js/`); `static/lineup.js` is the DOM/network controller. `ui/playlists._hydrate_lineup` turns stored `input_references` into named, grouped rows for the editor.
-- **Related-artist enrichment (#133)**: `POST /api/v1/generator-profiles/{id}/enrich {seed_artist_ids: [...] | "lineup", n}` resolves related artists and persists them into the pool as concrete `artist` sources tagged with `via_seed` (`"<seed_id>"` per-seed, `"lineup"` global). It runs as a `RELATED_ARTIST_ENRICHMENT` worker task; re-running a scope replaces only that scope's prior discoveries. There is NO generation-time related expansion anymore (the old `similar_artist_ratio` slider is gone).
+- **Related-artist enrichment (#133)**: `POST /api/v1/generator-profiles/{id}/enrich {seed_artist_ids: [...] | "lineup", n}` resolves related artists and persists them into the pool as concrete `artist` sources tagged with `via_seed` (`"<seed_id>"` per-seed, `"lineup"` global). It runs as a `RELATED_ARTIST_ENRICHMENT` worker task; re-running a scope **tops up to N active** (counts the non-excluded discoveries already in the scope, fetches only the difference, appends rather than replaces, never re-suggests a globally-excluded artist). A scope already at/over N is a no-op (curated discoveries are never trimmed); connectors running dry is a partial success. There is NO generation-time related expansion anymore (the old `similar_artist_ratio` slider is gone).
 - **Profile concurrency (#133)**: `GeneratorProfile.version` is the SQLAlchemy `version_id_col`. The editor sends `expected_version` on PATCH (409 + conflict banner on mismatch); the enrich worker reloads and re-applies on a version conflict so concurrent edits merge instead of clobbering. Generation and enrichment are mutually exclusive per profile (409).
+- **Regenerate is in place on the same Playlist row**: `worker.score_and_build_playlist` reuses the profile's current `Playlist` (via the latest `GenerationRecord`) instead of creating a new one, so the row identity — and the Spotify export anchor in `service_links` — survives. Old `PlaylistTrack` rows are replaced; only the first generation (or a deleted playlist) creates a fresh row. UI: a "Regenerate" button on the playlist detail page; API: re-POST `/{id}/generate`. `max_tracks`/`freshness_target` live on the `PLAYLIST_GENERATION` task, so a regenerate must re-pass them.
+- **Version history is data-only (#versions, D6)**: each generation records its ordered track list on `GenerationRecord.track_snapshot` (`list[str]` of track uuids). This is the durable per-version history AND the freshness baseline for the next regenerate — `score_and_build` reads the **latest snapshot** for `previous_track_ids`, NOT the live `PlaylistTrack` rows (reading the rows it's about to overwrite would self-poison the freshness target). Browse/restore UI is deferred; the data is captured so it's recoverable later.
+- **Track exclusions live on the recipe (#track-exclude)**: `input_references.exclude_track_ids` (parse/serialize via `pool.extract_track_excludes` / `with_track_excludes`; validated on profile PATCH). `pool.py` is artist-only/pre-track, so the exclude is applied as a **candidate filter** in `score_and_build` (an excluded track never becomes a candidate; its band deals its next-best on regenerate). UI: per-row ✕ on the detail page writes it (mark-then-regenerate). CLI: `resonance-api profile exclude-track <id> <track-id>... [--regenerate]`.
 - **Artist similarity is durable data, not a cache**: `models.taste.ArtistSimilarity` stores connector-reported artist→neighbor edges (`source_artist_id`, `connector`, `neighbor_name`/`mbid`, `rank`, `fetched_at`). The enrich worker reads stored edges first and falls back to a live fetch, recording the result; `fetched_at` drives refresh-if-old, never eviction.
 - SQLAlchemy models use UUID primary keys
 - OAuth tokens encrypted at rest via Fernet
@@ -207,6 +213,7 @@ uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d
 - Playlist export uses `PLAYLIST_WRITE` capability — connectors declare it to enable export. Export creates a background `PLAYLIST_EXPORT` task per connection, tracked via `playlist.service_links`
 - Track matching: export uses two-pass resolution. First, tracks with MusicBrainz recording MBIDs are resolved via MB URL relations (authoritative, community-curated). Second, unresolved tracks fall back to Spotify text search. Matches from both passes are persisted in `service_links["spotify"]` for future reuse.
 - Sync staleness: compare `playlist.updated_at` vs `service_links[connection].exported_at` — no external API calls needed
+- **Per-track Spotify sync visibility (#spotify-sync-visibility)**: `export_playlist` stamps `PlaylistTrack.spotify_synced_at` after the push — matched tracks get the timestamp, unmatched are cleared (re-match is not monotone). Drives the per-row SP badge on the detail page and the "N of M synced · Exclude unsynced & regenerate" affordance (excludes every unsynced track, then regenerates). A regenerated track starts unsynced (correct — a new version hasn't been exported).
 - No deployment manifests in this repo — all K8s config lives in `megadoomer-config`
 
 ## Environment Variables

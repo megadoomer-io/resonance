@@ -14,6 +14,7 @@ import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
 import resonance.api.v1.artists as artists_api
+import resonance.api.v1.generators as generators_api
 import resonance.dependencies as deps_module
 import resonance.generators.pool as pool_module
 import resonance.models.concert as concert_models
@@ -813,10 +814,31 @@ async def playlist_detail_page(
     gen_result = await db.execute(
         sa.select(generator_models.GenerationRecord)
         .where(generator_models.GenerationRecord.playlist_id == playlist_id)
+        .order_by(generator_models.GenerationRecord.created_at.desc())
         .options(sa_orm.joinedload(generator_models.GenerationRecord.profile))
         .limit(1)
     )
     generation = gen_result.scalar_one_or_none()
+
+    # Refine context (#track-exclude, #spotify-sync-visibility): the profile is the
+    # editable recipe; its exclude_track_ids drives which rows render struck-through.
+    profile = generation.profile if generation is not None else None
+    profile_id = profile.id if profile is not None else None
+    excluded_track_ids: set[str] = (
+        {str(t) for t in pool_module.extract_track_excludes(profile.input_references)}
+        if profile is not None
+        else set()
+    )
+    # How many of this playlist's tracks are confirmed on Spotify (drives the
+    # "N of M synced" line and the exclude-unsynced affordance). Counts the whole
+    # playlist, not just the current page.
+    synced_count_result = await db.execute(
+        sa.select(sa.func.count()).where(
+            playlist_models.PlaylistTrack.playlist_id == playlist_id,
+            playlist_models.PlaylistTrack.spotify_synced_at.isnot(None),
+        )
+    )
+    synced_count = synced_count_result.scalar_one()
 
     spotify_conn_result = await db.execute(
         sa.select(user_models.ServiceConnection).where(
@@ -840,6 +862,9 @@ async def playlist_detail_page(
         playlist_id=playlist_id,
         tracks=tracks,
         generation=generation,
+        profile_id=profile_id,
+        excluded_track_ids=excluded_track_ids,
+        synced_count=synced_count,
         spotify_connections=spotify_connections,
         export_in_progress=bool(active_export_tasks),
         export_task_ids=export_task_ids,
@@ -854,4 +879,208 @@ async def playlist_detail_page(
         partial_template="partials/playlist_detail_tracks.html",
         full_template="playlist_detail.html",
         context=ctx,
+    )
+
+
+async def _playlist_and_profile(
+    db: sa_async.AsyncSession,
+    user_id: uuid.UUID,
+    playlist_id: uuid.UUID,
+) -> tuple[playlist_models.Playlist, generator_models.GeneratorProfile]:
+    """Load a user's playlist and the recipe (profile) it was generated from.
+
+    Resolves the profile via the latest GenerationRecord. Raises 404 if the
+    playlist is not the user's, or if it has no generating profile (e.g. a
+    manually-built playlist that can't be refined/regenerated).
+    """
+    playlist = (
+        await db.execute(
+            sa.select(playlist_models.Playlist).where(
+                playlist_models.Playlist.id == playlist_id,
+                playlist_models.Playlist.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if playlist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+
+    generation = (
+        await db.execute(
+            sa.select(generator_models.GenerationRecord)
+            .where(generator_models.GenerationRecord.playlist_id == playlist_id)
+            .order_by(generator_models.GenerationRecord.created_at.desc())
+            .options(sa_orm.joinedload(generator_models.GenerationRecord.profile))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if generation is None or generation.profile is None:
+        raise fastapi.HTTPException(
+            status_code=404, detail="This playlist has no editable recipe"
+        )
+    return playlist, generation.profile
+
+
+async def _render_tracks_fragment(
+    request: fastapi.Request,
+    db: sa_async.AsyncSession,
+    playlist_id: uuid.UUID,
+    profile: generator_models.GeneratorProfile,
+    page: int,
+) -> fastapi.responses.HTMLResponse:
+    """Re-render just the playlist tracks partial after a refine mutation."""
+    offset = common.page_offset(page)
+    tracks = list(
+        (
+            await db.execute(
+                sa.select(playlist_models.PlaylistTrack)
+                .where(playlist_models.PlaylistTrack.playlist_id == playlist_id)
+                .order_by(playlist_models.PlaylistTrack.position)
+                .options(
+                    sa_orm.joinedload(playlist_models.PlaylistTrack.track).joinedload(
+                        music_models.Track.artist
+                    )
+                )
+                .offset(offset)
+                .limit(common.PAGE_SIZE + 1)
+            )
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+    has_next = len(tracks) > common.PAGE_SIZE
+    tracks = tracks[: common.PAGE_SIZE]
+    excluded_track_ids = {
+        str(t) for t in pool_module.extract_track_excludes(profile.input_references)
+    }
+    ctx = common.base_context(request)
+    ctx.update(
+        playlist_id=playlist_id,
+        tracks=tracks,
+        page=page,
+        has_next=has_next,
+        has_prev=page > 1,
+        excluded_track_ids=excluded_track_ids,
+        profile_id=profile.id,
+    )
+    return common.templates.TemplateResponse(
+        request, "partials/playlist_detail_tracks.html", ctx
+    )
+
+
+@router.post("/playlists/{playlist_id}/tracks/{track_id}/toggle-exclude")
+async def toggle_track_exclude(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    playlist_id: uuid.UUID,
+    track_id: uuid.UUID,
+    page: int = 1,
+) -> fastapi.responses.HTMLResponse:
+    """Toggle a track in the recipe's exclude_track_ids (mark/unmark for refill).
+
+    Marking does NOT remove the track from the current playlist -- it is struck
+    through until the user regenerates, which refills the freed slot
+    (mark-then-regenerate, #track-exclude). Returns the re-rendered tracks partial.
+    """
+    _playlist, profile = await _playlist_and_profile(db, user_id, playlist_id)
+    excluded = pool_module.extract_track_excludes(profile.input_references)
+    if track_id in excluded:
+        excluded.discard(track_id)
+    else:
+        excluded.add(track_id)
+    profile.input_references = pool_module.with_track_excludes(
+        profile.input_references, excluded
+    )
+    await db.commit()
+    return await _render_tracks_fragment(request, db, playlist_id, profile, page)
+
+
+@router.post("/playlists/{playlist_id}/regenerate", response_model=None)
+async def regenerate_playlist(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    playlist_id: uuid.UUID,
+    max_tracks: Annotated[int, fastapi.Form()] = 50,
+    freshness_target: Annotated[str, fastapi.Form()] = "",
+) -> fastapi.responses.RedirectResponse:
+    """Regenerate this playlist in place from its recipe (refills excluded slots).
+
+    Re-passes max_tracks/freshness_target (they live on the generation task, not
+    the profile) and lands on the generation-progress page.
+    """
+    _playlist, profile = await _playlist_and_profile(db, user_id, playlist_id)
+    fresh = int(freshness_target) if freshness_target.strip() else None
+    task_id = await generators_api._trigger_profile_task(
+        db=db,
+        arq_redis=request.app.state.arq_redis,
+        profile_id=profile.id,
+        user_id=user_id,
+        task_type=types_module.TaskType.PLAYLIST_GENERATION,
+        params={
+            "profile_id": str(profile.id),
+            "freshness_target": fresh,
+            "max_tracks": max_tracks,
+        },
+        job_name="generate_playlist",
+    )
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/generating/{task_id}", status_code=303
+    )
+
+
+@router.post(
+    "/playlists/{playlist_id}/exclude-unsynced-and-regenerate", response_model=None
+)
+async def exclude_unsynced_and_regenerate(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    playlist_id: uuid.UUID,
+    max_tracks: Annotated[int, fastapi.Form()] = 50,
+    freshness_target: Annotated[str, fastapi.Form()] = "",
+) -> fastapi.responses.RedirectResponse:
+    """Exclude every not-yet-synced track from the recipe, then regenerate.
+
+    The convergence affordance for partial Spotify exports: drop the tracks that
+    failed to match, refill from the same pool, and land on the progress page so
+    a re-export can sync the new selection. Convergence is best-effort, not
+    monotone (a refill can pull in another unmatched track).
+    """
+    _playlist, profile = await _playlist_and_profile(db, user_id, playlist_id)
+    unsynced = (
+        (
+            await db.execute(
+                sa.select(playlist_models.PlaylistTrack.track_id).where(
+                    playlist_models.PlaylistTrack.playlist_id == playlist_id,
+                    playlist_models.PlaylistTrack.spotify_synced_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    excluded = pool_module.extract_track_excludes(profile.input_references)
+    excluded.update(unsynced)
+    profile.input_references = pool_module.with_track_excludes(
+        profile.input_references, excluded
+    )
+    await db.commit()
+    fresh = int(freshness_target) if freshness_target.strip() else None
+    task_id = await generators_api._trigger_profile_task(
+        db=db,
+        arq_redis=request.app.state.arq_redis,
+        profile_id=profile.id,
+        user_id=user_id,
+        task_type=types_module.TaskType.PLAYLIST_GENERATION,
+        params={
+            "profile_id": str(profile.id),
+            "freshness_target": fresh,
+            "max_tracks": max_tracks,
+        },
+        job_name="generate_playlist",
+    )
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/generating/{task_id}", status_code=303
     )

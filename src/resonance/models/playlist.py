@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -82,6 +83,15 @@ class PlaylistTrack(base_module.TimestampMixin, base_module.Base):
     score: orm.Mapped[float | None] = orm.mapped_column(sa.Float, nullable=True)
     source: orm.Mapped[types_module.TrackSource] = orm.mapped_column(
         sa.Enum(types_module.TrackSource, native_enum=False), nullable=False
+    )
+    # When this track was last confirmed present on Spotify by an export
+    # (#spotify-sync-visibility). Null = not synced (no Spotify match, or never
+    # exported). Drives the per-track sync badge and the "exclude unsynced" bulk
+    # action. Per-playlist-per-track grain (scalar column, no JSON write-race);
+    # a regenerated playlist's fresh rows start null, which is correct -- a new
+    # version has not been exported yet.
+    spotify_synced_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
     )
 
     playlist: orm.Mapped[Playlist] = orm.relationship(back_populates="tracks")
