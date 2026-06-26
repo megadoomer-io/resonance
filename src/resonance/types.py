@@ -20,6 +20,30 @@ class ServiceType(enum.StrEnum):
     TEST = "test"
 
 
+# Display-label overrides for service types whose title-cased value reads wrong
+# (e.g. "Ical" -> "iCal"). Anything not listed falls back to a humanized value.
+_SERVICE_LABEL_OVERRIDES: dict[ServiceType, str] = {
+    ServiceType.LASTFM: "Last.fm",
+    ServiceType.LISTENBRAINZ: "ListenBrainz",
+    ServiceType.SOUNDCLOUD: "SoundCloud",
+    ServiceType.ICAL: "iCal",
+    ServiceType.GITHUB: "GitHub",
+}
+
+
+def service_label(service: ServiceType) -> str:
+    """Return a human-friendly display label for a service type.
+
+    Used for display-only labeling (e.g. per-source event links). Distinct from
+    the connector registry's ``display_name``, which prefers a live connector's
+    own name; this helper needs no registry and works for sources with no
+    registered connector.
+    """
+    return _SERVICE_LABEL_OVERRIDES.get(
+        service, service.value.replace("_", " ").title()
+    )
+
+
 class ArtistRelationType(enum.StrEnum):
     """Types of relationships a user can have with an artist."""
 

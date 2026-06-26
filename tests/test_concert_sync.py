@@ -2,7 +2,7 @@
 
 import datetime
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -151,6 +151,7 @@ class TestUpsertEvent:
         assert added.external_id == "uid-123"
         assert added.source_service == types_module.ServiceType.SONGKICK
         assert added.venue_id == venue.id
+        assert added.service_links == {"songkick": "https://songkick.com/event/123"}
         assert created is True
         assert event is added
 
@@ -166,6 +167,7 @@ class TestUpsertEvent:
         existing_event.event_date = datetime.date(2025, 6, 1)
         existing_event.external_url = "https://old.com"
         existing_event.venue_id = None
+        existing_event.service_links = None
 
         found_result = MagicMock()
         found_result.scalar_one_or_none.return_value = existing_event
@@ -186,6 +188,8 @@ class TestUpsertEvent:
         assert existing_event.event_date == datetime.date(2026, 1, 1)
         assert existing_event.external_url == "https://new.com"
         assert existing_event.venue_id == venue.id
+        # Same-source update records the link in service_links too.
+        assert existing_event.service_links == {"songkick": "https://new.com"}
         session.add.assert_not_called()
 
     @pytest.mark.anyio()
@@ -517,3 +521,177 @@ class TestMatchCandidatesToArtists:
         assert count == 1
         assert candidate_a.matched_artist_id == artist.id
         assert candidate_b.matched_artist_id is None
+
+
+def _make_event_candidate(
+    source_service: types_module.ServiceType,
+    external_url: str | None,
+    *,
+    resolved_event_id: uuid.UUID | None = None,
+) -> MagicMock:
+    candidate = MagicMock()
+    candidate.id = uuid.uuid4()
+    candidate.source_service = source_service
+    candidate.external_url = external_url
+    candidate.resolved_event_id = resolved_event_id
+    candidate.title = "Artist at Venue"
+    candidate.event_date = datetime.date(2026, 1, 1)
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# resolve_event_candidate -- per-source service_links (#event-link-audit)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveEventCandidateServiceLinks:
+    """resolve_event_candidate keeps the primary link pinned and records others."""
+
+    @pytest.mark.anyio()
+    async def test_cross_source_resolved_does_not_clobber_primary(self) -> None:
+        """A different-source candidate adds its link without changing the primary.
+
+        This is the desync bug: a Concert Archives candidate resolving to a
+        Songkick event must NOT relabel the event's primary link.
+        """
+        session = AsyncMock()
+
+        existing = MagicMock()
+        existing.source_service = types_module.ServiceType.SONGKICK
+        existing.external_url = "https://songkick.com/event/1"
+        existing.service_links = {"songkick": "https://songkick.com/event/1"}
+        existing.venue_id = None
+
+        found = MagicMock()
+        found.scalar_one_or_none.return_value = existing
+        session.execute.return_value = found
+
+        candidate = _make_event_candidate(
+            types_module.ServiceType.CONCERT_ARCHIVES,
+            "https://concertarchives.org/e/1",
+            resolved_event_id=uuid.uuid4(),
+        )
+
+        event, created = await sync_module.resolve_event_candidate(
+            session, candidate, None
+        )
+
+        assert created is False
+        assert event is existing
+        # Primary label/href untouched.
+        assert existing.source_service == types_module.ServiceType.SONGKICK
+        assert existing.external_url == "https://songkick.com/event/1"
+        # Both sources now present in service_links.
+        assert existing.service_links == {
+            "songkick": "https://songkick.com/event/1",
+            "concert_archives": "https://concertarchives.org/e/1",
+        }
+
+    @pytest.mark.anyio()
+    async def test_same_source_resolved_refreshes_primary(self) -> None:
+        """A same-source candidate refreshes the denormalized primary link."""
+        session = AsyncMock()
+
+        existing = MagicMock()
+        existing.source_service = types_module.ServiceType.SONGKICK
+        existing.external_url = "https://songkick.com/old"
+        existing.service_links = None
+        existing.venue_id = None
+
+        found = MagicMock()
+        found.scalar_one_or_none.return_value = existing
+        session.execute.return_value = found
+
+        candidate = _make_event_candidate(
+            types_module.ServiceType.SONGKICK,
+            "https://songkick.com/new",
+            resolved_event_id=uuid.uuid4(),
+        )
+
+        await sync_module.resolve_event_candidate(session, candidate, None)
+
+        assert existing.external_url == "https://songkick.com/new"
+        assert existing.service_links == {"songkick": "https://songkick.com/new"}
+
+    @pytest.mark.anyio()
+    async def test_cross_source_date_venue_match_merges_link(self) -> None:
+        """A candidate matched across sources by (date, venue) records its link."""
+        session = AsyncMock()
+        venue = MagicMock()
+        venue.id = uuid.uuid4()
+
+        potential_match = MagicMock()
+        potential_match.id = uuid.uuid4()
+        potential_match.source_service = types_module.ServiceType.SONGKICK
+        potential_match.external_url = "https://songkick.com/event/2"
+        potential_match.service_links = {"songkick": "https://songkick.com/event/2"}
+
+        match_result = MagicMock()
+        match_result.scalar_one_or_none.return_value = potential_match
+        session.execute.return_value = match_result
+
+        candidate = _make_event_candidate(
+            types_module.ServiceType.CONCERT_ARCHIVES,
+            "https://concertarchives.org/e/2",
+        )
+
+        with patch.object(
+            sync_module, "_is_excluded", new=AsyncMock(return_value=False)
+        ):
+            event, created = await sync_module.resolve_event_candidate(
+                session, candidate, venue
+            )
+
+        assert created is False
+        assert event is potential_match
+        assert potential_match.source_service == types_module.ServiceType.SONGKICK
+        assert potential_match.external_url == "https://songkick.com/event/2"
+        assert potential_match.service_links == {
+            "songkick": "https://songkick.com/event/2",
+            "concert_archives": "https://concertarchives.org/e/2",
+        }
+
+    @pytest.mark.anyio()
+    async def test_new_event_initializes_service_links(self) -> None:
+        """A brand-new event seeds service_links with its originating source."""
+        session = AsyncMock()
+        session.add = MagicMock()
+
+        candidate = _make_event_candidate(
+            types_module.ServiceType.CONCERT_ARCHIVES,
+            "https://concertarchives.org/e/3",
+        )
+
+        _event, created = await sync_module.resolve_event_candidate(
+            session, candidate, None
+        )
+
+        assert created is True
+        added = session.add.call_args[0][0]
+        assert added.service_links == {
+            "concert_archives": "https://concertarchives.org/e/3"
+        }
+
+
+# ---------------------------------------------------------------------------
+# service_label
+# ---------------------------------------------------------------------------
+
+
+class TestServiceLabel:
+    """types.service_label humanizes service types, with curated overrides."""
+
+    def test_humanizes_underscored_value(self) -> None:
+        assert (
+            types_module.service_label(types_module.ServiceType.CONCERT_ARCHIVES)
+            == "Concert Archives"
+        )
+
+    def test_simple_value_title_cased(self) -> None:
+        assert (
+            types_module.service_label(types_module.ServiceType.SONGKICK) == "Songkick"
+        )
+
+    def test_curated_overrides(self) -> None:
+        assert types_module.service_label(types_module.ServiceType.ICAL) == "iCal"
+        assert types_module.service_label(types_module.ServiceType.LASTFM) == "Last.fm"

@@ -21,6 +21,27 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def _merge_service_link(
+    event: concert_models.Event,
+    source_service: types_module.ServiceType,
+    external_url: str | None,
+) -> None:
+    """Record a source's link in ``event.service_links`` (copy-on-write).
+
+    Keys are ``ServiceType`` values (lowercase), matching the rest of the
+    codebase's ``service_links`` convention. A no-op when ``external_url`` is
+    falsy. Multi-source events accumulate one entry per contributing source, so
+    the displayed per-source label and href can never desync -- the denormalized
+    ``external_url``/``source_service`` pair stays pinned to the event's primary
+    (originating) source.
+    """
+    if not external_url:
+        return
+    links = dict(event.service_links or {})
+    links[source_service.value] = external_url
+    event.service_links = links
+
+
 async def upsert_venue(
     session: AsyncSession,
     venue_data: ical_module.VenueData,
@@ -92,8 +113,11 @@ async def upsert_event(
     if existing is not None:
         existing.title = parsed.title
         existing.event_date = parsed.event_date
+        # Same-source update (looked up by source_service): the denormalized
+        # primary link belongs to this source, so refreshing it is correct.
         existing.external_url = parsed.external_url
         existing.venue_id = venue_id
+        _merge_service_link(existing, source_service, parsed.external_url)
         return existing, False
 
     event = concert_models.Event(
@@ -104,6 +128,9 @@ async def upsert_event(
         source_service=source_service,
         external_id=parsed.external_id,
         external_url=parsed.external_url,
+        service_links=(
+            {source_service.value: parsed.external_url} if parsed.external_url else None
+        ),
     )
     session.add(event)
     logger.info("created_event", title=parsed.title, external_id=parsed.external_id)
@@ -449,8 +476,16 @@ async def resolve_event_candidate(
         if existing is not None:
             existing.title = candidate.title
             existing.event_date = candidate.event_date
-            existing.external_url = candidate.external_url
+            # Only refresh the denormalized primary link when the candidate is
+            # the event's own source. A cross-source candidate (matched across
+            # sources by date+venue) records its link in service_links without
+            # clobbering the primary label/href -- this was the desync bug.
+            if candidate.source_service == existing.source_service:
+                existing.external_url = candidate.external_url
             existing.venue_id = venue_id
+            _merge_service_link(
+                existing, candidate.source_service, candidate.external_url
+            )
             return existing, False
 
     if venue_id is not None:
@@ -467,6 +502,11 @@ async def resolve_event_candidate(
             candidate.resolved_event_id = potential_match.id
             candidate.confidence_score = _EVENT_CONFIDENCE
             candidate.status = types_module.CandidateStatus.AUTO_ACCEPTED
+            # Cross-source match: record this candidate's source link on the
+            # matched event without touching its primary label/href.
+            _merge_service_link(
+                potential_match, candidate.source_service, candidate.external_url
+            )
             return potential_match, False
 
     event = concert_models.Event(
@@ -477,6 +517,11 @@ async def resolve_event_candidate(
         source_service=candidate.source_service,
         external_id=candidate.external_id,
         external_url=candidate.external_url,
+        service_links=(
+            {candidate.source_service.value: candidate.external_url}
+            if candidate.external_url
+            else None
+        ),
     )
     session.add(event)
     candidate.resolved_event_id = event.id
