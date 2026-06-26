@@ -22,10 +22,14 @@
                     {% endif %}
                 </td>
             </tr>
-            {% if event.external_url %}
+            {% if source_links %}
             <tr>
-                <th>Link</th>
-                <td><a href="{{ event.external_url }}" target="_blank" rel="noopener">{{ event.source_service.value }}&#x2197;</a></td>
+                <th>{{ "Links" if source_links | length > 1 else "Link" }}</th>
+                <td>
+                    {% for link in source_links %}
+                    <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.label }}&#x2197;</a>{% if not loop.last %} &middot; {% endif %}
+                    {% endfor %}
+                </td>
             </tr>
             {% endif %}
             <tr>

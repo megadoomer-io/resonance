@@ -275,6 +275,32 @@ async def events_page(
 # ---------------------------------------------------------------------------
 
 
+def _event_source_links(event: concert_models.Event) -> list[dict[str, str]]:
+    """Build ordered per-source links for an event's detail view.
+
+    Reads ``event.service_links`` (one entry per contributing source), labeling
+    each with its service display name so the label and href can never disagree.
+    The event's primary (originating) ``source_service`` sorts first; the rest
+    follow alphabetically by label. Falls back to the denormalized
+    ``external_url`` pair when service_links is empty (pre-backfill rows).
+    """
+    links: dict[str, Any] = dict(event.service_links or {})
+    if not links and event.external_url:
+        links = {event.source_service.value: event.external_url}
+    primary = event.source_service.value
+    items: list[dict[str, str]] = []
+    for key, url in links.items():
+        if not url:
+            continue
+        try:
+            label = types_module.service_label(types_module.ServiceType(key))
+        except ValueError:
+            label = key.replace("_", " ").title()
+        items.append({"label": label, "url": str(url), "key": key})
+    items.sort(key=lambda i: (i["key"] != primary, i["label"].lower()))
+    return items
+
+
 @router.get("/events/{event_id}", response_model=None)
 async def event_detail_page(
     request: fastapi.Request,
@@ -337,6 +363,7 @@ async def event_detail_page(
         "event": event,
         "matched_artists": matched_artists,
         "attendance": attendance,
+        "source_links": _event_source_links(event),
     }
 
     return common.templates.TemplateResponse(request, "event_detail.html", ctx)
