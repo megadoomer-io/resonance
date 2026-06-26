@@ -463,6 +463,10 @@ Subcommands:
            [--name <n>]
            [--param key=val ...]
            [--source ... | --exclude ... | --input key=val ...]
+  exclude-track <profile-id> <track-id> [<track-id> ...] [--regenerate]
+                                    Add tracks to the recipe's exclude list
+                                    (an excluded track is skipped at selection;
+                                    --regenerate refills the freed slots)
   delete <profile-id>               Delete a profile
 
 Sources and --input are mutually exclusive: if any --source/--exclude is given,
@@ -698,6 +702,51 @@ def _cmd_profile() -> None:
         data = resp.json()
         print(f"Updated profile: {data['name']} ({data['generator_type']})")
         print(f"  id: {data['id']}")
+
+    elif subcmd == "exclude-track":
+        if len(sys.argv) < 5:
+            print(
+                "Usage: resonance-api profile exclude-track <profile-id> "
+                "<track-id> [<track-id> ...] [--regenerate]"
+            )
+            sys.exit(1)
+        profile_id = sys.argv[3]
+        rest = sys.argv[4:]
+        regenerate = "--regenerate" in rest
+        track_ids = [a for a in rest if a != "--regenerate"]
+        if not track_ids:
+            print("Provide at least one track id to exclude.")
+            sys.exit(1)
+        # Read the current recipe, append to exclude_track_ids (dedup, preserve
+        # order), and PATCH the whole input_references back. The excluded track is
+        # skipped at selection time; regenerate refills the freed slot.
+        resp = _api_request("GET", f"/api/v1/generator-profiles/{profile_id}")
+        refs = dict(resp.json().get("input_references") or {})
+        excluded = [str(t) for t in (refs.get("exclude_track_ids") or [])]
+        excluded_set = set(excluded)
+        for tid in track_ids:
+            if tid not in excluded_set:
+                excluded.append(tid)
+                excluded_set.add(tid)
+        refs["exclude_track_ids"] = excluded
+        _api_request(
+            "PATCH",
+            f"/api/v1/generator-profiles/{profile_id}",
+            json={"input_references": refs},
+        )
+        print(
+            f"Excluded {len(track_ids)} track(s); {len(excluded)} total on the recipe."
+        )
+        if regenerate:
+            print(f"Triggering regeneration for profile {profile_id}...")
+            gen = _api_request(
+                "POST",
+                f"/api/v1/generator-profiles/{profile_id}/generate",
+                json=None,
+            )
+            task_id = gen.json().get("task_id", "")
+            result = _poll_task(task_id, "Regenerating playlist")
+            print(f"Playlist regenerated: {result.get('playlist_id', 'unknown')}")
 
     elif subcmd == "delete":
         if len(sys.argv) < 4:

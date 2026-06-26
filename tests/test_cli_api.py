@@ -637,3 +637,131 @@ class TestEnrichCommand:
         )
         with pytest.raises(SystemExit):
             cli_module._cmd_enrich()
+
+
+class TestProfileExcludeTrack:
+    """`profile exclude-track`: append to exclude_track_ids and PATCH."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_appends_to_existing_excludes_and_preserves_refs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        existing_track = "11111111-1111-1111-1111-111111111111"
+        new_track = "22222222-2222-2222-2222-222222222222"
+        source = {"kind": "artist", "artist_id": "a1", "enabled": True}
+        calls: list[dict[str, Any]] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            calls.append({"method": method, "url": url, "json": kwargs.get("json")})
+            if method == "GET":
+                return _fake_response(
+                    json_body={
+                        "id": "p1",
+                        "name": "P",
+                        "generator_type": "concert_prep",
+                        "input_references": {
+                            "sources": [source],
+                            "exclude_track_ids": [existing_track],
+                        },
+                    }
+                )
+            # PATCH
+            return _fake_response(
+                json_body={"id": "p1", "name": "P", "generator_type": "concert_prep"}
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["resonance-api", "profile", "exclude-track", "p1", new_track],
+        )
+        cli_module._cmd_profile()
+
+        # A GET then a PATCH, no generate (no --regenerate).
+        assert [c["method"] for c in calls] == ["GET", "PATCH"]
+        patched_refs = calls[1]["json"]["input_references"]
+        # New track appended; existing exclude preserved; sources untouched.
+        assert patched_refs["exclude_track_ids"] == [existing_track, new_track]
+        assert patched_refs["sources"] == [source]
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_dedupes_already_excluded_track(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        track = "11111111-1111-1111-1111-111111111111"
+        calls: list[dict[str, Any]] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            calls.append({"method": method, "json": kwargs.get("json")})
+            if method == "GET":
+                return _fake_response(
+                    json_body={
+                        "id": "p1",
+                        "name": "P",
+                        "generator_type": "concert_prep",
+                        "input_references": {"exclude_track_ids": [track]},
+                    }
+                )
+            return _fake_response(
+                json_body={"id": "p1", "name": "P", "generator_type": "concert_prep"}
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "profile", "exclude-track", "p1", track]
+        )
+        cli_module._cmd_profile()
+
+        # Re-excluding the same track does not duplicate it.
+        assert calls[1]["json"]["input_references"]["exclude_track_ids"] == [track]
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_regenerate_flag_triggers_generate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        track = "22222222-2222-2222-2222-222222222222"
+        calls: list[dict[str, Any]] = []
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            calls.append({"method": method, "url": url})
+            if method == "GET" and url.endswith("/p1"):
+                return _fake_response(
+                    json_body={
+                        "id": "p1",
+                        "name": "P",
+                        "generator_type": "concert_prep",
+                        "input_references": {},
+                    }
+                )
+            if method == "POST":
+                return _fake_response(json_body={"task_id": "t1"})
+            if method == "GET":  # _poll_task status poll
+                return _fake_response(
+                    json_body={
+                        "status": "completed",
+                        "result": {"playlist_id": "pl1"},
+                    }
+                )
+            return _fake_response(json_body={"id": "p1"})  # PATCH
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "resonance-api",
+                "profile",
+                "exclude-track",
+                "p1",
+                track,
+                "--regenerate",
+            ],
+        )
+        cli_module._cmd_profile()
+
+        methods = [c["method"] for c in calls]
+        # GET profile -> PATCH excludes -> POST generate -> GET poll(s).
+        assert methods[0] == "GET"
+        assert "PATCH" in methods
+        assert "POST" in methods
