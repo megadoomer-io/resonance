@@ -3318,6 +3318,102 @@ class TestExportPlaylist:
         ]
         assert job_name == "export_playlist"
 
+    @pytest.mark.asyncio
+    async def test_export_stamps_per_track_sync_status(self) -> None:
+        """A successful export stamps spotify_synced_at on matched tracks and
+        clears it on unmatched ones (#spotify-sync-visibility)."""
+        import resonance.connectors.spotify as spotify_module
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+
+        task_id = uuid.uuid4()
+        playlist_id = uuid.uuid4()
+        connection_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=uuid.uuid4(),
+            parent_id=None,  # no parent -> skips is_cancelled query + parent check
+            task_type=types_module.TaskType.PLAYLIST_EXPORT,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "playlist_id": str(playlist_id),
+                "connection_id": str(connection_id),
+            },
+        )
+
+        # Two tracks: one already has a cached Spotify id (matches), one has no id
+        # and search will fail (skipped).
+        def _pt(spotify_id: str | None) -> MagicMock:
+            track = MagicMock()
+            track.title = "Song"
+            track.service_links = {"spotify": spotify_id} if spotify_id else {}
+            track.artist = MagicMock()
+            track.artist.name = "Artist"
+            pt = MagicMock(spec=playlist_models.PlaylistTrack)
+            pt.track = track
+            pt.track_id = uuid.uuid4()
+            pt.spotify_synced_at = None
+            return pt
+
+        matched_pt = _pt("abc123")
+        unmatched_pt = _pt(None)
+
+        playlist = MagicMock(spec=playlist_models.Playlist)
+        playlist.id = playlist_id
+        playlist.name = "PL"
+        playlist.description = ""
+        playlist.service_links = None
+        playlist.tracks = [matched_pt, unmatched_pt]
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.encrypted_access_token = b"enc"
+        connection.encrypted_refresh_token = None
+        connection.token_expires_at = None
+
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        playlist_res = MagicMock()
+        playlist_res.scalar_one_or_none.return_value = playlist
+        conn_res = MagicMock()
+        conn_res.scalar_one_or_none.return_value = connection
+        session.execute.side_effect = [task_res, playlist_res, conn_res]
+
+        spotify_conn = MagicMock(spec=spotify_module.SpotifyConnector)
+        spotify_conn.search_track = AsyncMock(return_value=None)  # unmatched fails
+        spotify_conn.create_playlist = AsyncMock(return_value="sp_playlist")
+        spotify_conn.add_tracks_to_playlist = AsyncMock()
+        spotify_conn.replace_playlist_tracks = AsyncMock()
+
+        registry = MagicMock()
+
+        def _get_base(stype: Any) -> Any:
+            if stype == types_module.ServiceType.SPOTIFY:
+                return spotify_conn
+            return None  # no ListenBrainz -> skip the MB pass
+
+        registry.get_base_connector.side_effect = _get_base
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "settings": MagicMock(),
+            "redis": AsyncMock(),
+        }
+
+        with patch.object(
+            worker_module.crypto_module, "decrypt_token", lambda *_a, **_k: "access"
+        ):
+            await worker_module.export_playlist(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        # Matched track stamped; unmatched cleared.
+        assert matched_pt.spotify_synced_at is not None
+        assert unmatched_pt.spotify_synced_at is None
+        # The completion payload reports which track ids synced.
+        assert task.result["synced_track_ids"] == [str(matched_pt.track_id)]
+
 
 class TestArtistsNeedingDiscovery:
     """Gating for which target artists get an external catalog fetch (#110)."""

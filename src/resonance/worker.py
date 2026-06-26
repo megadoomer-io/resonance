@@ -2254,8 +2254,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
 
             # Match tracks to Spotify IDs (two-pass: MB URL relations, then text search)
+            export_now = datetime.datetime.now(datetime.UTC)
             spotify_uris: list[str] = []
             skipped_tracks: list[str] = []
+            # Per-track sync status (#spotify-sync-visibility): which PlaylistTrack
+            # rows matched vs not, so we can stamp spotify_synced_at after the push.
+            matched_pts: list[playlist_models.PlaylistTrack] = []
+            unmatched_pts: list[playlist_models.PlaylistTrack] = []
             mb_matched = 0
             search_matched = 0
 
@@ -2290,9 +2295,11 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         search_matched += 1
                     else:
                         skipped_tracks.append(track.title)
+                        unmatched_pts.append(pt)
                         continue
 
                 spotify_uris.append(f"spotify:track:{spotify_id}")
+                matched_pts.append(pt)
 
             log.info(
                 "export_track_matching_summary",
@@ -2359,6 +2366,16 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             updated_playlist_links["spotify"] = spotify_section
             playlist.service_links = updated_playlist_links
 
+            # Persist per-track Spotify sync status (#spotify-sync-visibility): the
+            # push succeeded, so every matched track is now confirmed on Spotify;
+            # an unmatched one is cleared (re-match is not monotone -- a track can
+            # stop matching on a re-export). Drives the per-row badge and the
+            # "exclude unsynced & regenerate" affordance.
+            for matched_pt in matched_pts:
+                matched_pt.spotify_synced_at = export_now
+            for unmatched_pt in unmatched_pts:
+                unmatched_pt.spotify_synced_at = None
+
             await lifecycle_module.complete_task(
                 session,
                 task,
@@ -2367,6 +2384,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     "exported": len(spotify_uris),
                     "skipped": len(skipped_tracks),
                     "skipped_tracks": skipped_tracks,
+                    "synced_track_ids": [str(pt.track_id) for pt in matched_pts],
                 },
             )
             await session.commit()
