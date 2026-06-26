@@ -1844,7 +1844,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 r.track_id for r in utr_result.scalars().all()
             }
 
-            # Get previous playlist track IDs for freshness
+            # Freshness baseline + in-place target: load the latest GenerationRecord.
+            # CRITICAL (#versions): read the baseline from its track_snapshot, NOT the
+            # live PlaylistTrack rows. On an in-place regenerate the "previous"
+            # playlist IS the row we are about to overwrite, so reading its live rows
+            # would compare the new selection against itself and silently break the
+            # freshness target. The snapshot is captured at generation time and never
+            # mutated, so it is the correct previous-track set. Read here, before any
+            # row replacement below.
             prev_gen_result = await session.execute(
                 sa.select(generator_models.GenerationRecord)
                 .where(
@@ -1857,18 +1864,35 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             prev_gen = prev_gen_result.scalar_one_or_none()
             previous_track_ids: set[uuid.UUID] = set()
             if prev_gen is not None:
-                # Load previous playlist tracks
-                prev_pt_result = await session.execute(
-                    sa.select(playlist_models.PlaylistTrack.track_id).where(
-                        playlist_models.PlaylistTrack.playlist_id
-                        == prev_gen.playlist_id
+                if prev_gen.track_snapshot is not None:
+                    previous_track_ids = {
+                        uuid.UUID(tid) for tid in prev_gen.track_snapshot
+                    }
+                else:
+                    # Backwards-compat: records written before track_snapshot existed
+                    # have no snapshot. Fall back to that generation's live rows --
+                    # safe because this read happens before any replacement below.
+                    prev_pt_result = await session.execute(
+                        sa.select(playlist_models.PlaylistTrack.track_id).where(
+                            playlist_models.PlaylistTrack.playlist_id
+                            == prev_gen.playlist_id
+                        )
                     )
-                )
-                previous_track_ids = {row[0] for row in prev_pt_result.all()}
+                    previous_track_ids = {row[0] for row in prev_pt_result.all()}
+
+            # Recipe-level track exclusions (#track-exclude): an excluded track never
+            # becomes a candidate, so its band deals its next-best track on the next
+            # round-robin pass and the freed slot refills. pool.py is artist-only /
+            # pre-track, so this filter lives here, not in build_pool.
+            exclude_track_ids = pool_module.extract_track_excludes(
+                profile.input_references
+            )
 
             # Build CandidateTrack objects
             candidates: list[concert_prep_module.CandidateTrack] = []
             for track in all_tracks:
+                if track.id in exclude_track_ids:
+                    continue
                 lc = listen_counts.get(track.id, 0)
                 in_library = lc > 0 or track.id in liked_track_ids
                 candidates.append(
@@ -1908,17 +1932,44 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 freshness_target=freshness_target,
             )
 
-            # Create Playlist
-            playlist = playlist_models.Playlist(
-                id=uuid.uuid4(),
-                user_id=task.user_id,
-                name=str(profile.name),
-                description=f"Generated from profile: {profile.name}",
-                track_count=len(selection.tracks),
-            )
-            session.add(playlist)
+            # Regenerate in place (#versions): reuse the current Playlist row when one
+            # exists, so its identity -- and the Spotify export anchor in
+            # service_links -- survives the regenerate. Replace its PlaylistTrack rows
+            # with the new selection; the prior version's tracks live on in the
+            # GenerationRecord.track_snapshot history, not in this row. Only when there
+            # is no prior playlist (first generation, or it was deleted) do we create a
+            # fresh one.
+            existing_playlist: playlist_models.Playlist | None = None
+            if prev_gen is not None:
+                existing_playlist = await session.get(
+                    playlist_models.Playlist, prev_gen.playlist_id
+                )
 
-            # Create PlaylistTrack rows
+            if existing_playlist is not None:
+                playlist = existing_playlist
+                # Drop the old rows first (Core delete executes immediately within the
+                # transaction, before the new inserts below). Keep id, service_links
+                # (Spotify anchor), and is_pinned untouched.
+                await session.execute(
+                    sa.delete(playlist_models.PlaylistTrack).where(
+                        playlist_models.PlaylistTrack.playlist_id == playlist.id
+                    )
+                )
+                playlist.name = str(profile.name)
+                playlist.description = f"Generated from profile: {profile.name}"
+                playlist.track_count = len(selection.tracks)
+            else:
+                playlist = playlist_models.Playlist(
+                    id=uuid.uuid4(),
+                    user_id=task.user_id,
+                    name=str(profile.name),
+                    description=f"Generated from profile: {profile.name}",
+                    track_count=len(selection.tracks),
+                )
+                session.add(playlist)
+
+            # Create PlaylistTrack rows (fresh rows start unsynced -- a regenerated
+            # version has not been exported yet).
             for scored in selection.tracks:
                 pt = playlist_models.PlaylistTrack(
                     id=uuid.uuid4(),
@@ -1951,6 +2002,10 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 track_sources_summary=selection.sources_summary,
                 generation_duration_ms=generation_duration_ms,
                 pool_snapshot=pool_snapshot,
+                # Ordered track ids this generation produced (#versions): the durable
+                # history of this version AND the freshness baseline for the next
+                # regenerate (read above, never the live rows).
+                track_snapshot=[str(scored.track_id) for scored in selection.tracks],
             )
             session.add(gen_record)
 

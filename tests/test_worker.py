@@ -2929,6 +2929,372 @@ class TestScoreAndBuildPlaylist:
         assert parent_task.status == types_module.SyncStatus.COMPLETED
         assert parent_task.completed_at is not None
 
+    @pytest.mark.asyncio
+    async def test_regenerate_in_place_uses_snapshot_baseline(self) -> None:
+        """CRITICAL (#versions): a regenerate reuses the current Playlist row in
+        place and reads its freshness baseline from the latest
+        GenerationRecord.track_snapshot -- NOT the live PlaylistTrack rows it is
+        about to overwrite. Reading the live rows would compare the new selection
+        against itself (self-poison) and silently break the freshness target.
+
+        Also asserts the in-place contract: the existing Playlist is reused (no new
+        row), its old tracks are deleted, and a fresh track_snapshot is recorded.
+        """
+        import resonance.generators.concert_prep as concert_prep_module
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+        import resonance.models.playlist as playlist_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        track_id = uuid.uuid4()
+        existing_pl_id = uuid.uuid4()
+        snap_a = uuid.uuid4()
+        snap_b = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": 100,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Concert"
+        profile.parameter_values = {"familiarity": 70, "hit_depth": 40}
+        profile.input_references = {"event_id": str(event_id)}
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        mock_track = MagicMock(spec=music_models.Track)
+        mock_track.id = track_id
+        mock_track.title = "Song"
+        mock_track.artist_id = artist_id
+        mock_track.popularity_score = None
+        mock_artist = MagicMock(spec=music_models.Artist)
+        mock_artist.id = artist_id
+        mock_artist.name = "Artist"
+        mock_track.artist = mock_artist
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [mock_track]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        listen_result = MagicMock()
+        listen_result.all.return_value = [(track_id, 10)]
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        # Latest GenerationRecord carries a track_snapshot -> the freshness baseline.
+        # If the code wrongly read live PlaylistTrack rows instead, no mock is
+        # provided for that query and the side_effect would misalign -- the test
+        # would fail rather than pass on a self-poisoned baseline.
+        prev_gen = MagicMock(spec=generator_models.GenerationRecord)
+        prev_gen.playlist_id = existing_pl_id
+        prev_gen.track_snapshot = [str(snap_a), str(snap_b)]
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = prev_gen
+
+        existing_playlist = playlist_models.Playlist(
+            id=existing_pl_id,
+            user_id=user_id,
+            name="old name",
+            description="old",
+            track_count=2,
+        )
+        session.get = AsyncMock(return_value=existing_playlist)
+
+        delete_result = MagicMock()
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            _not_cancelled_result(parent_id),
+            profile_result,
+            ea_result,
+            eac_result,
+            parent_for_params_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            delete_result,  # in-place PlaylistTrack delete
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        captured: dict[str, Any] = {}
+
+        def _fake_select(**kwargs: Any) -> concert_prep_module.SelectionResult:
+            captured.update(kwargs)
+            return concert_prep_module.SelectionResult(
+                tracks=[
+                    concert_prep_module.ScoredTrack(
+                        track_id=track_id,
+                        title="Song",
+                        artist_name="Artist",
+                        position=1,
+                        score=1.0,
+                        source=types_module.TrackSource.LIBRARY,
+                    )
+                ],
+                sources_summary={types_module.TrackSource.LIBRARY: 1},
+                freshness_actual=100.0,
+            )
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(
+            worker_module.concert_prep_module, "score_and_select", _fake_select
+        ):
+            await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        # 1. Freshness baseline is the snapshot, not the (overwritten) live rows.
+        assert captured["previous_track_ids"] == {snap_a, snap_b}
+
+        added_objects = [c.args[0] for c in session.add.call_args_list]
+        # 2. In place: no NEW Playlist row was added (the existing one is reused).
+        playlists_added = [
+            o for o in added_objects if isinstance(o, playlist_models.Playlist)
+        ]
+        assert playlists_added == []
+        # 3. The existing playlist was updated in place.
+        assert existing_playlist.track_count == 1
+        assert existing_playlist.name == "Concert"
+        # 4. Its old tracks were deleted (Core delete against playlist_tracks).
+        assert any(
+            c.args and type(c.args[0]).__name__ == "Delete"
+            for c in session.execute.call_args_list
+        )
+        # 5. A fresh track_snapshot was recorded for the new version.
+        gen_records = [
+            o for o in added_objects if isinstance(o, generator_models.GenerationRecord)
+        ]
+        assert len(gen_records) == 1
+        assert gen_records[0].track_snapshot == [str(track_id)]
+
+    @pytest.mark.asyncio
+    async def test_excluded_tracks_filtered_from_candidates(self) -> None:
+        """#track-exclude: a track listed in exclude_track_ids never becomes a
+        candidate, so its band deals its next-best and the freed slot refills."""
+        import resonance.generators.concert_prep as concert_prep_module
+        import resonance.models.generator as generator_models
+        import resonance.models.music as music_models
+
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        artist_id = uuid.uuid4()
+        excluded_id = uuid.uuid4()
+        kept_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=user_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_SCORING,
+            status=types_module.SyncStatus.PENDING,
+            params={"profile_id": str(profile_id), "event_id": str(event_id)},
+        )
+        parent_task = task_module.Task(
+            id=parent_id,
+            user_id=user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            status=types_module.SyncStatus.RUNNING,
+            params={
+                "profile_id": str(profile_id),
+                "max_tracks": 30,
+                "freshness_target": None,
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result_mock = MagicMock()
+        task_result_mock.scalar_one_or_none.return_value = task
+
+        profile = MagicMock(spec=generator_models.GeneratorProfile)
+        profile.id = profile_id
+        profile.user_id = user_id
+        profile.name = "Concert"
+        profile.parameter_values = {"familiarity": 70, "hit_depth": 40}
+        # The recipe excludes one track.
+        profile.input_references = {
+            "event_id": str(event_id),
+            "exclude_track_ids": [str(excluded_id)],
+        }
+        profile_result = MagicMock()
+        profile_result.scalar_one_or_none.return_value = profile
+
+        import resonance.models.concert as concert_models
+
+        ea = MagicMock(spec=concert_models.EventArtist)
+        ea.artist_id = artist_id
+        ea_scalars = MagicMock()
+        ea_scalars.all.return_value = [ea]
+        ea_result = MagicMock()
+        ea_result.scalars.return_value = ea_scalars
+        eac_scalars = MagicMock()
+        eac_scalars.all.return_value = []
+        eac_result = MagicMock()
+        eac_result.scalars.return_value = eac_scalars
+
+        parent_for_params_result = MagicMock()
+        parent_for_params_result.scalar_one_or_none.return_value = parent_task
+
+        def _mk_track(tid: uuid.UUID, title: str) -> MagicMock:
+            t = MagicMock(spec=music_models.Track)
+            t.id = tid
+            t.title = title
+            t.artist_id = artist_id
+            t.popularity_score = None
+            a = MagicMock(spec=music_models.Artist)
+            a.id = artist_id
+            a.name = "Artist"
+            t.artist = a
+            return t
+
+        track_scalars = MagicMock()
+        track_scalars.all.return_value = [
+            _mk_track(excluded_id, "Excluded"),
+            _mk_track(kept_id, "Kept"),
+        ]
+        track_result = MagicMock()
+        track_result.scalars.return_value = track_scalars
+
+        listen_result = MagicMock()
+        listen_result.all.return_value = [(excluded_id, 5), (kept_id, 5)]
+        utr_scalars = MagicMock()
+        utr_scalars.all.return_value = []
+        utr_result = MagicMock()
+        utr_result.scalars.return_value = utr_scalars
+
+        prev_gen_result = MagicMock()
+        prev_gen_result.scalar_one_or_none.return_value = None
+
+        pending_count_mock = MagicMock()
+        pending_count_mock.scalar_one.return_value = 0
+        parent_result_mock = MagicMock()
+        parent_result_mock.scalar_one_or_none.return_value = parent_task
+        failed_count_mock = MagicMock()
+        failed_count_mock.scalar_one.return_value = 0
+        children_scalars_mock = MagicMock()
+        children_scalars_mock.all.return_value = [task]
+        children_result_mock = MagicMock()
+        children_result_mock.scalars.return_value = children_scalars_mock
+
+        session.execute.side_effect = [
+            task_result_mock,
+            _not_cancelled_result(parent_id),
+            profile_result,
+            ea_result,
+            eac_result,
+            parent_for_params_result,
+            track_result,
+            listen_result,
+            utr_result,
+            prev_gen_result,
+            pending_count_mock,
+            parent_result_mock,
+            failed_count_mock,
+            children_result_mock,
+        ]
+
+        captured: dict[str, Any] = {}
+
+        def _fake_select(**kwargs: Any) -> concert_prep_module.SelectionResult:
+            captured.update(kwargs)
+            return concert_prep_module.SelectionResult(
+                tracks=[
+                    concert_prep_module.ScoredTrack(
+                        track_id=kept_id,
+                        title="Kept",
+                        artist_name="Artist",
+                        position=1,
+                        score=1.0,
+                        source=types_module.TrackSource.LIBRARY,
+                    )
+                ],
+                sources_summary={types_module.TrackSource.LIBRARY: 1},
+                freshness_actual=None,
+            )
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(
+            worker_module.concert_prep_module, "score_and_select", _fake_select
+        ):
+            await worker_module.score_and_build_playlist(ctx, str(task_id))
+
+        candidate_ids = {c.track_id for c in captured["candidates"]}
+        assert excluded_id not in candidate_ids
+        assert kept_id in candidate_ids
+
 
 # ---------------------------------------------------------------------------
 # ExportPlaylist tests
