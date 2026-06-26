@@ -153,9 +153,15 @@ async def get_playlist(
     if playlist is None:
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
-    # Look up generation record if one exists
-    gen_stmt = sa.select(generator_models.GenerationRecord).where(
-        generator_models.GenerationRecord.playlist_id == playlist_id,
+    # Look up the latest generation record if one exists. Regenerate-in-place
+    # (#versions) means a playlist can have MANY GenerationRecords (one per
+    # version), so take the most recent -- never scalar_one_or_none (it raises
+    # MultipleResultsFound once a playlist has been regenerated).
+    gen_stmt = (
+        sa.select(generator_models.GenerationRecord)
+        .where(generator_models.GenerationRecord.playlist_id == playlist_id)
+        .order_by(generator_models.GenerationRecord.created_at.desc())
+        .limit(1)
     )
     gen_result = await db.execute(gen_stmt)
     gen_record = gen_result.scalar_one_or_none()
@@ -292,11 +298,13 @@ async def delete_playlist(
     if playlist is None:
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
-    # Find associated profile before deleting the playlist
+    # Find associated profile before deleting the playlist. A regenerated playlist
+    # has many GenerationRecords (#versions), all sharing the same profile_id, so
+    # take any one -- limit(1), never scalar_one_or_none (raises on multiple).
     gen_result = await db.execute(
-        sa.select(generator_models.GenerationRecord.profile_id).where(
-            generator_models.GenerationRecord.playlist_id == playlist_id
-        )
+        sa.select(generator_models.GenerationRecord.profile_id)
+        .where(generator_models.GenerationRecord.playlist_id == playlist_id)
+        .limit(1)
     )
     profile_id = gen_result.scalar_one_or_none()
 
