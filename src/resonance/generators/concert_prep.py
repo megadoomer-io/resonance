@@ -8,7 +8,7 @@ tracks for playlist inclusion.
 from __future__ import annotations
 
 import dataclasses
-from collections import Counter
+from collections import Counter, deque
 from typing import TYPE_CHECKING
 
 import resonance.generators.scoring as scoring_module
@@ -79,47 +79,67 @@ def _score_candidate(
 def _select_one_pool(
     scored: list[tuple[CandidateTrack, float]],
     max_tracks: int,
+    weights: dict[uuid.UUID, int] | None = None,
 ) -> list[tuple[CandidateTrack, float]]:
-    """Select ``max_tracks`` from a single scored pool with a per-artist floor.
+    """Select ``max_tracks`` by **weighted round-robin** across the pool's artists.
 
     Provenance (event / manual / related) never touches selection -- there is one
-    pool, ranked by ``composite_score``. The input must already be sorted by score
-    descending. Selection is two phases:
+    pool. ``composite_score`` (familiarity + hit_depth) decides WHICH of an artist's
+    tracks fill its slots; round-robin decides HOW MANY each artist gets, so every
+    artist on the bill is represented (not buried by a heavy-rotation neighbor).
+    This restores the per-artist spread that #128 dropped (round-0 + global fill),
+    which let well-listened artists monopolize every post-round-0 slot.
 
-    Round 0 -- per-artist guarantee: each artist in the pool contributes its single
-    highest-scoring track. Because ``scored`` is score-desc, the first time an
-    artist is seen is its best track, so round 0 is the set of those firsts, itself
-    in score-desc order. This guarantees every pool artist is represented by at
-    least one track and is never silently absent.
+    ``scored`` must already be sorted by score descending. Tracks are grouped by
+    artist (each group stays score-desc); artists are dealt in best-track-score
+    order. Each round, every artist with tracks left contributes its next-best
+    track -- ``weights[artist_id]`` of them per round (default 1 = even). Dealing
+    stops at ``max_tracks`` or when every artist is exhausted; an artist that runs
+    out simply drops from later rounds, so its unused share redistributes to the
+    others automatically (a 6-track band among five gives 6; the rest absorb the
+    slack).
 
-    Fill: the remaining ``max_tracks - num_artists`` slots are filled by pure score
-    across all not-yet-selected tracks. A prolific, high-scoring artist *can* take
-    several fill slots here -- that is the intended "heard artists get depth"
-    behavior, replacing the old forced round-robin spread.
+    ``weights`` is the plumbed seam for a future seed/headliner emphasis (and
+    jitter): a higher weight = more tracks per round. Today it is unset (all 1), so
+    the deal is even -- the behavior the owner asked for (#round-robin, D7).
 
-    Edge case: when the pool has more distinct artists than ``max_tracks``, round 0
-    cannot seat everyone. The highest-scoring artist groups keep their guaranteed
-    slot; the lowest are dropped (graceful best-effort), since round 0 is already
-    in score-desc order.
+    Edge cases, all handled by the deal order (best-track-score desc):
+    - ``max_tracks < n_artists``: only the highest-scoring artists get a slot in
+      round 1; the lowest never get dealt (graceful, keeps the top of the bill).
+    - ``max_tracks`` not divisible by artist count: the partial final round deals
+      to the highest-scoring artists first, so they get the extra slots.
+    - one artist: deals its top ``max_tracks`` by score.
+    - empty pool: returns empty (handled by the caller's no-candidates guard).
     """
-    round_zero: list[tuple[CandidateTrack, float]] = []
-    remaining: list[tuple[CandidateTrack, float]] = []
-    seen_artists: set[uuid.UUID] = set()
+    weights = weights or {}
+    # Group tracks by artist, preserving score-desc order within each group.
+    # First-seen order == best-track-score order (``scored`` is score-desc), so the
+    # artist deal order is best-score desc without a separate sort.
+    groups: dict[uuid.UUID, deque[tuple[CandidateTrack, float]]] = {}
+    order: list[uuid.UUID] = []
     for pair in scored:
         artist_id = pair[0].artist_id
-        if artist_id not in seen_artists:
-            seen_artists.add(artist_id)
-            round_zero.append(pair)
-        else:
-            remaining.append(pair)
+        if artist_id not in groups:
+            groups[artist_id] = deque()
+            order.append(artist_id)
+        groups[artist_id].append(pair)
 
-    # More artists than slots: keep the highest-scoring guaranteed tracks, drop
-    # the rest. round_zero is score-desc, so a head slice is the graceful choice.
-    if len(round_zero) >= max_tracks:
-        return round_zero[:max_tracks]
-
-    fill_slots = max_tracks - len(round_zero)
-    return round_zero + remaining[:fill_slots]
+    selected: list[tuple[CandidateTrack, float]] = []
+    while len(selected) < max_tracks:
+        dealt_this_round = False
+        for artist_id in order:
+            if len(selected) >= max_tracks:
+                break
+            group = groups[artist_id]
+            # weight = tracks this artist deals per round (>=1); default even.
+            for _ in range(max(1, weights.get(artist_id, 1))):
+                if not group or len(selected) >= max_tracks:
+                    break
+                selected.append(group.popleft())
+                dealt_this_round = True
+        if not dealt_this_round:
+            break  # every artist exhausted before reaching max_tracks
+    return selected
 
 
 def _apply_freshness_filter(
@@ -162,6 +182,7 @@ def score_and_select(
     max_tracks: int,
     previous_track_ids: set[uuid.UUID],
     freshness_target: int | None,
+    weights: dict[uuid.UUID, int] | None = None,
 ) -> SelectionResult:
     """Score candidates, apply freshness filtering, and select top tracks.
 
@@ -171,6 +192,9 @@ def score_and_select(
         max_tracks: Maximum number of tracks to include in the result.
         previous_track_ids: Track IDs from a previous generation (for freshness).
         freshness_target: Target freshness percentage (0-100), or None to skip.
+        weights: Optional per-artist deal weight for the round-robin selection
+            (artist_id -> tracks per round, default 1 = even). The plumbed seam for
+            a future seed/headliner emphasis; unset today.
 
     Returns:
         A SelectionResult with scored, positioned tracks and metadata.
@@ -193,11 +217,12 @@ def score_and_select(
         scored, previous_track_ids, freshness_target, max_tracks
     )
 
-    # 4. Select from one pool: round-0 per-artist guarantee, then fill by score.
-    #    Provenance (target vs adjacent) is metadata only -- it does not affect
-    #    selection. Pool composition (which related artists are present) is decided
-    #    upstream by enrichment (#133), not here.
-    selected = _select_one_pool(scored, max_tracks)
+    # 4. Select by weighted round-robin across the pool's artists: every artist on
+    #    the bill is represented; composite_score decides which of each artist's
+    #    tracks fill its slots. Provenance (target vs adjacent) is metadata only.
+    #    Pool composition (which related artists are present) is decided upstream by
+    #    enrichment (#133), not here.
+    selected = _select_one_pool(scored, max_tracks, weights)
 
     # 5. Re-sort the merged selection by score for final ordering, then assign
     #    1-indexed positions and build the ScoredTrack list.

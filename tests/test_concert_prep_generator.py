@@ -402,16 +402,19 @@ def _artist_count(
 
 
 class TestOnePoolSelection:
-    """One ranked pool: round-0 per-artist guarantee, then fill by pure score.
+    """One ranked pool, **weighted round-robin** deal across the pool's artists.
 
-    Provenance (target vs adjacent) is metadata only and never affects selection.
-    This replaces the #122 forced target/adjacent quota and full round-robin
-    spread (issue #128 / #111).
+    Every artist on the bill is represented (no heavy-rotation neighbor can
+    monopolize the slots); ``composite_score`` decides WHICH of an artist's tracks
+    fill its share, round-robin decides HOW MANY. This restores the per-artist
+    spread #128 dropped (round-0 + pure-score fill let well-listened artists take
+    every post-round-0 slot). Provenance (target vs adjacent) is metadata only and
+    never affects selection.
     """
 
-    def test_round_zero_guarantees_each_artist(self) -> None:
-        # Six artists, each with several tracks; plenty of room. Every artist must
-        # appear at least once -- never silently absent.
+    def test_every_artist_present_with_room(self) -> None:
+        # Six artists, five tracks each, exactly enough room (30 slots). Round-robin
+        # deals an even share: every artist contributes all five, none is buried.
         artists = [uuid.uuid4() for _ in range(6)]
         candidates: list[concert_prep_module.CandidateTrack] = []
         for rank, aid in enumerate(artists):
@@ -428,40 +431,119 @@ class TestOnePoolSelection:
         )
         per_artist = _artist_count(result, candidates)
         for aid in artists:
-            assert per_artist.get(aid, 0) >= 1, per_artist
+            assert per_artist.get(aid, 0) == 5, per_artist
 
-    def test_high_score_artist_gets_depth_in_fill(self) -> None:
-        # A prolific, high-scoring artist SHOULD take many fill slots beyond its
-        # round-0 token -- "heard artists get depth". This is the deliberate
-        # reversal of the old anti-flooding round-robin.
-        deep = uuid.uuid4()
-        others = [uuid.uuid4() for _ in range(3)]
-        candidates: list[concert_prep_module.CandidateTrack] = [
-            _artist_candidate(artist_id=deep, listen_count=90 + i) for i in range(15)
-        ]
-        for other in others:
+    def test_even_share_with_comparable_catalogs(self) -> None:
+        # The reversal of #128: a prolific, heavily-listened artist no longer
+        # monopolizes the fill. Five artists each have 20 tracks and there are 50
+        # slots, so round-robin deals ~10 to every artist regardless of how much
+        # more one is listened to than the others.
+        artists = [uuid.uuid4() for _ in range(5)]
+        candidates: list[concert_prep_module.CandidateTrack] = []
+        for rank, aid in enumerate(artists):
+            # Wildly different listen counts (rank 0 ~ obscure, rank 4 ~ heavy
+            # rotation) -- round-robin must still give an even share.
             candidates += [
-                _artist_candidate(artist_id=other, listen_count=5 + i) for i in range(2)
+                _artist_candidate(artist_id=aid, listen_count=1 + rank * 50 + i)
+                for i in range(20)
             ]
         result = concert_prep_module.score_and_select(
             candidates=candidates,
             params=_FAMILIARITY_DRIVEN,
-            max_tracks=20,
+            max_tracks=50,
             previous_track_ids=set(),
             freshness_target=None,
         )
         per_artist = _artist_count(result, candidates)
-        # Each of the 3 others is guaranteed exactly its catalog (1-2 each); the
-        # deep artist takes the rest of the 20 slots. Round 0 = 4 tracks (one per
-        # artist), fill 16 by score -> the deep artist's 14 remaining all outrank
-        # the others, so it gets 1 + 14 = 15.
-        assert per_artist[deep] == 15, per_artist
-        for other in others:
-            assert per_artist.get(other, 0) >= 1, per_artist
+        assert len(result.tracks) == 50
+        for aid in artists:
+            assert per_artist[aid] == 10, per_artist
+
+    def test_short_band_redistributes_its_slack(self) -> None:
+        # One band has only 6 tracks; the other four have plenty. With 50 slots the
+        # short band contributes all 6 and drops out, and its unused share is
+        # absorbed by the remaining bands (no empty slots).
+        full = [uuid.uuid4() for _ in range(4)]
+        short = uuid.uuid4()
+        candidates: list[concert_prep_module.CandidateTrack] = []
+        for rank, aid in enumerate(full):
+            candidates += [
+                _artist_candidate(artist_id=aid, listen_count=10 + rank * 10 + i)
+                for i in range(20)
+            ]
+        candidates += [
+            _artist_candidate(artist_id=short, listen_count=5 + i) for i in range(6)
+        ]
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=_FAMILIARITY_DRIVEN,
+            max_tracks=50,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        per_artist = _artist_count(result, candidates)
+        assert len(result.tracks) == 50
+        # Short band gives everything it has; nothing more is invented for it.
+        assert per_artist[short] == 6, per_artist
+        # The 44 remaining slots are absorbed by the four full bands (11 each).
+        for aid in full:
+            assert per_artist[aid] == 11, per_artist
+
+    def test_weight_increases_a_bands_share(self) -> None:
+        # The plumbed per-band weight is a real seam: a band with weight 3 is dealt
+        # three tracks per round instead of one, so it takes ~3x the share of an
+        # even band -- without changing the algorithm (default weight stays 1).
+        heavy = uuid.uuid4()
+        evens = [uuid.uuid4() for _ in range(3)]
+        candidates: list[concert_prep_module.CandidateTrack] = [
+            _artist_candidate(artist_id=heavy, listen_count=50 + i) for i in range(30)
+        ]
+        for rank, aid in enumerate(evens):
+            candidates += [
+                _artist_candidate(artist_id=aid, listen_count=10 + rank + i)
+                for i in range(30)
+            ]
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=_FAMILIARITY_DRIVEN,
+            max_tracks=24,
+            previous_track_ids=set(),
+            freshness_target=None,
+            weights={heavy: 3},
+        )
+        per_artist = _artist_count(result, candidates)
+        assert len(result.tracks) == 24
+        # Per round: heavy deals 3, each of the 3 evens deals 1 => 6 per round.
+        # 24 / 6 = 4 rounds => heavy = 12, each even = 4.
+        assert per_artist[heavy] == 12, per_artist
+        for aid in evens:
+            assert per_artist[aid] == 4, per_artist
+
+    def test_single_artist_returns_top_n_by_score(self) -> None:
+        # One artist degenerates to "that artist's top max_tracks by score" -- no
+        # special-case needed.
+        artist = uuid.uuid4()
+        candidates = [
+            _artist_candidate(artist_id=artist, listen_count=i) for i in range(30)
+        ]
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=_FAMILIARITY_DRIVEN,
+            max_tracks=10,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        assert len(result.tracks) == 10
+        # All ten are the highest listen_counts (29..20) from the one artist.
+        listen_by_track = {c.track_id: c.listen_count for c in candidates}
+        selected_listens = sorted(
+            (listen_by_track[t.track_id] for t in result.tracks), reverse=True
+        )
+        assert selected_listens == list(range(29, 19, -1)), selected_listens
 
     def test_pool_larger_than_max_tracks_graceful_drop(self) -> None:
-        # More distinct artists than slots: round 0 cannot seat everyone. The
-        # highest-scoring artist groups keep their guaranteed slot; lowest drop.
+        # More distinct artists than slots: round 1 cannot seat everyone. The
+        # highest-scoring artists are dealt first; the lowest never get a slot.
         artists = [uuid.uuid4() for _ in range(20)]
         candidates = [
             _artist_candidate(artist_id=aid, listen_count=rank + 1)
@@ -551,9 +633,11 @@ class TestOnePoolSelection:
         assert artist_by_track[result.tracks[0].track_id] == strong
 
 
-class TestKnownVsDiscoveryDistribution:
-    """Familiarity shifts depth between heard and unheard artists, but the
-    round-0 guarantee keeps every artist present at both extremes (issue #128)."""
+class TestFamiliarityWithinArtist:
+    """The #128 reversal: under round-robin the familiarity slider no longer
+    changes how MANY tracks an artist gets (that is even by deal) -- a heard artist
+    can't out-fill an unheard one. Familiarity instead chooses WHICH of an artist's
+    tracks are picked."""
 
     def _mixed_pool(self) -> list[concert_prep_module.CandidateTrack]:
         heard = uuid.uuid4()
@@ -573,44 +657,66 @@ class TestKnownVsDiscoveryDistribution:
         ]
         return candidates
 
-    def test_mostly_known_keeps_unheard_present_but_light(self) -> None:
+    def test_even_share_when_favoring_known(self) -> None:
         candidates = self._mixed_pool()
         heard = candidates[0].artist_id
         unheard = candidates[-1].artist_id
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            # Favor known tracks: heard artist wins the fill, unheard stays at its
-            # one guaranteed token.
+            # Favoring known tracks does NOT let the heard artist take more slots:
+            # round-robin gives two artists four each out of eight.
             params={"familiarity": 100, "hit_depth": 50},
             max_tracks=8,
             previous_track_ids=set(),
             freshness_target=None,
         )
         per_artist = _artist_count(result, candidates)
-        assert per_artist.get(unheard, 0) >= 1, per_artist
-        assert per_artist[heard] > per_artist[unheard], per_artist
+        assert per_artist[heard] == 4, per_artist
+        assert per_artist[unheard] == 4, per_artist
 
-    def test_mostly_discovery_lets_unheard_fill(self) -> None:
+    def test_even_share_when_favoring_discovery(self) -> None:
         candidates = self._mixed_pool()
         heard = candidates[0].artist_id
         unheard = candidates[-1].artist_id
         result = concert_prep_module.score_and_select(
             candidates=candidates,
-            # Favor discovery: unheard tracks win the fill slots.
+            # The opposite extreme is symmetric: still four each.
             params={"familiarity": 0, "hit_depth": 50},
             max_tracks=8,
             previous_track_ids=set(),
             freshness_target=None,
         )
         per_artist = _artist_count(result, candidates)
-        assert per_artist.get(heard, 0) >= 1, per_artist
-        assert per_artist[unheard] > per_artist[heard], per_artist
+        assert per_artist[heard] == 4, per_artist
+        assert per_artist[unheard] == 4, per_artist
+
+    def test_familiarity_picks_most_played_within_artist(self) -> None:
+        # WHICH tracks: one artist with varied listen_counts. High familiarity ranks
+        # the most-played tracks first, so with a tight max they are the ones kept.
+        artist = uuid.uuid4()
+        candidates = [
+            _artist_candidate(artist_id=artist, listen_count=lc)
+            for lc in (1, 5, 40, 90)
+        ]
+        result = concert_prep_module.score_and_select(
+            candidates=candidates,
+            params=_FAMILIARITY_DRIVEN,
+            max_tracks=2,
+            previous_track_ids=set(),
+            freshness_target=None,
+        )
+        listen_by_track = {c.track_id: c.listen_count for c in candidates}
+        picked = sorted(
+            (listen_by_track[t.track_id] for t in result.tracks), reverse=True
+        )
+        # The two most-played tracks (90, 40) are chosen.
+        assert picked == [90, 40], picked
 
 
 class TestHitDepthReorders:
     """#114: hit_depth re-ranks the pool by external popularity_score.
 
-    A single artist (so the round-0 guarantee doesn't interfere) with tracks of
+    A single artist (so the round-robin deal doesn't interfere) with tracks of
     varying popularity. With familiarity neutral, hit_depth alone drives order.
     """
 
