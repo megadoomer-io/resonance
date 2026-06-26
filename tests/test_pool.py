@@ -361,3 +361,45 @@ class TestReplaceViaSeedSources:
         }
         pool_module.replace_via_seed_sources(refs, "lineup", [uuid.uuid4()])
         assert refs == snapshot
+
+    def test_preserves_track_excludes(self) -> None:
+        """Re-running a scope keeps the global exclude_track_ids set."""
+        core = uuid.uuid4()
+        t1, t2 = uuid.uuid4(), uuid.uuid4()
+        refs = pool_module.serialize_input_references(
+            [pool_module.ArtistSource(artist_id=core)],
+            exclude_track_ids=[t1, t2],
+        )
+        out = pool_module.replace_via_seed_sources(refs, "lineup", [uuid.uuid4()])
+        assert pool_module.extract_track_excludes(out) == {t1, t2}
+
+
+class TestExtractTrackExcludes:
+    """extract_track_excludes (#track-exclude)."""
+
+    def test_missing_yields_empty_set(self) -> None:
+        assert pool_module.extract_track_excludes({}) == set()
+
+    def test_parses_uuid_list(self) -> None:
+        a, b = uuid.uuid4(), uuid.uuid4()
+        result = pool_module.extract_track_excludes(
+            {"exclude_track_ids": [str(a), str(b)]}
+        )
+        assert result == {a, b}
+
+    def test_not_a_list_raises(self) -> None:
+        with pytest.raises(ValueError, match="exclude_track_ids"):
+            pool_module.extract_track_excludes({"exclude_track_ids": str(uuid.uuid4())})
+
+    def test_bad_uuid_raises(self) -> None:
+        with pytest.raises(ValueError, match="exclude_track_ids"):
+            pool_module.extract_track_excludes({"exclude_track_ids": ["nope"]})
+
+    def test_serialize_round_trip(self) -> None:
+        """serialize emits exclude_track_ids only when non-empty, round-trips."""
+        t1 = uuid.uuid4()
+        with_excl = pool_module.serialize_input_references([], exclude_track_ids=[t1])
+        assert pool_module.extract_track_excludes(with_excl) == {t1}
+        # Empty stays lean (no key) — preserves existing profile shape.
+        without = pool_module.serialize_input_references([])
+        assert "exclude_track_ids" not in without

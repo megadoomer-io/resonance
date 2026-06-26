@@ -131,6 +131,16 @@ class GenerationRecord(base_module.TimestampMixin, base_module.Base):
     pool_snapshot: orm.Mapped[list[dict[str, str]] | None] = orm.mapped_column(
         sa.JSON, nullable=True
     )
+    # Resolved track snapshot (#versions): the ordered track ids this generation
+    # produced, captured so prior versions stay recoverable even though the live
+    # PlaylistTrack rows are replaced in place on regenerate (the Playlist row is
+    # reused so the Spotify export link survives). Also the freshness baseline for
+    # the NEXT regenerate (read this, not the live rows, to avoid self-comparison).
+    # Shape: ["<track_uuid>", ...] in playlist order. Nullable: pre-snapshot rows
+    # have none. UI to browse/restore versions is deferred -- this is data only.
+    track_snapshot: orm.Mapped[list[str] | None] = orm.mapped_column(
+        sa.JSON, nullable=True
+    )
 
     profile: orm.Mapped[GeneratorProfile] = orm.relationship(
         back_populates="generations"
