@@ -92,9 +92,17 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
-def create_app() -> fastapi.FastAPI:
-    """Create and configure the FastAPI application."""
-    settings = config_module.Settings()
+def create_app(settings: config_module.Settings | None = None) -> fastapi.FastAPI:
+    """Create and configure the FastAPI application.
+
+    Args:
+        settings: Optional settings override (tests inject a dev-mode config);
+            defaults to loading from the environment.
+    """
+    if settings is None:
+        settings = config_module.Settings()
+    # Fail fast on placeholder secrets in production (#141, finding #4).
+    settings.ensure_secure_secrets()
     logging_module.configure_logging(settings.log_level)
     application = fastapi.FastAPI(
         title=settings.app_name,
@@ -109,6 +117,7 @@ def create_app() -> fastapi.FastAPI:
         session_middleware.SessionMiddleware,
         redis=session_redis,
         secret_key=settings.session_secret_key,
+        secure=not settings.debug,
     )
 
     # Register API routes

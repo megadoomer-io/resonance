@@ -1,5 +1,10 @@
 import pydantic_settings
 
+# Placeholder values shipped as defaults. Safe for local dev, unsafe in
+# production — ensure_secure_secrets() refuses to start on them (#141, finding #4).
+_PLACEHOLDER_SECRET = "change-me-in-production"
+_DEFAULT_PGPASSWORD = "resonance"
+
 
 class Settings(pydantic_settings.BaseSettings):
     """Application settings loaded from environment variables."""
@@ -99,3 +104,41 @@ class Settings(pydantic_settings.BaseSettings):
         """Redis connection URL."""
         auth = f":{self.redis_password}@" if self.redis_password else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/0"
+
+    def ensure_secure_secrets(self) -> None:
+        """Refuse to start in production with default/empty secrets (#141, #4).
+
+        ``session_secret_key`` (session cookie signer) and
+        ``token_encryption_key`` (Fernet key for stored OAuth tokens) shipping at
+        their placeholder would mean publicly-known keys — session forgery and
+        decryption of every stored token. ``pgpassword`` left at its default is
+        the same class of slip. In ``debug`` (local dev) the defaults are
+        tolerated so setup is frictionless; outside it, an unset secret is a
+        startup error rather than a silent live exposure.
+
+        Raises:
+            RuntimeError: if any guarded secret is empty or still its default
+                and ``debug`` is False.
+        """
+        if self.debug:
+            return
+        insecure = [
+            name
+            for name, value, default in (
+                ("SESSION_SECRET_KEY", self.session_secret_key, _PLACEHOLDER_SECRET),
+                (
+                    "TOKEN_ENCRYPTION_KEY",
+                    self.token_encryption_key,
+                    _PLACEHOLDER_SECRET,
+                ),
+                ("PGPASSWORD", self.pgpassword, _DEFAULT_PGPASSWORD),
+            )
+            if not value or value == default
+        ]
+        if insecure:
+            raise RuntimeError(
+                "Refusing to start: "
+                + ", ".join(insecure)
+                + " must be overridden from the default in production "
+                "(set DEBUG=true for local development)."
+            )

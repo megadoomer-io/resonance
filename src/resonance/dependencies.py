@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from typing import TYPE_CHECKING, Annotated
 
@@ -142,7 +143,11 @@ async def resolve_bearer_user(request: fastapi.Request) -> uuid.UUID | None:
 
     token = auth_header[7:]
     settings = request.app.state.settings
-    if not settings.admin_api_token or token != settings.admin_api_token:
+    # Constant-time compare to avoid a timing side channel on the admin token
+    # (#141, finding #7). compare_digest short-circuits safely on empty config.
+    if not settings.admin_api_token or not secrets.compare_digest(
+        token, settings.admin_api_token
+    ):
         raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
 
     selector = _assume_user_selector(request)
@@ -178,7 +183,10 @@ def verify_admin_access(request: fastapi.Request) -> None:
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         settings = request.app.state.settings
-        if settings.admin_api_token and token == settings.admin_api_token:
+        # Constant-time compare (#141, finding #7).
+        if settings.admin_api_token and secrets.compare_digest(
+            token, settings.admin_api_token
+        ):
             return
         raise fastapi.HTTPException(status_code=403, detail="Invalid API token")
 
