@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import json
 import uuid
 from typing import Annotated
 
@@ -489,7 +488,11 @@ async def edit_playlist_page(
     similar_available = conn_result.first() is not None
     ctx.update(
         profile_id=str(profile.id),
-        lineup_json=json.dumps(lineup),
+        # Pass the structured lineup and let the template serialize it with the
+        # markupsafe-aware `tojson` filter (escapes <, >, & inside the <script>
+        # block). Never json.dumps + | safe here — an artist/event name
+        # containing </script> would break out (security review #141, #6).
+        lineup=lineup,
         profile_name=profile.name,
         parameter_values=profile.parameter_values,
         similar_available=similar_available,

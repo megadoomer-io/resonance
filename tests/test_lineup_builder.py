@@ -303,3 +303,50 @@ class TestArtistSearchInLibrary:
         flags = {(i["disambiguation"], i["in_library"]) for i in items}
         assert ("heavy metal", True) in flags
         assert ("electronic", False) in flags
+
+
+# --- lineup-data XSS (security review #141, finding #6) ---
+
+
+class TestLineupDataXSS:
+    """The lineup JSON embedded in the editor page must not break out of its
+    <script> block. Artist/event names come from external APIs and manual entry,
+    so a name containing ``</script>`` must be escaped, not rendered raw."""
+
+    def test_script_breakout_is_escaped(self) -> None:
+        """``playlists_new.html`` serializes the lineup with the markupsafe-aware
+        ``tojson`` filter, so a ``</script>`` payload can't escape the tag."""
+        import resonance.ui.common as common_ui
+
+        payload = "</script><script>alert('xss')</script>"
+        lineup = {
+            "version": 0,
+            "groups": [
+                {
+                    "label": "Added artists",
+                    "rows": [{"artist_id": "x", "name": payload, "included": True}],
+                }
+            ],
+        }
+        ctx = {
+            "request": SimpleNamespace(url=SimpleNamespace(path="/playlists/x/edit")),
+            "user_id": "u",
+            "user_tz": "UTC",
+            "user_role": "owner",
+            "actual_role": "owner",
+            "viewing_as": None,
+            "profile_id": "x",
+            "profile_name": "My Playlist",
+            "parameter_values": {},
+            "similar_available": False,
+            "events": [],
+            "parameters": {},
+            "lineup": lineup,
+        }
+        html = common_ui.templates.get_template("playlists_new.html").render(ctx)
+
+        # No breakout: the raw payload must never appear verbatim in the page.
+        assert payload not in html
+        # The name is still present, escaped (tojson encodes "<" as <), which
+        # also proves the template actually serialized `lineup` (not a no-op).
+        assert "\\u003c/script\\u003e" in html

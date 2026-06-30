@@ -93,7 +93,7 @@
 
 <button type="button" class="primary" id="generate-btn">Generate Playlist</button>
 
-<script id="lineup-data" type="application/json">{{ lineup_json | safe }}</script>
+<script id="lineup-data" type="application/json">{{ lineup | tojson }}</script>
 <script>
   window.LINEUP_PROFILE_ID = "{{ profile_id }}";
   window.LINEUP_SIMILAR_AVAILABLE = {{ 'true' if similar_available else 'false' }};
