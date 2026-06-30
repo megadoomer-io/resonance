@@ -147,12 +147,11 @@ class TestSyncCalendarFeedSongkick:
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.text = _SAMPLE_ICAL
-        mock_response.raise_for_status = MagicMock()
-
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -176,11 +175,7 @@ class TestSyncCalendarFeedSongkick:
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.get.return_value = mock_response
-            mock_client_cls.return_value = mock_client
+            mock_fetch.return_value = _SAMPLE_ICAL
 
             mock_uvc.return_value = MagicMock()
             mock_rvc.return_value = MagicMock()
@@ -194,12 +189,12 @@ class TestSyncCalendarFeedSongkick:
             )
 
             # Should fetch both URLs (attendance + tracked artist)
-            assert mock_client.get.await_count == 2
+            assert mock_fetch.await_count == 2
             expected_base = (
                 f"https://www.songkick.com/users/"
                 f"{connection.external_user_id}/calendars.ics"
             )
-            calls = [call.args[0] for call in mock_client.get.call_args_list]
+            calls = [call.args[0] for call in mock_fetch.call_args_list]
             assert calls[0] == f"{expected_base}?filter=attendance"
             assert calls[1] == f"{expected_base}?filter=tracked_artist"
 
@@ -260,12 +255,11 @@ UID:generic-evt-001
 END:VEVENT
 END:VCALENDAR
 """
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.text = ical_no_venue
-        mock_response.raise_for_status = MagicMock()
-
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -286,11 +280,7 @@ END:VCALENDAR
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.get.return_value = mock_response
-            mock_client_cls.return_value = mock_client
+            mock_fetch.return_value = ical_no_venue
 
             mock_uec.return_value = MagicMock()
             mock_rec.return_value = (MagicMock(), True)
@@ -302,7 +292,7 @@ END:VCALENDAR
             )
 
             # Should fetch exactly the URL from the connection
-            mock_client.get.assert_awaited_once_with(ical_url)
+            mock_fetch.assert_awaited_once_with(ical_url)
 
             # Generic iCal with no venue: no venue candidate created
             mock_uvc.assert_not_awaited()
@@ -393,18 +383,17 @@ class TestSyncCalendarFeedLifecycle:
         ctx = _make_ctx(session)
 
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch("resonance.concerts.worker.lifecycle_module.fail_task") as mock_fail,
         ):
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.get.side_effect = httpx.HTTPStatusError(
+            mock_fetch.side_effect = httpx.HTTPStatusError(
                 "Server Error",
                 request=MagicMock(spec=httpx.Request),
                 response=MagicMock(spec=httpx.Response, status_code=500),
             )
-            mock_client_cls.return_value = mock_client
 
             await concert_worker.sync_calendar_feed(
                 ctx, str(connection.id), str(task.id)
@@ -425,11 +414,14 @@ class TestSyncCalendarFeedLifecycle:
         session.execute.return_value = task_result
         ctx = _make_ctx(session)
 
-        with patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls:
+        with patch(
+            "resonance.concerts.worker.url_safety_module.fetch_feed",
+            new_callable=AsyncMock,
+        ) as mock_fetch:
             await concert_worker.sync_calendar_feed(
                 ctx, str(uuid.uuid4()), str(uuid.uuid4())
             )
-            mock_client_cls.assert_not_called()
+            mock_fetch.assert_not_called()
 
     @pytest.mark.anyio()
     async def test_empty_calendar_completes_successfully(self) -> None:
@@ -440,12 +432,11 @@ class TestSyncCalendarFeedLifecycle:
         _setup_session_queries(session, task, connection)
         ctx = _make_ctx(session)
 
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.text = _EMPTY_ICAL
-        mock_response.raise_for_status = MagicMock()
-
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -458,11 +449,7 @@ class TestSyncCalendarFeedLifecycle:
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.get.return_value = mock_response
-            mock_client_cls.return_value = mock_client
+            mock_fetch.return_value = _EMPTY_ICAL
 
             await concert_worker.sync_calendar_feed(
                 ctx, str(connection.id), str(task.id)

@@ -9,13 +9,13 @@ import typing
 import uuid
 from typing import Any
 
-import httpx
 import sqlalchemy as sa
 import structlog
 
 import resonance.concerts.concert_archives as concert_archives_module
 import resonance.concerts.ical as ical_module
 import resonance.concerts.sync as concert_sync
+import resonance.concerts.url_safety as url_safety_module
 import resonance.connectors.songkick as songkick_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
@@ -213,24 +213,22 @@ async def sync_calendar_feed(
             totals = EventProcessingResult()
             total_events = 0
 
-            async with httpx.AsyncClient() as client:
-                for url, feed_type in feed_items:
-                    log.info("fetching_feed", url=url, feed_type=feed_type.value)
-                    response = await client.get(url)
-                    response.raise_for_status()
+            for url, feed_type in feed_items:
+                log.info("fetching_feed", url=url, feed_type=feed_type.value)
+                # SSRF-guarded fetch: validates scheme + resolved IP and pins the
+                # connection to a public address (security review #141 / #1).
+                feed_body = await url_safety_module.fetch_feed(url)
 
-                    parsed_events = ical_module.parse_ical_feed(
-                        response.text, feed_type
-                    )
-                    total_events += len(parsed_events)
+                parsed_events = ical_module.parse_ical_feed(feed_body, feed_type)
+                total_events += len(parsed_events)
 
-                    batch = await _process_parsed_events(
-                        session, parsed_events, source_service, connection.user_id
-                    )
-                    totals.events_created += batch.events_created
-                    totals.events_updated += batch.events_updated
-                    totals.candidates_created += batch.candidates_created
-                    totals.candidates_matched += batch.candidates_matched
+                batch = await _process_parsed_events(
+                    session, parsed_events, source_service, connection.user_id
+                )
+                totals.events_created += batch.events_created
+                totals.events_updated += batch.events_updated
+                totals.candidates_created += batch.candidates_created
+                totals.candidates_matched += batch.candidates_matched
 
             # Update connection last_synced_at
             connection.last_synced_at = datetime.datetime.now(datetime.UTC)
