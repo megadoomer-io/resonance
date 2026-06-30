@@ -1,5 +1,5 @@
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -90,3 +90,44 @@ class TestInvalidateUserSessions:
 
         assert deleted == 0
         redis.delete.assert_not_awaited()
+
+
+class TestSessionCookieSecureFlag:
+    """The session cookie's Secure attribute (security review #141, finding #5)."""
+
+    def _middleware(self, *, secure: bool) -> session_module.SessionMiddleware:
+        return session_module.SessionMiddleware(
+            app=AsyncMock(),
+            redis=AsyncMock(),
+            secret_key="test-secret-key",
+            secure=secure,
+        )
+
+    async def _save_and_capture(self, *, secure: bool) -> MagicMock:
+        mw = self._middleware(secure=secure)
+        session = session_module.SessionData(
+            session_id="sid", data={"user_id": "u1"}, is_new=True
+        )
+        response = MagicMock()
+        await mw._save_session(session, response)
+        return response
+
+    async def test_secure_cookie_when_enabled(self) -> None:
+        """secure=True (production) sets the Secure attribute on the cookie."""
+        response = await self._save_and_capture(secure=True)
+        assert response.set_cookie.call_args.kwargs["secure"] is True
+
+    async def test_insecure_cookie_when_disabled(self) -> None:
+        """secure=False (local-http dev) omits Secure so the cookie works."""
+        response = await self._save_and_capture(secure=False)
+        assert response.set_cookie.call_args.kwargs["secure"] is False
+
+    def test_secure_defaults_off(self) -> None:
+        """The middleware default is off; create_app opts in via not debug."""
+        assert self._middleware(secure=False).secure is False
+        assert (
+            session_module.SessionMiddleware(
+                app=AsyncMock(), redis=AsyncMock(), secret_key="k"
+            ).secure
+            is False
+        )

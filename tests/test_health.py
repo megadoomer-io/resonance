@@ -7,11 +7,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 import resonance.app as app_module
+import resonance.config as config_module
 
 
 @pytest.fixture
 async def client() -> AsyncIterator[httpx.AsyncClient]:
-    application = app_module.create_app()
+    application = app_module.create_app(config_module.Settings(debug=True))
     transport = httpx.ASGITransport(app=application)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

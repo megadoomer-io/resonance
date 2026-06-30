@@ -1,3 +1,5 @@
+import pytest
+
 import resonance.config as config_module
 
 
@@ -84,3 +86,58 @@ def test_redirect_uris_default_to_localhost() -> None:
     settings = config_module.Settings()
     assert settings.spotify_redirect_uri.startswith("http://localhost:8000")
     assert settings.musicbrainz_redirect_uri.startswith("http://localhost:8000")
+
+
+# --- production secret guard (security review #141, finding #4) ---
+
+
+def _real_secrets() -> dict[str, str]:
+    return {
+        "session_secret_key": "a-real-session-signing-key",
+        "token_encryption_key": "a-real-fernet-encryption-key",
+        "pgpassword": "a-real-db-password",
+    }
+
+
+def test_ensure_secure_secrets_rejects_placeholders_in_prod() -> None:
+    """Default placeholder secrets must fail startup when debug is off."""
+    settings = config_module.Settings(debug=False)
+    with pytest.raises(RuntimeError):
+        settings.ensure_secure_secrets()
+
+
+def test_ensure_secure_secrets_allows_placeholders_in_debug() -> None:
+    """Local dev (debug=True) tolerates the shipped defaults."""
+    settings = config_module.Settings(debug=True)
+    settings.ensure_secure_secrets()  # must not raise
+
+
+def test_ensure_secure_secrets_passes_with_real_secrets() -> None:
+    settings = config_module.Settings(debug=False, **_real_secrets())
+    settings.ensure_secure_secrets()  # must not raise
+
+
+def test_ensure_secure_secrets_rejects_empty_secret() -> None:
+    overrides = _real_secrets()
+    overrides["session_secret_key"] = ""
+    settings = config_module.Settings(debug=False, **overrides)
+    with pytest.raises(RuntimeError):
+        settings.ensure_secure_secrets()
+
+
+def test_ensure_secure_secrets_names_each_offending_field() -> None:
+    settings = config_module.Settings(debug=False)  # all three are defaults
+    with pytest.raises(RuntimeError) as exc:
+        settings.ensure_secure_secrets()
+    msg = str(exc.value)
+    assert "SESSION_SECRET_KEY" in msg
+    assert "TOKEN_ENCRYPTION_KEY" in msg
+    assert "PGPASSWORD" in msg
+
+
+def test_ensure_secure_secrets_flags_default_pgpassword() -> None:
+    overrides = _real_secrets()
+    overrides["pgpassword"] = "resonance"  # the shipped default
+    settings = config_module.Settings(debug=False, **overrides)
+    with pytest.raises(RuntimeError, match="PGPASSWORD"):
+        settings.ensure_secure_secrets()

@@ -337,6 +337,7 @@ async def auth_callback(
         max_age=86400 * 365,  # 1 year
         httponly=True,
         samesite="lax",
+        secure=not request.app.state.settings.debug,  # HTTPS-only in prod (#141, #5)
     )
     return response
 

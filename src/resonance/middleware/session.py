@@ -65,12 +65,19 @@ class SessionMiddleware(base_middleware.BaseHTTPMiddleware):
         secret_key: str,
         cookie_name: str = "session_id",
         max_age: int = 86400 * 30,
+        *,
+        secure: bool = False,
     ) -> None:
         super().__init__(app)
         self.redis = redis
         self.signer = itsdangerous.TimestampSigner(secret_key)
         self.cookie_name = cookie_name
         self.max_age = max_age
+        # When True, the session cookie carries the Secure attribute so browsers
+        # only send it over HTTPS (#141, finding #5). create_app sets this from
+        # `not settings.debug`; the default is False so local-http dev and tests
+        # work without TLS.
+        self.secure = secure
 
     async def dispatch(
         self,
@@ -136,6 +143,7 @@ class SessionMiddleware(base_middleware.BaseHTTPMiddleware):
             max_age=self.max_age,
             httponly=True,
             samesite="lax",
+            secure=self.secure,
         )
 
 
