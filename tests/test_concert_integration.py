@@ -12,7 +12,6 @@ import datetime
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 import resonance.concerts.worker as concert_worker
@@ -131,19 +130,9 @@ def _setup_session_queries(
     session.execute.side_effect = [task_result, conn_result]
 
 
-def _setup_http_mock(mock_client_cls: MagicMock, ical_text: str) -> MagicMock:
-    """Configure httpx.AsyncClient mock to return given iCal text."""
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.text = ical_text
-    mock_response.raise_for_status = MagicMock()
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get.return_value = mock_response
-    mock_client_cls.return_value = mock_client
-
-    return mock_response
+def _setup_http_mock(mock_fetch: AsyncMock, ical_text: str) -> None:
+    """Configure the SSRF-guarded fetch_feed mock to return given iCal text."""
+    mock_fetch.return_value = ical_text
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +153,10 @@ class TestFullSongkickSyncPipeline:
         ctx = _make_ctx(session)
 
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -190,7 +182,7 @@ class TestFullSongkickSyncPipeline:
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            _setup_http_mock(mock_client_cls, SAMPLE_SONGKICK_FEED)
+            _setup_http_mock(mock_fetch, SAMPLE_SONGKICK_FEED)
 
             mock_uvc.return_value = MagicMock()
             mock_rvc.return_value = MagicMock()
@@ -262,7 +254,10 @@ class TestIdempotentSync:
         ctx = _make_ctx(session)
 
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -286,7 +281,7 @@ class TestIdempotentSync:
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            _setup_http_mock(mock_client_cls, SAMPLE_SONGKICK_FEED)
+            _setup_http_mock(mock_fetch, SAMPLE_SONGKICK_FEED)
 
             mock_uvc.return_value = MagicMock()
             mock_rvc.return_value = MagicMock()
@@ -336,7 +331,10 @@ class TestGenericIcalSync:
         ctx = _make_ctx(session)
 
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch(
                 "resonance.concerts.worker.concert_sync.upsert_venue_candidate"
             ) as mock_uvc,
@@ -360,7 +358,7 @@ class TestGenericIcalSync:
                 "resonance.concerts.worker.lifecycle_module.complete_task"
             ) as mock_complete,
         ):
-            _setup_http_mock(mock_client_cls, SAMPLE_GENERIC_ICAL)
+            _setup_http_mock(mock_fetch, SAMPLE_GENERIC_ICAL)
 
             mock_uec.return_value = MagicMock()
             mock_rec.return_value = (MagicMock(), True)
@@ -404,7 +402,10 @@ class TestGenericIcalSync:
         ctx = _make_ctx(session)
 
         with (
-            patch("resonance.concerts.worker.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
             patch("resonance.concerts.worker.concert_sync.upsert_venue_candidate"),
             patch("resonance.concerts.worker.concert_sync.resolve_venue_candidate"),
             patch(
@@ -420,7 +421,7 @@ class TestGenericIcalSync:
             ) as mock_match,
             patch("resonance.concerts.worker.lifecycle_module.complete_task"),
         ):
-            _setup_http_mock(mock_client_cls, SAMPLE_GENERIC_ICAL)
+            _setup_http_mock(mock_fetch, SAMPLE_GENERIC_ICAL)
 
             mock_uec.return_value = MagicMock()
             mock_rec.return_value = (MagicMock(), True)
