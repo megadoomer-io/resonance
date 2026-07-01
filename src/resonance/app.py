@@ -26,6 +26,7 @@ import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
 import resonance.logging as logging_module
+import resonance.middleware.rate_limit as rate_limit_module
 import resonance.middleware.security_headers as security_headers_module
 import resonance.middleware.session as session_middleware
 import resonance.migrations as migrations_module
@@ -129,6 +130,14 @@ def create_app(settings: config_module.Settings | None = None) -> fastapi.FastAP
         secret_key=settings.session_secret_key,
         secure=not settings.debug,
     )
+
+    # Per-IP rate limiting on auth + admin paths (#141, finding #10). Added after
+    # session so it sits outermost and rejects abusive clients early.
+    if settings.rate_limit_enabled:
+        application.add_middleware(
+            rate_limit_module.RateLimitMiddleware,
+            redis=session_redis,
+        )
 
     # Register API routes
     application.include_router(api_v1_module.router)
