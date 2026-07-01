@@ -61,6 +61,10 @@ class Settings(pydantic_settings.BaseSettings):
     # Admin API token (for CLI/programmatic access)
     admin_api_token: str = ""
 
+    # Per-IP rate limiting on auth + admin paths (#141, finding #10). Kill switch
+    # in case the limiter ever misbehaves in production.
+    rate_limit_enabled: bool = True
+
     # Allow the admin token to assume a user identity on user-scoped endpoints
     # (X-Assume-User header / ?as_user=) for agent-first live testing (#135).
     # The admin token is already omnipotent, so this is not a privilege
