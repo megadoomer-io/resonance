@@ -26,6 +26,7 @@ import resonance.connectors.spotify as spotify_module
 import resonance.connectors.test as test_connector_module
 import resonance.database as database_module
 import resonance.logging as logging_module
+import resonance.middleware.security_headers as security_headers_module
 import resonance.middleware.session as session_middleware
 import resonance.migrations as migrations_module
 import resonance.models.task as task_models
@@ -104,13 +105,22 @@ def create_app(settings: config_module.Settings | None = None) -> fastapi.FastAP
     # Fail fast on placeholder secrets in production (#141, finding #4).
     settings.ensure_secure_secrets()
     logging_module.configure_logging(settings.log_level)
+    # Swagger UI and the raw OpenAPI spec are dev-only (#141, finding #9):
+    # exposed in debug, withheld in production to avoid endpoint enumeration.
     application = fastapi.FastAPI(
         title=settings.app_name,
-        docs_url="/docs",
+        docs_url="/docs" if settings.debug else None,
+        openapi_url="/openapi.json" if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )
     application.state.settings = settings
+
+    # Security headers + CSP on every response (#141, finding #8).
+    application.add_middleware(
+        security_headers_module.SecurityHeadersMiddleware,
+        csp=security_headers_module.DEFAULT_CSP,
+    )
 
     session_redis = aioredis.from_url(settings.redis_url, decode_responses=True)  # type: ignore[no-untyped-call]  # redis 5.x lacks stubs
     application.add_middleware(
@@ -129,7 +139,10 @@ def create_app(settings: config_module.Settings | None = None) -> fastapi.FastAP
     application.include_router(ui_artists_module.router)
     application.include_router(ui_dashboard_module.router)
     application.include_router(ui_events_module.router)
-    application.include_router(ui_playground_module.router)
+    # The component playground is a dev tool; don't expose it in production at
+    # all (#141, finding #11). It's also admin-gated for defense in depth.
+    if settings.debug:
+        application.include_router(ui_playground_module.router)
     application.include_router(ui_playlists_module.router)
     application.include_router(ui_sync_module.router)
     application.include_router(ui_tracks_module.router)
