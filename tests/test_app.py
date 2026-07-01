@@ -46,6 +46,11 @@ class TestSecurityHeaders:
         assert "object-src 'none'" in csp
         # Inline scripts + the external CDNs the templates actually use.
         assert "https://unpkg.com" in csp
+        # Google Fonts: theme.css @imports the stylesheet, which pulls font
+        # files from gstatic. Both must be allowed or the DESIGN.md fonts break
+        # (caught by live browser QA, not header-shape tests).
+        assert "https://fonts.googleapis.com" in csp
+        assert "https://fonts.gstatic.com" in csp
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
         assert resp.headers["X-Frame-Options"] == "DENY"
         assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"

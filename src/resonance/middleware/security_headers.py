@@ -24,16 +24,19 @@ if typing.TYPE_CHECKING:
     import starlette.responses as starlette_responses
     import starlette.types as starlette_types
 
-# Allowed sources mirror what base.html actually loads:
+# Allowed sources mirror what the app actually loads:
 # - scripts: unpkg (htmx, lucide) + jsdelivr (Swagger UI in dev) + inline blocks
-# - styles: jsdelivr (Pico CSS) + /static + inline
+# - styles: jsdelivr (Pico CSS) + Google Fonts stylesheet (@import in theme.css)
+#   + /static + inline
+# - fonts: Google Fonts files (fonts.gstatic.com) + /static + data:
 # Everything else is same-origin only; framing and plugins are denied.
 DEFAULT_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net "
+    "https://fonts.googleapis.com; "
     "img-src 'self' data:; "
-    "font-src 'self' data:; "
+    "font-src 'self' data: https://fonts.gstatic.com; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
