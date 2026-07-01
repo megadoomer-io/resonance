@@ -237,6 +237,24 @@ class TestAuthCallback:
         )
         assert response.status_code == 400
 
+    async def test_callback_empty_state_rejected_for_standard_service(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """An empty state must NOT bypass CSRF for a standard OAuth2 service.
+
+        Previously `if state and ...` skipped the check whenever state was empty,
+        so an attacker could defeat it by omitting state (#141, finding #2).
+        """
+        response = await client.get("/api/v1/auth/spotify/callback?code=test&state=")
+        assert response.status_code == 400
+
+    async def test_callback_missing_state_param_rejected(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """A missing state param is likewise rejected for a standard service."""
+        response = await client.get("/api/v1/auth/spotify/callback?code=test")
+        assert response.status_code == 400
+
     async def test_callback_unknown_service_returns_404(
         self, client: httpx.AsyncClient
     ) -> None:

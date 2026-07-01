@@ -120,14 +120,22 @@ async def auth_callback(
             status_code=400, detail="Missing code or token parameter"
         )
 
-    # Verify state matches.  When state is non-empty (standard OAuth2) we
-    # require it to match the stored value.  When state is empty the service
-    # does not echo it back (e.g. Last.fm), so we skip the check.
-    stored_state = session.get("oauth_state")
-    if state and (stored_state is None or stored_state != state):
-        raise fastapi.HTTPException(
-            status_code=400, detail="Invalid or missing OAuth state"
-        )
+    # Verify the OAuth state (CSRF protection). Standard OAuth2 services echo
+    # `state` back, so we REQUIRE a match. Last.fm is the one exception: it does
+    # not return state, so it (and only it) skips the check. Previously the skip
+    # triggered whenever `state` was empty, which let an attacker defeat the
+    # check for ANY service by simply omitting it (#141, finding #2).
+    skip_state_check = service_type == types_module.ServiceType.LASTFM
+    if not skip_state_check:
+        stored_state = session.get("oauth_state")
+        if (
+            not state
+            or stored_state is None
+            or not secrets.compare_digest(stored_state, state)
+        ):
+            raise fastapi.HTTPException(
+                status_code=400, detail="Invalid or missing OAuth state"
+            )
 
     # Exchange code for tokens
     try:
