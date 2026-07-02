@@ -857,12 +857,40 @@ class TestArtistFilterRegistry:
     def test_artist_filters_count(self) -> None:
         assert len(view_filters_module.ARTIST_FILTERS) == 5
 
+    def test_artist_filter_keys_cover_all_fields(self) -> None:
+        # Every filter field's param name must be in ARTIST_FILTER_KEYS, or an
+        # active filter of that kind won't un-highlight a preset chip. Range fields
+        # (none on artists today) would use {name}_from/_to and need special care.
+        field_names = {f.name for f in view_filters_module.ARTIST_FILTERS}
+        assert field_names <= view_filters_module.ARTIST_FILTER_KEYS
+
 
 class TestArtistPresets:
     """Test artist preset definitions."""
 
     def test_preset_count(self) -> None:
         assert len(view_filters_module.ARTIST_PRESETS) == 2
+
+    def test_genre_filter_deactivates_preset(self) -> None:
+        # A genre filter combined with a preset param must NOT report the preset as
+        # active (regression: detect_active_preset was called without filter_keys,
+        # so genre_mbid was invisible and the preset chip stayed lit).
+        params = {"has_events": "true", "genre_mbid": "some-mbid"}
+        result = view_filters_module.detect_active_preset(
+            params,
+            view_filters_module.ARTIST_PRESETS,
+            filter_keys=view_filters_module.ARTIST_FILTER_KEYS,
+        )
+        assert result is None
+
+    def test_preset_alone_still_detected(self) -> None:
+        params = {"has_events": "true"}
+        result = view_filters_module.detect_active_preset(
+            params,
+            view_filters_module.ARTIST_PRESETS,
+            filter_keys=view_filters_module.ARTIST_FILTER_KEYS,
+        )
+        assert result == "has_events"
 
     def test_has_events_preset_params(self) -> None:
         preset = next(

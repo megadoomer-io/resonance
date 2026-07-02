@@ -150,6 +150,19 @@ ARTIST_PRESETS: list[dict[str, str]] = [
     {"name": "no_tracks", "label": "No Tracks", "params": "has_tracks=false"},
 ]
 
+# Every artist filter param, passed to detect_active_preset so an active
+# name/origin/genre filter correctly un-highlights a preset chip (the function
+# otherwise derives keys from preset definitions + q only). Keep in sync with
+# ARTIST_FILTERS -- test_artist_filter_keys_cover_all_fields guards this.
+ARTIST_FILTER_KEYS: set[str] = {
+    "q",
+    "name",
+    "origin",
+    "has_events",
+    "has_tracks",
+    "genre_mbid",
+}
+
 ARTIST_TEMPLATE_FILTERS: list[dict[str, Any]] = [
     {"name": "name", "label": "Name", "type": "text"},
     {"name": "origin", "label": "Origin", "type": "text"},

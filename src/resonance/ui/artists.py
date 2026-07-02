@@ -45,7 +45,9 @@ async def artists_page(
     # apply (OR-match), not just the last one.
     multi_params = {"genre_mbid": request.query_params.getlist("genre_mbid")}
     presets = view_filters_module.ARTIST_PRESETS
-    active_preset = view_filters_module.detect_active_preset(params, presets)
+    active_preset = view_filters_module.detect_active_preset(
+        params, presets, filter_keys=view_filters_module.ARTIST_FILTER_KEYS
+    )
 
     applied = filters_module.parse_filter_params(
         view_filters_module.ARTIST_FILTERS, params, multi_params=multi_params
