@@ -156,13 +156,18 @@ def rank_search_candidates(
 @router.get(
     "",
     summary="List artists",
-    description="Paginated list of artists, alphabetical by name.",
+    description=(
+        "Paginated list of artists, alphabetical by name. Optionally filtered by "
+        "genre (``genre_mbid``, repeatable -- an artist matches if it carries ANY "
+        "of the given genres). Each result carries its top canonical genres."
+    ),
 )
 async def list_artists(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     page: int = 1,
     q: str | None = None,
+    genre_mbid: Annotated[list[str] | None, fastapi.Query()] = None,
 ) -> dict[str, Any]:
     offset = (page - 1) * _PAGE_SIZE
 
@@ -170,6 +175,17 @@ async def list_artists(
 
     if q:
         stmt = stmt.where(music_models.Artist.name.ilike(f"%{_escape_ilike(q)}%"))
+
+    if genre_mbid:
+        # OR-match: the artist has at least one tag in the selected genres. A
+        # correlated EXISTS (not a JOIN) keeps the row set one-per-artist without a
+        # DISTINCT, and hits ix_artist_tags_genre_mbid.
+        stmt = stmt.where(
+            sa.exists().where(
+                music_models.ArtistTag.artist_id == music_models.Artist.id,
+                music_models.ArtistTag.genre_mbid.in_(genre_mbid),
+            )
+        )
 
     stmt = stmt.offset(offset).limit(_PAGE_SIZE + 1)
 
@@ -179,8 +195,15 @@ async def list_artists(
     has_next = len(artists) > _PAGE_SIZE
     artists = artists[:_PAGE_SIZE]
 
+    tags_by_artist = await _load_artist_tags(db, [a.id for a in artists])
+    items = []
+    for a in artists:
+        summary = _format_artist_summary(a)
+        summary["genres"] = _display_genres(tags_by_artist.get(a.id, []))
+        items.append(summary)
+
     return {
-        "items": [_format_artist_summary(a) for a in artists],
+        "items": items,
         "page": page,
         "page_size": _PAGE_SIZE,
         "has_next": has_next,

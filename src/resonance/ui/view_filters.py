@@ -135,6 +135,14 @@ ARTIST_FILTERS: list[filters_module.AnyFilterField] = [
     filters_module.TextField("origin", music_models.Artist.origin),
     filters_module.ExistsField("has_events", _has_events_subquery),
     filters_module.ExistsField("has_tracks", _has_tracks_subquery),
+    # Genre browse: OR-match artists carrying any of the selected genre_mbids.
+    # Options are dynamic (from the library's tags), so no fixed option set.
+    filters_module.MultiSelectExistsField(
+        "genre_mbid",
+        music_models.Artist.id,
+        music_models.ArtistTag.artist_id,
+        music_models.ArtistTag.genre_mbid,
+    ),
 ]
 
 ARTIST_PRESETS: list[dict[str, str]] = [
@@ -320,7 +328,10 @@ def build_filter_query_string(
                 parts.append(f"{field.name}_min={min_val}")
             if max_val is not None:
                 parts.append(f"{field.name}_max={max_val}")
-        elif isinstance(field, filters_module.MultiSelectField):
+        elif isinstance(
+            field,
+            filters_module.MultiSelectField | filters_module.MultiSelectExistsField,
+        ):
             for v in value:
                 parts.append(f"{field.name}={v}")
         elif isinstance(field, filters_module.ExistsField):

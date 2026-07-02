@@ -852,9 +852,10 @@ class TestArtistFilterRegistry:
         assert isinstance(by_name["origin"], filters_module.TextField)
         assert isinstance(by_name["has_events"], filters_module.ExistsField)
         assert isinstance(by_name["has_tracks"], filters_module.ExistsField)
+        assert isinstance(by_name["genre_mbid"], filters_module.MultiSelectExistsField)
 
     def test_artist_filters_count(self) -> None:
-        assert len(view_filters_module.ARTIST_FILTERS) == 4
+        assert len(view_filters_module.ARTIST_FILTERS) == 5
 
 
 class TestArtistPresets:

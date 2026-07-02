@@ -12,13 +12,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
+import resonance.api.v1.artists as artists_module
 import resonance.api.v1.taste as taste_module
 import resonance.config as config_module
 import resonance.middleware.session as session_middleware
 import resonance.models as models
 import resonance.models.music as music_models
+import resonance.ui.filters as filters_module
 
 # --- fakes ---
 
@@ -317,3 +320,138 @@ class TestGetTopGenresRealSQL:
             second = [g["genre_mbid"] for g in await taste_module.get_top_genres(db, 2)]
         assert len(first) == 2
         assert first == second  # deterministic cutoff
+
+
+# --- list_artists genre filter (API, real SQL) ---
+
+METAL = "11111111-1111-1111-1111-111111111111"
+PUNK = "22222222-2222-2222-2222-222222222222"
+JAZZ = "33333333-3333-3333-3333-333333333333"
+
+
+async def _seeded_library() -> sa_async.async_sessionmaker[sa_async.AsyncSession]:
+    """A small library: one metal artist, one punk, one both, one untagged."""
+    maker = await _seeded_engine()
+    async with maker() as db:
+        metal_a = _artist("Metallica")
+        punk_a = _artist("Ramones")
+        both_a = _artist("Crossover")
+        bare_a = _artist("Untagged")
+        db.add_all([metal_a, punk_a, both_a, bare_a])
+        await db.flush()
+        db.add_all(
+            [
+                _tag(metal_a.id, "metal", METAL, 9),
+                _tag(punk_a.id, "punk", PUNK, 5),
+                _tag(both_a.id, "metal", METAL, 3),
+                _tag(both_a.id, "punk", PUNK, 2),
+            ]
+        )
+        await db.commit()
+    return maker
+
+
+class TestListArtistsGenreFilter:
+    async def test_single_genre(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(
+                user_id=uuid.uuid4(), db=db, genre_mbid=[METAL]
+            )
+        names = {i["name"] for i in out["items"]}
+        assert names == {"Metallica", "Crossover"}  # not Ramones, not Untagged
+
+    async def test_multiple_genres_or_match(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(
+                user_id=uuid.uuid4(), db=db, genre_mbid=[METAL, PUNK]
+            )
+        names = {i["name"] for i in out["items"]}
+        # Union of metal and punk artists; "Crossover" appears once (EXISTS, no dupes).
+        assert names == {"Metallica", "Ramones", "Crossover"}
+        assert len(out["items"]) == 3
+
+    async def test_no_match_genre(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(
+                user_id=uuid.uuid4(), db=db, genre_mbid=[JAZZ]
+            )
+        assert out["items"] == []
+
+    async def test_no_filter_returns_all(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(user_id=uuid.uuid4(), db=db)
+        assert len(out["items"]) == 4  # includes the untagged artist
+
+    async def test_results_carry_genres(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(
+                user_id=uuid.uuid4(), db=db, genre_mbid=[METAL]
+            )
+        by_name = {i["name"]: i for i in out["items"]}
+        assert set(by_name["Crossover"]["genres"]) == {"metal", "punk"}
+
+    async def test_genre_and_name_combined(self) -> None:
+        maker = await _seeded_library()
+        async with maker() as db:
+            out = await artists_module.list_artists(
+                user_id=uuid.uuid4(), db=db, q="Cross", genre_mbid=[METAL]
+            )
+        names = {i["name"] for i in out["items"]}
+        assert names == {"Crossover"}  # metal AND name~Cross
+
+
+# --- MultiSelectExistsField ---
+
+
+class TestMultiSelectExistsField:
+    def _field(self) -> filters_module.MultiSelectExistsField:
+        return filters_module.MultiSelectExistsField(
+            "genre_mbid",
+            music_models.Artist.id,
+            music_models.ArtistTag.artist_id,
+            music_models.ArtistTag.genre_mbid,
+        )
+
+    def test_parse_single(self) -> None:
+        assert self._field().parse({"genre_mbid": METAL}) == [METAL]
+
+    def test_parse_missing(self) -> None:
+        assert self._field().parse({}) is None
+
+    def test_parse_rejects_empty(self) -> None:
+        assert self._field().parse({"genre_mbid": ""}) is None
+
+    def test_parse_multi_filters_empties(self) -> None:
+        assert self._field().parse_multi([METAL, "", PUNK]) == [METAL, PUNK]
+
+    def test_parse_multi_all_empty_is_none(self) -> None:
+        assert self._field().parse_multi(["", ""]) is None
+
+    def test_options_restrict_when_set(self) -> None:
+        field = filters_module.MultiSelectExistsField(
+            "genre_mbid",
+            music_models.Artist.id,
+            music_models.ArtistTag.artist_id,
+            music_models.ArtistTag.genre_mbid,
+            options=[METAL],
+        )
+        assert field.parse_multi([METAL, PUNK]) == [METAL]
+
+    async def test_apply_via_engine(self) -> None:
+        # The field applied through apply_filters against real SQL matches only
+        # artists carrying the selected genre.
+        maker = await _seeded_library()
+        async with maker() as db:
+            query = filters_module.apply_filters(
+                sa.select(music_models.Artist),
+                [self._field()],
+                {},
+                multi_params={"genre_mbid": [PUNK]},
+            )
+            rows = (await db.execute(query)).scalars().all()
+        assert {a.name for a in rows} == {"Ramones", "Crossover"}
