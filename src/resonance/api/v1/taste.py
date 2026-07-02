@@ -23,10 +23,15 @@ import fastapi
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 
+import resonance.api.v1.artists as artists_module
 import resonance.dependencies as deps_module
+import resonance.generators.genre as genre_module
 import resonance.models.music as music_models
 
 router = fastapi.APIRouter(prefix="/taste", tags=["taste"])
+
+# How many artists to rank for a single-genre "more like this" view.
+_GENRE_ARTIST_LIMIT = 100
 
 # Cap the top-genres list. The library has a few hundred distinct canonical
 # genres at most; this bounds the browse-filter option list and the stats page.
@@ -127,3 +132,71 @@ async def list_top_genres(
 ) -> dict[str, Any]:
     genres = await get_top_genres(db, limit=limit)
     return {"items": genres, "count": len(genres)}
+
+
+async def artists_for_genre(
+    db: sa_async.AsyncSession, genre_mbid: str, limit: int = _GENRE_ARTIST_LIMIT
+) -> list[dict[str, Any]]:
+    """Artists carrying ``genre_mbid``, ranked "most this genre" first.
+
+    "More like this genre": every candidate carries the genre, ranked by the
+    genre-affinity of its full genre vector to the one-hot seed ``{genre_mbid: 1}``
+    -- i.e. how *central* the genre is to the artist (an artist tagged only "metal"
+    outranks one tagged metal + five others). In-library artists come first, then
+    affinity, then name -- reusing the #136 ``rank_search_candidates`` primitive so
+    the ordering matches the picker.
+
+    Note: affinity over ``genre_mbid`` vectors overlaps only on the *exact* genre,
+    so this ranks within-genre centrality, not cross-genre adjacency (that needs a
+    genre-similarity model, a later arc). The candidate set is the whole genre; for
+    a very large library this loads all its artists' tags before the limit.
+    """
+    stmt = sa.select(music_models.Artist).where(
+        sa.exists().where(
+            music_models.ArtistTag.artist_id == music_models.Artist.id,
+            music_models.ArtistTag.genre_mbid == genre_mbid,
+        )
+    )
+    candidates = list((await db.execute(stmt)).scalars().all())
+    if not candidates:
+        return []
+
+    ids = [a.id for a in candidates]
+    in_library = await artists_module.artists_in_library(db, ids)
+    tags_by_artist = await artists_module.load_artist_tags(db, ids)
+    seed_tag_lists: list[list[tuple[str | None, float]]] = [[(genre_mbid, 1.0)]]
+    ranked = artists_module.rank_search_candidates(
+        candidates, in_library, tags_by_artist, seed_tag_lists
+    )
+
+    items: list[dict[str, Any]] = []
+    for a in ranked[:limit]:
+        summary = artists_module.format_artist_summary(a)
+        summary["in_library"] = a.id in in_library
+        tags = tags_by_artist.get(a.id, [])
+        summary["genres"] = artists_module.display_genres(tags)
+        summary["genre_affinity"] = genre_module.affinity_score(
+            artists_module.genre_pairs(tags), seed_tag_lists
+        )
+        items.append(summary)
+    return items
+
+
+@router.get(
+    "/genres/{genre_mbid}/artists",
+    summary="Artists most defined by a genre",
+    description=(
+        "Artists carrying the genre, ranked by how central the genre is to each "
+        "(in-library first). The 'more like this genre' discovery view."
+    ),
+)
+async def list_genre_artists(
+    genre_mbid: str,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    limit: Annotated[int, fastapi.Query(ge=1, le=_GENRE_ARTIST_LIMIT)] = (
+        _GENRE_ARTIST_LIMIT
+    ),
+) -> dict[str, Any]:
+    items = await artists_for_genre(db, genre_mbid, limit=limit)
+    return {"items": items, "count": len(items)}

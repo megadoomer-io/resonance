@@ -455,3 +455,101 @@ class TestMultiSelectExistsField:
             )
             rows = (await db.execute(query)).scalars().all()
         assert {a.name for a in rows} == {"Ramones", "Crossover"}
+
+
+# --- "more like this genre" (artists_for_genre, real SQL) ---
+
+
+def _track(artist_id: uuid.UUID, title: str) -> music_models.Track:
+    return music_models.Track(id=uuid.uuid4(), title=title, artist_id=artist_id)
+
+
+class TestArtistsForGenre:
+    async def test_only_genre_members_and_ranked_by_centrality(self) -> None:
+        # pure > mixed: an artist tagged only metal outranks one where metal shares
+        # the profile; a non-metal artist is excluded entirely.
+        maker = await _seeded_engine()
+        async with maker() as db:
+            pure = _artist("Pure")  # metal only -> affinity 1.0
+            mixed = _artist("Mixed")  # metal dominant but shared -> < 1.0
+            minor = _artist("Minor")  # metal minor -> low affinity
+            other = _artist("Other")  # no metal -> excluded
+            db.add_all([pure, mixed, minor, other])
+            await db.flush()
+            db.add_all(
+                [
+                    _tag(pure.id, "metal", METAL, 9),
+                    _tag(mixed.id, "metal", METAL, 9),
+                    _tag(mixed.id, "punk", PUNK, 1),
+                    _tag(minor.id, "metal", METAL, 1),
+                    _tag(minor.id, "punk", PUNK, 9),
+                    _tag(other.id, "punk", PUNK, 5),
+                ]
+            )
+            await db.commit()
+            out = await taste_module.artists_for_genre(db, METAL)
+        names = [a["name"] for a in out]
+        assert names == ["Pure", "Mixed", "Minor"]  # Other excluded, centrality order
+        assert out[0]["genre_affinity"] == 1.0
+        assert out[1]["genre_affinity"] < 1.0
+
+    async def test_in_library_ranks_before_higher_affinity(self) -> None:
+        # In-library dominates affinity: a cold pure-metal artist yields to an
+        # in-library artist even with lower affinity.
+        maker = await _seeded_engine()
+        async with maker() as db:
+            cold = _artist("Cold")  # pure metal, no tracks
+            owned = _artist("Owned")  # mixed metal, has a track (in library)
+            db.add_all([cold, owned])
+            await db.flush()
+            db.add_all(
+                [
+                    _tag(cold.id, "metal", METAL, 9),
+                    _tag(owned.id, "metal", METAL, 5),
+                    _tag(owned.id, "punk", PUNK, 5),
+                    _track(owned.id, "A Song"),
+                ]
+            )
+            await db.commit()
+            out = await taste_module.artists_for_genre(db, METAL)
+        assert [a["name"] for a in out] == ["Owned", "Cold"]
+        assert out[0]["in_library"] is True
+        assert out[1]["in_library"] is False
+
+    async def test_results_carry_genres_and_affinity(self) -> None:
+        maker = await _seeded_engine()
+        async with maker() as db:
+            a = _artist("A")
+            db.add(a)
+            await db.flush()
+            db.add_all([_tag(a.id, "metal", METAL, 3), _tag(a.id, "punk", PUNK, 1)])
+            await db.commit()
+            out = await taste_module.artists_for_genre(db, METAL)
+        assert set(out[0]["genres"]) == {"metal", "punk"}
+        assert out[0]["genre_affinity"] is not None
+
+    async def test_unknown_genre_is_empty(self) -> None:
+        maker = await _seeded_engine()
+        async with maker() as db:
+            out = await taste_module.artists_for_genre(db, JAZZ)
+        assert out == []
+
+    async def test_limit_caps_results(self) -> None:
+        maker = await _seeded_engine()
+        async with maker() as db:
+            arts = [_artist(f"a{i}") for i in range(5)]
+            db.add_all(arts)
+            await db.flush()
+            db.add_all([_tag(a.id, "metal", METAL, 1) for a in arts])
+            await db.commit()
+            out = await taste_module.artists_for_genre(db, METAL, limit=2)
+        assert len(out) == 2
+
+
+class TestGenreArtistsEndpoint:
+    async def test_requires_auth(self) -> None:
+        app = _build_app(None, _FakeDB())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            resp = await c.get(f"/api/v1/taste/genres/{METAL}/artists")
+        assert resp.status_code == 401

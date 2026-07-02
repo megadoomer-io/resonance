@@ -1291,8 +1291,24 @@ def _cmd_backfill_genres() -> None:
 _TASTE_USAGE = """Usage: resonance-api taste <subcommand>
 
 Subcommands:
-  genres [--limit N]    Top genres across the library (by artist count)
+  genres [--limit N]              Top genres across the library (by artist count)
+  like <genre_mbid> [--limit N]   Artists most defined by a genre
 """
+
+
+def _taste_limit(args: list[str], default: int) -> int:
+    """Parse an optional ``--limit N`` from *args*, exiting cleanly on bad input."""
+    if "--limit" not in args:
+        return default
+    i = args.index("--limit")
+    if i + 1 >= len(args):
+        print("Error: --limit requires a value")
+        sys.exit(1)
+    try:
+        return int(args[i + 1])
+    except ValueError:
+        print(f"Error: --limit must be an integer, got '{args[i + 1]}'")
+        sys.exit(1)
 
 
 def _cmd_taste() -> None:
@@ -1302,17 +1318,7 @@ def _cmd_taste() -> None:
         return
     sub = args[0]
     if sub == "genres":
-        limit = 500
-        if "--limit" in args:
-            i = args.index("--limit")
-            if i + 1 >= len(args):
-                print("Error: --limit requires a value")
-                sys.exit(1)
-            try:
-                limit = int(args[i + 1])
-            except ValueError:
-                print(f"Error: --limit must be an integer, got '{args[i + 1]}'")
-                sys.exit(1)
+        limit = _taste_limit(args, 500)
         resp = _api_request("GET", f"/api/v1/taste/genres?limit={limit}")
         items = resp.json().get("items", [])
         if not items:
@@ -1326,6 +1332,26 @@ def _cmd_taste() -> None:
                 f"{g['label']:<{width}}  {g['artist_count']:>7}  "
                 f"{g['total_votes']:>7}  {g['genre_mbid']}"
             )
+        return
+    if sub == "like":
+        if len(args) < 2 or args[1].startswith("--"):
+            print("Usage: resonance-api taste like <genre_mbid> [--limit N]")
+            sys.exit(1)
+        genre_mbid = args[1]
+        limit = _taste_limit(args, 100)
+        resp = _api_request(
+            "GET", f"/api/v1/taste/genres/{genre_mbid}/artists?limit={limit}"
+        )
+        items = resp.json().get("items", [])
+        if not items:
+            print(f"No artists found for genre {genre_mbid}.")
+            return
+        for a in items:
+            aff = a.get("genre_affinity")
+            aff_s = f"{aff:.2f}" if aff is not None else "   -"
+            lib = "*" if a.get("in_library") else " "
+            genres = ", ".join(a.get("genres", []))
+            print(f"{aff_s} {lib} {a['name']}  [{genres}]")
         return
     print(f"Unknown taste subcommand: {sub}")
     print(_TASTE_USAGE)
