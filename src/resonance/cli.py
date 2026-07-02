@@ -1288,6 +1288,75 @@ def _cmd_backfill_genres() -> None:
     print(json.dumps(result, indent=2))
 
 
+_TASTE_USAGE = """Usage: resonance-api taste <subcommand>
+
+Subcommands:
+  genres [--limit N]              Top genres across the library (by artist count)
+  like <genre_mbid> [--limit N]   Artists most defined by a genre
+"""
+
+
+def _taste_limit(args: list[str], default: int) -> int:
+    """Parse an optional ``--limit N`` from *args*, exiting cleanly on bad input."""
+    if "--limit" not in args:
+        return default
+    i = args.index("--limit")
+    if i + 1 >= len(args):
+        print("Error: --limit requires a value")
+        sys.exit(1)
+    try:
+        return int(args[i + 1])
+    except ValueError:
+        print(f"Error: --limit must be an integer, got '{args[i + 1]}'")
+        sys.exit(1)
+
+
+def _cmd_taste() -> None:
+    args = sys.argv[2:]
+    if not args or args[0] in ("--help", "-h"):
+        print(_TASTE_USAGE)
+        return
+    sub = args[0]
+    if sub == "genres":
+        limit = _taste_limit(args, 500)
+        resp = _api_request("GET", f"/api/v1/taste/genres?limit={limit}")
+        items = resp.json().get("items", [])
+        if not items:
+            print("No genres found. Run 'resonance-api backfill-genres' first.")
+            return
+        width = max((len(g["label"]) for g in items), default=5)
+        width = max(width, len("GENRE"))
+        print(f"{'GENRE':<{width}}  {'ARTISTS':>7}  {'VOTES':>7}  MBID")
+        for g in items:
+            print(
+                f"{g['label']:<{width}}  {g['artist_count']:>7}  "
+                f"{g['total_votes']:>7}  {g['genre_mbid']}"
+            )
+        return
+    if sub == "like":
+        if len(args) < 2 or args[1].startswith("--"):
+            print("Usage: resonance-api taste like <genre_mbid> [--limit N]")
+            sys.exit(1)
+        genre_mbid = args[1]
+        limit = _taste_limit(args, 100)
+        resp = _api_request(
+            "GET", f"/api/v1/taste/genres/{genre_mbid}/artists?limit={limit}"
+        )
+        items = resp.json().get("items", [])
+        if not items:
+            print(f"No artists found for genre {genre_mbid}.")
+            return
+        for a in items:
+            aff = a.get("genre_affinity")
+            aff_s = f"{aff:.2f}" if aff is not None else "   -"
+            lib = "*" if a.get("in_library") else " "
+            genres = ", ".join(a.get("genres", []))
+            print(f"{aff_s} {lib} {a['name']}  [{genres}]")
+        return
+    print(f"Unknown taste subcommand: {sub}")
+    print(_TASTE_USAGE)
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -1308,6 +1377,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     ),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
+    "taste": ("Genre discovery & taste stats", _cmd_taste),
     "profile": ("Manage generator profiles", _cmd_profile),
     "generate": ("Generate a playlist", _cmd_generate),
     "enrich": ("Add related artists to a profile's pool", _cmd_enrich),

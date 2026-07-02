@@ -174,7 +174,7 @@ async def event_lineup(
         artist = artist_map.get(aid)
         if artist is None:
             continue
-        summary = artists_api._format_artist_summary(artist)
+        summary = artists_api.format_artist_summary(artist)
         summary["in_library"] = aid in in_library
         artists.append(summary)
 

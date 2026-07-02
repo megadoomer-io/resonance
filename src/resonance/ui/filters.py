@@ -99,6 +99,52 @@ class MultiSelectField:
 
 
 @dataclasses.dataclass
+class MultiSelectExistsField:
+    """OR-match over a *related* table via a correlated ``EXISTS ... IN (...)``.
+
+    Matches base rows that have at least one related row whose ``value_column`` is
+    among the selected values -- e.g. artists carrying ANY of the chosen genres
+    (``artist_tags.genre_mbid IN (...)``). Unlike :class:`MultiSelectField` (a bare
+    ``column.in_`` on the base table), this joins to a child table without a JOIN or
+    DISTINCT: the correlated subquery keeps the result one-row-per-base-row.
+
+    ``options`` is optional: ``None`` accepts any non-empty value (for dynamic sets
+    like genres, whose valid values live in the DB, not a fixed enum).
+    """
+
+    name: str
+    subject_column: FilterColumn  # base-table key, e.g. Artist.id
+    match_column: FilterColumn  # related FK back to the base, e.g. ArtistTag.artist_id
+    value_column: FilterColumn  # related value to match, e.g. ArtistTag.genre_mbid
+    options: list[str] | None = None
+
+    def _valid(self, value: str) -> bool:
+        return bool(value) and (self.options is None or value in self.options)
+
+    def parse(self, params: dict[str, str]) -> list[str] | None:
+        raw = params.get(self.name)
+        if raw is None or not self._valid(raw):
+            return None
+        return [raw]
+
+    def parse_multi(self, values: list[str]) -> list[str] | None:
+        valid = [v for v in values if self._valid(v)]
+        return valid or None
+
+    def apply(self, query: sa.Select[Any], value: list[str]) -> sa.Select[Any]:
+        return query.where(
+            sa.exists().where(
+                self.match_column == self.subject_column,
+                self.value_column.in_(value),
+            )
+        )
+
+    @staticmethod
+    def is_text() -> bool:
+        return False
+
+
+@dataclasses.dataclass
 class DateRangeField:
     """From/to date range filter using ``{name}_from`` and ``{name}_to``."""
 
@@ -216,8 +262,16 @@ class ExistsField:
 # ---------------------------------------------------------------------------
 
 AnyFilterField = (
-    TextField | MultiSelectField | DateRangeField | NumericRangeField | ExistsField
+    TextField
+    | MultiSelectField
+    | MultiSelectExistsField
+    | DateRangeField
+    | NumericRangeField
+    | ExistsField
 )
+
+# Field types that consume repeated (multi-value) query params via ``getlist``.
+_MULTI_VALUE_FIELDS = (MultiSelectField, MultiSelectExistsField)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +310,7 @@ def parse_filter_params(
     """
     result = AppliedFilters()
     for field in fields:
-        if isinstance(field, MultiSelectField) and multi_params:
+        if isinstance(field, _MULTI_VALUE_FIELDS) and multi_params:
             values = multi_params.get(field.name)
             if values:
                 parsed = field.parse_multi(values)

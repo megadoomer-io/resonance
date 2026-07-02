@@ -57,7 +57,7 @@ async def artists_in_library(
     return set(result.scalars().all())
 
 
-def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
+def format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
     return {
         "id": str(artist.id),
         "name": artist.name,
@@ -71,7 +71,7 @@ def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
     }
 
 
-async def _load_artist_tags(
+async def load_artist_tags(
     db: sa_async.AsyncSession, artist_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, list[music_models.ArtistTag]]:
     """Batch-load ArtistTag rows for the given artists (one query, no N+1)."""
@@ -88,14 +88,14 @@ async def _load_artist_tags(
     return out
 
 
-def _genre_pairs(
+def genre_pairs(
     tags: list[music_models.ArtistTag],
 ) -> list[tuple[str | None, float]]:
     """Adapt ArtistTag rows to the affinity primitive's (genre_mbid, count) pairs."""
     return [(t.genre_mbid, float(t.count)) for t in tags]
 
 
-def _display_genres(tags: list[music_models.ArtistTag]) -> list[str]:
+def display_genres(tags: list[music_models.ArtistTag]) -> list[str]:
     """Top canonical-genre tag names by count, for picker disambiguation."""
     genres = sorted(
         (t for t in tags if t.genre_mbid),
@@ -136,7 +136,7 @@ def rank_search_candidates(
     for a in candidates:
         score = (
             genre_module.affinity_score(
-                _genre_pairs(tags_by_artist.get(a.id, [])), seed_tag_lists
+                genre_pairs(tags_by_artist.get(a.id, [])), seed_tag_lists
             )
             if seed_tag_lists
             else None
@@ -156,13 +156,18 @@ def rank_search_candidates(
 @router.get(
     "",
     summary="List artists",
-    description="Paginated list of artists, alphabetical by name.",
+    description=(
+        "Paginated list of artists, alphabetical by name. Optionally filtered by "
+        "genre (``genre_mbid``, repeatable -- an artist matches if it carries ANY "
+        "of the given genres). Each result carries its top canonical genres."
+    ),
 )
 async def list_artists(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     page: int = 1,
     q: str | None = None,
+    genre_mbid: Annotated[list[str] | None, fastapi.Query()] = None,
 ) -> dict[str, Any]:
     offset = (page - 1) * _PAGE_SIZE
 
@@ -170,6 +175,17 @@ async def list_artists(
 
     if q:
         stmt = stmt.where(music_models.Artist.name.ilike(f"%{_escape_ilike(q)}%"))
+
+    if genre_mbid:
+        # OR-match: the artist has at least one tag in the selected genres. A
+        # correlated EXISTS (not a JOIN) keeps the row set one-per-artist without a
+        # DISTINCT, and hits ix_artist_tags_genre_mbid.
+        stmt = stmt.where(
+            sa.exists().where(
+                music_models.ArtistTag.artist_id == music_models.Artist.id,
+                music_models.ArtistTag.genre_mbid.in_(genre_mbid),
+            )
+        )
 
     stmt = stmt.offset(offset).limit(_PAGE_SIZE + 1)
 
@@ -179,8 +195,15 @@ async def list_artists(
     has_next = len(artists) > _PAGE_SIZE
     artists = artists[:_PAGE_SIZE]
 
+    tags_by_artist = await load_artist_tags(db, [a.id for a in artists])
+    items = []
+    for a in artists:
+        summary = format_artist_summary(a)
+        summary["genres"] = display_genres(tags_by_artist.get(a.id, []))
+        items.append(summary)
+
     return {
-        "items": [_format_artist_summary(a) for a in artists],
+        "items": items,
         "page": page,
         "page_size": _PAGE_SIZE,
         "has_next": has_next,
@@ -243,9 +266,9 @@ async def search_artists(
 
     # Batch-load genre tags for candidates + seeds in one query each (no N+1).
     seed_ids = list(seed_artist_ids or [])
-    tags_by_artist = await _load_artist_tags(db, [a.id for a in candidates] + seed_ids)
+    tags_by_artist = await load_artist_tags(db, [a.id for a in candidates] + seed_ids)
     seed_tag_lists = [
-        _genre_pairs(tags_by_artist.get(sid, []))
+        genre_pairs(tags_by_artist.get(sid, []))
         for sid in seed_ids
         if tags_by_artist.get(sid)
     ]
@@ -256,9 +279,9 @@ async def search_artists(
 
     items = []
     for a in ranked[:limit]:  # limit is bounded to [1, cap] by the Query gate
-        summary = _format_artist_summary(a)
+        summary = format_artist_summary(a)
         summary["in_library"] = a.id in in_library
-        summary["genres"] = _display_genres(tags_by_artist.get(a.id, []))
+        summary["genres"] = display_genres(tags_by_artist.get(a.id, []))
         items.append(summary)
     return {"items": items}
 
@@ -570,7 +593,7 @@ async def import_artist(
     existing = await _find_local_artist_by_mbid(db, body.mbid)
     if existing is not None:
         log.info("artist_import_existing", artist_id=str(existing.id))
-        return _format_artist_summary(existing)
+        return format_artist_summary(existing)
 
     # Build service_links
     service_links: dict[str, Any] = {
@@ -593,7 +616,7 @@ async def import_artist(
     await db.commit()
 
     log.info("artist_imported", artist_id=str(artist.id), created=True)
-    return _format_artist_summary(artist)
+    return format_artist_summary(artist)
 
 
 @router.get(

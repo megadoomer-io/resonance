@@ -324,7 +324,7 @@ async def _hydrate_lineup(
             sa.select(music_models.Artist).where(music_models.Artist.id.in_(wanted))
         )
         for artist in artist_result.scalars().all():
-            summaries[artist.id] = artists_api._format_artist_summary(artist)
+            summaries[artist.id] = artists_api.format_artist_summary(artist)
 
     def row(aid: uuid.UUID) -> dict[str, object] | None:
         s = summaries.get(aid)
