@@ -480,6 +480,88 @@ async def admin_backfill_popularity_coverage_endpoint(
     return await get_popularity_coverage(db)
 
 
+async def get_genre_coverage(db: sa_async.AsyncSession) -> dict[str, object]:
+    """Genre-tag backfill coverage over MBID-bearing artists (#136).
+
+    ``mb_linked`` is how many artists carry a MusicBrainz artist MBID at
+    ``service_links["musicbrainz"]["id"]`` (the backfill candidate set);
+    ``attempted`` is how many of those have ``genre_attempted_at`` set; ``with_tags``
+    is how many have at least one ArtistTag row. The gap between ``attempted`` and
+    ``with_tags`` is the "attempted, no tags" set (genuinely tag-less on MB),
+    distinct from the unattempted remainder (``mb_linked - attempted``).
+    """
+    mb_link = music_models.Artist.service_links["musicbrainz"]["id"].as_string()
+    linked = await db.scalar(
+        sa.select(sa.func.count())
+        .select_from(music_models.Artist)
+        .where(mb_link.isnot(None))
+    )
+    attempted = await db.scalar(
+        sa.select(sa.func.count())
+        .select_from(music_models.Artist)
+        .where(
+            mb_link.isnot(None),
+            music_models.Artist.genre_attempted_at.isnot(None),
+        )
+    )
+    with_tags = await db.scalar(
+        sa.select(sa.func.count(sa.distinct(music_models.ArtistTag.artist_id)))
+        .select_from(music_models.ArtistTag)
+        .join(
+            music_models.Artist,
+            music_models.Artist.id == music_models.ArtistTag.artist_id,
+        )
+        .where(mb_link.isnot(None))
+    )
+    return {
+        "mb_linked": linked or 0,
+        "attempted": attempted or 0,
+        "with_tags": with_tags or 0,
+    }
+
+
+@router.post(
+    "/backfill-genres",
+    summary="Enqueue artist genre-tag backfill",
+)
+async def admin_backfill_genres_endpoint(
+    request: fastapi.Request,
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, str]:
+    """Enqueue a GENRE_BACKFILL task (#136).
+
+    Fetches MusicBrainz genre/folksonomy tags for every MBID-bearing artist from
+    ListenBrainz's public artist metadata endpoint and stores them in artist_tags.
+    """
+    task = task_models.Task(
+        task_type=types_module.TaskType.GENRE_BACKFILL,
+        status=types_module.SyncStatus.PENDING,
+        params={},
+        description="Genre Backfill",
+    )
+    db.add(task)
+    await db.commit()
+    task_id = str(task.id)
+
+    arq_redis = request.app.state.arq_redis
+    await arq_redis.enqueue_job(
+        "backfill_genres",
+        task_id,
+        _job_id=f"genre-backfill:{task_id}",
+    )
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.get(
+    "/backfill-genres",
+    summary="Artist genre-tag backfill coverage",
+)
+async def admin_backfill_genres_coverage_endpoint(
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_genre_coverage(db)
+
+
 # ---------------------------------------------------------------------------
 # Legacy endpoints
 # ---------------------------------------------------------------------------

@@ -90,6 +90,7 @@ class TaskType(enum.StrEnum):
     MBID_BACKFILL = "mbid_backfill"
     POPULARITY_BACKFILL = "popularity_backfill"
     RELATED_ARTIST_ENRICHMENT = "related_artist_enrichment"
+    GENRE_BACKFILL = "genre_backfill"
 
 
 class SyncStatus(enum.StrEnum):

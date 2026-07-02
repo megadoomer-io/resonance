@@ -44,7 +44,8 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import math
-from typing import TYPE_CHECKING, Any
+import uuid
+from typing import Any
 
 import httpx
 import sqlalchemy as sa
@@ -55,12 +56,10 @@ import resonance.config as config_module
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.models.music as music_module
 import resonance.normalize as normalize_module
+import resonance.services.artist_tags as artist_tags_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mapper_module
 import resonance.types as types_module
-
-if TYPE_CHECKING:
-    import uuid
 
 logger = structlog.get_logger()
 
@@ -414,6 +413,132 @@ async def run_popularity_backfill(
         await session.commit()
 
     logger.info("popularity_backfill_done", **dataclasses.asdict(counts))
+    return counts
+
+
+@dataclasses.dataclass
+class GenreBackfillCounts:
+    """Outcome tally for a ListenBrainz artist-tag (genre) backfill run."""
+
+    candidates: int = 0
+    updated: int = 0
+    no_tags: int = 0
+    transient: int = 0
+
+
+def _is_valid_mbid(mbid: str) -> bool:
+    """True if ``mbid`` parses as a UUID.
+
+    The LB artist endpoint returns HTTP 400 (a hard error) if ANY MBID in the
+    batch is malformed, which would poison the whole batch. We validate before the
+    fetch and exclude bad MBIDs (they get stamped attempted-no-tags instead), so a
+    single garbage MBID from a prior import can't stall forward progress.
+    """
+    try:
+        uuid.UUID(str(mbid))
+    except ValueError, TypeError, AttributeError:
+        return False
+    return True
+
+
+async def run_genre_backfill(
+    session: Any,
+    settings: config_module.Settings,
+    client: artist_tags_module.ArtistTagsClient,
+) -> GenreBackfillCounts:
+    """Backfill artist genre/folksonomy tags from the ListenBrainz artist endpoint.
+
+    Candidates are artists that carry a MusicBrainz artist MBID
+    (``service_links["musicbrainz"]["id"]``) and have not been attempted
+    (``genre_attempted_at IS NULL``) -- the resume key, mirroring the MBID
+    backfill. Artists without a canonical MBID are simply not candidates; they
+    become candidates once the MBID backfill canonicalizes them, so they are left
+    unattempted rather than stamped.
+
+    Each batch fetches tags for its MBIDs in one call and wholesale-replaces each
+    artist's ``ArtistTag`` rows, then stamps ``genre_attempted_at`` -- all in the
+    per-batch transaction, and only on a successful fetch. A transient endpoint
+    failure raises ``ArtistTagsUnavailableError``; the batch is left unattempted
+    (retried next run) instead of recording a false "no tags".
+
+    Tags with a non-NULL ``genre_mbid`` are canonical MusicBrainz genres; free
+    folksonomy tags (NULL) are stored too, so genre-vs-noise filtering stays a
+    read-time decision on durable data.
+    """
+    counts = GenreBackfillCounts()
+    # Canonical MB artist MBID present (the dominant location get_mbid returns);
+    # this bounds candidates and gives clean resume without re-scanning no-MBID
+    # artists each run.
+    mb_id = music_module.Artist.service_links["musicbrainz"]["id"].as_string()
+    while True:
+        stmt = (
+            sa.select(music_module.Artist)
+            .where(
+                music_module.Artist.genre_attempted_at.is_(None),
+                mb_id.isnot(None),
+            )
+            .limit(settings.mbid_mapper_batch_size)
+        )
+        artists = list((await session.execute(stmt)).scalars().all())
+        if not artists:
+            break
+
+        by_mbid: dict[str, list[music_module.Artist]] = {}
+        for artist in artists:
+            mbid = artist_utils.get_mbid(artist.service_links)
+            # Only fetch valid-UUID MBIDs. A malformed MBID would 400 the whole
+            # batch; excluding it here means the fetch sees only clean input and
+            # that artist falls through to attempted-no-tags below.
+            if mbid and _is_valid_mbid(mbid):
+                by_mbid.setdefault(mbid, []).append(artist)
+
+        if not by_mbid:
+            # No artist in this batch had a usable (valid-UUID) MBID despite the
+            # SQL filter (legacy-only shape, or a malformed id) -- stamp them
+            # attempted so the scan makes progress instead of looping.
+            for artist in artists:
+                artist.genre_attempted_at = _now()
+                counts.candidates += 1
+                counts.no_tags += 1
+            await session.commit()
+            continue
+
+        try:
+            tags_by_mbid = await client.fetch_tags(list(by_mbid.keys()))
+        except artist_tags_module.ArtistTagsUnavailableError:
+            logger.warning("genre_backfill_unavailable", batch=len(artists))
+            counts.transient += len(artists)
+            break  # leave the rest unattempted; retried next run
+
+        for artist in artists:
+            counts.candidates += 1
+            mbid = artist_utils.get_mbid(artist.service_links)
+            results = tags_by_mbid.get(mbid, []) if mbid else []
+            # Wholesale-replace this artist's tags.
+            await session.execute(
+                sa.delete(music_module.ArtistTag).where(
+                    music_module.ArtistTag.artist_id == artist.id
+                )
+            )
+            for res in results:
+                session.add(
+                    music_module.ArtistTag(
+                        artist_id=artist.id,
+                        tag=res.tag,
+                        genre_mbid=res.genre_mbid,
+                        count=max(0, res.count),
+                        source="musicbrainz",
+                    )
+                )
+            artist.genre_attempted_at = _now()
+            if results:
+                counts.updated += 1
+            else:
+                counts.no_tags += 1
+
+        await session.commit()
+
+    logger.info("genre_backfill_done", **dataclasses.asdict(counts))
     return counts
 
 
