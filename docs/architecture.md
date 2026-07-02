@@ -123,6 +123,48 @@ Unique constraint: `(user_id, service_type, external_user_id)`.
 | duration_ms | Integer | Nullable |
 | service_links | JSON | Nullable. Maps ServiceType value to external ID |
 
+### ArtistTag
+
+Genre / folksonomy tags for an artist (the genre model, #136). Durable domain
+data, **not** a cache -- mirrors `ArtistSimilarity`. Each row records that
+`source` (default MusicBrainz, fetched via the ListenBrainz artist metadata
+endpoint) reports `tag` on the artist with folksonomy `count`. `genre_mbid` is
+non-NULL only for canonical MusicBrainz *genres* (e.g. "death metal"); it is NULL
+for free folksonomy tags ("seen live"), so genre-vs-noise filtering is
+data-driven. See [Genre Model & Discovery](#genre-model--discovery).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| artist_id | UUID FK | References artists (CASCADE) |
+| tag | String(256) | Tag / genre name (display label) |
+| genre_mbid | String(64) | Nullable; non-NULL only for canonical genres |
+| count | Integer | Folksonomy vote count (CHECK >= 0) |
+| source | String(64) | Tag taxonomy origin, default `musicbrainz` |
+| fetched_at | DateTime(tz) | Drives refresh-if-old, not eviction |
+
+Unique constraint: `(artist_id, tag)`. Partial index on `genre_mbid`
+`WHERE genre_mbid IS NOT NULL` (serves the genre-discovery queries). Artists also
+carry a `genre_attempted_at` timestamp (the backfill resume marker).
+
+### ArtistSimilarity
+
+Directed artist->neighbor similarity edges from a connector (#133). Durable data,
+not a cache. The neighbor is stored by name + MBID (not an FK) because it may not
+be imported as an Artist yet.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| source_artist_id | UUID FK | References artists (CASCADE) |
+| connector | ServiceType enum | Which connector reported the edge |
+| neighbor_name | String(512) | |
+| neighbor_mbid | String(64) | Nullable |
+| rank | Integer | Similarity rank from the connector |
+| fetched_at | DateTime(tz) | Drives refresh-if-old, not eviction |
+
+Unique constraint: `(source_artist_id, connector, neighbor_name)`.
+
 ### ListeningEvent
 
 | Column | Type | Notes |
@@ -175,7 +217,7 @@ operations, and other async work. Tasks form a hierarchy via `parent_id`.
 | user_id | UUID FK | Nullable (bulk jobs may have no user) |
 | service_connection_id | UUID FK | Nullable |
 | parent_id | UUID FK | Self-referential, nullable |
-| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync`, `concert_archives_import`, `concert_archives_chunk`, `playlist_generation`, `track_discovery`, `track_scoring`, `playlist_export`, `mbid_backfill` |
+| task_type | TaskType enum | `sync_job`, `time_range`, `page_fetch`, `bulk_job`, `calendar_sync`, `concert_archives_import`, `concert_archives_chunk`, `playlist_generation`, `track_discovery`, `track_scoring`, `playlist_export`, `mbid_backfill`, `genre_backfill`, `related_artist_enrichment` |
 | status | SyncStatus enum | `pending`, `running`, `completed`, `failed`, `deferred` |
 | params | JSON | Task-specific parameters |
 | result | JSON | Task output on completion |
@@ -666,6 +708,57 @@ call needed.
 
 ---
 
+## Genre Model & Discovery
+
+The genre model (#136 Arc 1) gives artists a data-driven genre profile and a
+shared affinity primitive; genre discovery (#154 Arc 2) is the read layer built
+on top of it.
+
+### Genre data
+
+`GENRE_BACKFILL` (a `BULK_JOB`) fetches MusicBrainz tags for every MBID-linked
+artist via the ListenBrainz artist-metadata endpoint and stores them as
+`ArtistTag` rows. Only canonical genres carry a `genre_mbid`; free folksonomy
+tags leave it NULL, so "is this a genre?" is a data property, not a stoplist.
+`genre_attempted_at` on the artist is the resume marker (NULL = not yet tried;
+set with zero tags = genuinely tag-less on MusicBrainz).
+
+### Affinity primitive
+
+`generators/genre.py` is a pure, I/O-free core (the shared seam every consumer
+plugs into). An artist's genre profile is a sparse vector keyed by `genre_mbid`
+with folksonomy `count` weights. `affinity_score(candidate_tags, seed_tag_lists)`
+returns the cosine of the candidate vector against the aggregated seed profile,
+where each seed vector is L2-normalized **before** aggregation (so one heavily
+tagged seed can't dominate). It returns `None` when there's no basis to compare
+(no canonical-genre tags on either side), kept distinct from a genuine `0.0`
+mismatch. Affinity over `genre_mbid` vectors overlaps only on the *exact* genre;
+cross-genre adjacency (a genre-similarity model) is a later arc.
+
+### Discovery surfaces
+
+All read-only, API-first (`/api/v1/taste`, mirrored by `resonance-api taste`),
+library-wide (single-tenant):
+
+- **Top genres** (`GET /api/v1/taste/genres`) -- canonical genres ranked by
+  distinct-artist count, with a summed tag-vote weight and a representative label
+  per `genre_mbid`. One aggregation serves both the taste-stats view and the
+  genre-browse filter's option list.
+- **Browse / filter** (`GET /api/v1/artists?genre_mbid=...`, repeatable) --
+  OR-match artists carrying any of the selected genres via a correlated
+  `EXISTS ... IN` (no JOIN/DISTINCT). In the UI this is a reusable
+  `MultiSelectExistsField` on the artist filter bar.
+- **More like this genre** (`GET /api/v1/taste/genres/{genre_mbid}/artists`) --
+  artists carrying the genre, ranked by how *central* it is to each (one-hot
+  affinity seed), in-library first -- reusing the #136 `rank_search_candidates`
+  ordering.
+
+The artist-disambiguation picker (`GET /api/v1/artists/search`) also uses the
+affinity primitive: given `seed_artist_ids`, same-name candidates are ranked by
+genre affinity to the seeds (the original #136 use case).
+
+---
+
 ## API Layer
 
 ### Route Groups
@@ -680,7 +773,8 @@ All API routes are versioned under `/api/v1/`:
 | `/api/v1/admin` | `admin.py` | Admin operations (test service connect) |
 | `/api/v1/generator-profiles` | `generators.py` | CRUD profiles, trigger generation |
 | `/api/v1/playlists` | `playlists.py` | List, detail, diff, export playlists |
-| `/api/v1/artists` | `artists.py` | Artist list / detail |
+| `/api/v1/artists` | `artists.py` | Artist list / detail (genre filter, disambiguation search) |
+| `/api/v1/taste` | `taste.py` | Genre discovery: top genres, "more like this genre" |
 | `/api/v1/tracks` | `tracks.py` | Track list / detail |
 | `/api/v1/events` | `events.py` | Event list / detail, artist candidates |
 | `/api/v1/venues` | `venues.py` | Venue list / detail |

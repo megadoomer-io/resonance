@@ -19,6 +19,8 @@ digraph data_model {
     users -> generator_profiles    [label="owns"];
     users -> sync_tasks            [label="runs"];
     artists -> tracks              [label="by"];
+    artists -> artist_tags         [label="tagged with"];
+    artists -> artist_similarities [label="similar to"];
     tracks -> listening_events     [label="played in"];
     tracks -> playlist_tracks      [label="appears in"];
     artists -> user_artist_relations [label="target of"];
