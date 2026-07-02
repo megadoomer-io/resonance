@@ -14,6 +14,7 @@ import structlog
 import resonance.connectors.base as base_module
 import resonance.crypto as crypto_module
 import resonance.dependencies as deps_module
+import resonance.generators.genre as genre_module
 import resonance.models.music as music_models
 import resonance.models.user as user_models
 import resonance.services.artist_import as artist_import_module
@@ -22,6 +23,11 @@ import resonance.types as types_module
 logger = structlog.get_logger()
 
 _PAGE_SIZE = 50
+# Widen the name-match candidate pool before ranking so the right artist can't
+# fall outside the returned window just for being alphabetically later (#136).
+_SEARCH_CANDIDATE_CAP = 50
+# How many genre names to surface in a picker result for disambiguation.
+_DISPLAY_GENRES = 3
 
 router = fastapi.APIRouter(prefix="/artists", tags=["artists"])
 
@@ -63,6 +69,88 @@ def _format_artist_summary(artist: music_models.Artist | Any) -> dict[str, Any]:
         "end_year": getattr(artist, "end_year", None),
         "service_links": artist.service_links,
     }
+
+
+async def _load_artist_tags(
+    db: sa_async.AsyncSession, artist_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[music_models.ArtistTag]]:
+    """Batch-load ArtistTag rows for the given artists (one query, no N+1)."""
+    if not artist_ids:
+        return {}
+    result = await db.execute(
+        sa.select(music_models.ArtistTag).where(
+            music_models.ArtistTag.artist_id.in_(artist_ids)
+        )
+    )
+    out: dict[uuid.UUID, list[music_models.ArtistTag]] = {}
+    for tag in result.scalars().all():
+        out.setdefault(tag.artist_id, []).append(tag)
+    return out
+
+
+def _genre_pairs(
+    tags: list[music_models.ArtistTag],
+) -> list[tuple[str | None, float]]:
+    """Adapt ArtistTag rows to the affinity primitive's (genre_mbid, count) pairs."""
+    return [(t.genre_mbid, float(t.count)) for t in tags]
+
+
+def _display_genres(tags: list[music_models.ArtistTag]) -> list[str]:
+    """Top canonical-genre tag names by count, for picker disambiguation."""
+    genres = sorted(
+        (t for t in tags if t.genre_mbid),
+        key=lambda t: t.count,
+        reverse=True,
+    )
+    return [t.tag for t in genres[:_DISPLAY_GENRES]]
+
+
+def _genre_sort_value(affinity: float | None) -> float:
+    """Rank key from an affinity score, keeping unknown distinct from mismatch.
+
+    Positive overlap ranks highest (its value), an unknown-genre candidate
+    (``None``) is neutral at 0.0, and a confirmed 0.0 genre mismatch sinks below
+    neutral -- so an untagged possible-match is never tied below a known off-genre
+    artist (#136 / affinity primitive finding).
+    """
+    if affinity is None:
+        return 0.0
+    if affinity == 0.0:
+        return -1.0
+    return affinity
+
+
+def rank_search_candidates(
+    candidates: list[music_models.Artist | Any],
+    in_library: set[uuid.UUID],
+    tags_by_artist: dict[uuid.UUID, list[music_models.ArtistTag]],
+    seed_tag_lists: list[list[tuple[str | None, float]]],
+) -> list[music_models.Artist | Any]:
+    """Order name-match candidates for disambiguation (#136). Pure, no I/O.
+
+    In-library artists first, then higher genre affinity to the seed set, then
+    name A-Z. Affinity is computed only when there is a seed set; otherwise every
+    candidate is genre-neutral and the order is in-library-then-name.
+    """
+    affinity_sort: dict[uuid.UUID, float] = {}
+    for a in candidates:
+        score = (
+            genre_module.affinity_score(
+                _genre_pairs(tags_by_artist.get(a.id, [])), seed_tag_lists
+            )
+            if seed_tag_lists
+            else None
+        )
+        affinity_sort[a.id] = _genre_sort_value(score)
+
+    return sorted(
+        candidates,
+        key=lambda a: (
+            a.id not in in_library,
+            -affinity_sort[a.id],
+            a.name.lower(),
+        ),
+    )
 
 
 @router.get(
@@ -108,21 +196,69 @@ async def search_artists(
     q: str,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
-    limit: int = 10,
+    limit: Annotated[int, fastapi.Query(ge=1, le=_SEARCH_CANDIDATE_CAP)] = 10,
+    seed_artist_ids: Annotated[list[uuid.UUID] | None, fastapi.Query()] = None,
 ) -> dict[str, Any]:
-    stmt = (
-        sa.select(music_models.Artist)
-        .where(music_models.Artist.name.ilike(f"%{_escape_ilike(q)}%"))
-        .order_by(music_models.Artist.name)
-        .limit(min(limit, 50))
+    """Search artists by name, ranked for disambiguation (#136).
+
+    Candidates are all exact-name matches (never truncated -- the literal
+    same-name collision like two artists named "Nite" is the core #136 case) plus
+    a capped alphabetical pool of substring matches. They are then ranked so the
+    artist the user most likely means surfaces first:
+
+    1. In-library artists (we have their tracks) beat cold same-name matches.
+    2. Then genre affinity to ``seed_artist_ids`` (the artists already in the
+       builder) -- e.g. metal seeds prefer the metal "Nite" over the electronic
+       one. Unknown-genre stays neutral; a confirmed off-genre match sinks.
+    3. Then name, for a stable order.
+
+    Each result carries ``genres`` (top canonical genres) so two same-name artists
+    are visually distinguishable in the picker.
+    """
+    q_clean = q.strip()
+    # Exact-name matches are never dropped by the cap (the same-name collision is
+    # exactly what #136 is about); the substring pool is capped alphabetically and
+    # ranked around them.
+    exact_stmt = sa.select(music_models.Artist).where(
+        sa.func.lower(music_models.Artist.name) == q_clean.lower()
     )
-    result = await db.execute(stmt)
-    artists = list(result.scalars().all())
-    in_library = await artists_in_library(db, [a.id for a in artists])
+    sub_stmt = (
+        sa.select(music_models.Artist)
+        .where(music_models.Artist.name.ilike(f"%{_escape_ilike(q_clean)}%"))
+        .order_by(music_models.Artist.name)
+        .limit(_SEARCH_CANDIDATE_CAP)
+    )
+    exact = list((await db.execute(exact_stmt)).scalars().all())
+    substring = list((await db.execute(sub_stmt)).scalars().all())
+    # Merge exact-first, dedup by id (exact rows are a subset of substring but may
+    # sit past the alphabetical cap).
+    seen: set[uuid.UUID] = set()
+    candidates: list[music_models.Artist] = []
+    for a in (*exact, *substring):
+        if a.id not in seen:
+            seen.add(a.id)
+            candidates.append(a)
+
+    in_library = await artists_in_library(db, [a.id for a in candidates])
+
+    # Batch-load genre tags for candidates + seeds in one query each (no N+1).
+    seed_ids = list(seed_artist_ids or [])
+    tags_by_artist = await _load_artist_tags(db, [a.id for a in candidates] + seed_ids)
+    seed_tag_lists = [
+        _genre_pairs(tags_by_artist.get(sid, []))
+        for sid in seed_ids
+        if tags_by_artist.get(sid)
+    ]
+
+    ranked = rank_search_candidates(
+        candidates, in_library, tags_by_artist, seed_tag_lists
+    )
+
     items = []
-    for a in artists:
+    for a in ranked[:limit]:  # limit is bounded to [1, cap] by the Query gate
         summary = _format_artist_summary(a)
         summary["in_library"] = a.id in in_library
+        summary["genres"] = _display_genres(tags_by_artist.get(a.id, []))
         items.append(summary)
     return {"items": items}
 

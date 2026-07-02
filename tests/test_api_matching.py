@@ -261,6 +261,44 @@ class TestArtistSearch:
         assert len(data["items"]) == 1
         assert data["items"][0]["name"] == "The Red Pears"
 
+    async def test_accepts_seed_ids_and_returns_genres(
+        self, user_id: uuid.UUID
+    ) -> None:
+        # The #136 wiring contract: the seed_artist_ids query param binds (no 422)
+        # and each result carries a `genres` list for picker disambiguation.
+        artist = _make_artist(name="Nite")
+        tag = SimpleNamespace(
+            artist_id=artist.id, tag="black metal", genre_mbid="g1", count=9
+        )
+        db = FakeAsyncSession()
+        # Query order: exact-name, substring, in-library, tags.
+        db.set_results(
+            [
+                FakeResult([artist]),
+                FakeResult([]),
+                FakeResult([]),
+                FakeResult([tag]),
+            ]
+        )
+
+        app = _create_app(user_id, db)
+        settings = _make_settings()
+        cookie = _make_session_cookie(settings.session_secret_key)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={"session_id": cookie},
+        ) as c:
+            resp = await c.get(
+                f"/api/v1/artists/search?q=Nite&seed_artist_ids={uuid.uuid4()}"
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"][0]["name"] == "Nite"
+        assert data["items"][0]["genres"] == ["black metal"]
+
     async def test_requires_q_param(self, authed_client: httpx.AsyncClient) -> None:
         resp = await authed_client.get("/api/v1/artists/search")
         assert resp.status_code == 422
