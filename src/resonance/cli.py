@@ -1288,6 +1288,49 @@ def _cmd_backfill_genres() -> None:
     print(json.dumps(result, indent=2))
 
 
+_TASTE_USAGE = """Usage: resonance-api taste <subcommand>
+
+Subcommands:
+  genres [--limit N]    Top genres across the library (by artist count)
+"""
+
+
+def _cmd_taste() -> None:
+    args = sys.argv[2:]
+    if not args or args[0] in ("--help", "-h"):
+        print(_TASTE_USAGE)
+        return
+    sub = args[0]
+    if sub == "genres":
+        limit = 500
+        if "--limit" in args:
+            i = args.index("--limit")
+            if i + 1 >= len(args):
+                print("Error: --limit requires a value")
+                sys.exit(1)
+            try:
+                limit = int(args[i + 1])
+            except ValueError:
+                print(f"Error: --limit must be an integer, got '{args[i + 1]}'")
+                sys.exit(1)
+        resp = _api_request("GET", f"/api/v1/taste/genres?limit={limit}")
+        items = resp.json().get("items", [])
+        if not items:
+            print("No genres found. Run 'resonance-api backfill-genres' first.")
+            return
+        width = max((len(g["label"]) for g in items), default=5)
+        width = max(width, len("GENRE"))
+        print(f"{'GENRE':<{width}}  {'ARTISTS':>7}  {'VOTES':>7}  MBID")
+        for g in items:
+            print(
+                f"{g['label']:<{width}}  {g['artist_count']:>7}  "
+                f"{g['total_votes']:>7}  {g['genre_mbid']}"
+            )
+        return
+    print(f"Unknown taste subcommand: {sub}")
+    print(_TASTE_USAGE)
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -1308,6 +1351,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     ),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),
+    "taste": ("Genre discovery & taste stats", _cmd_taste),
     "profile": ("Manage generator profiles", _cmd_profile),
     "generate": ("Generate a playlist", _cmd_generate),
     "enrich": ("Add related artists to a profile's pool", _cmd_enrich),

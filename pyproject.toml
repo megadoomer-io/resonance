@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "aiosqlite>=0.20",
     "mypy>=1.15",
     "pre-commit>=4.2",
     "pytest>=8.0",
