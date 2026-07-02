@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   addEventGroup,
   addManualArtist,
+  allArtistIds,
   artistMeta,
   escapeHtml,
   groupKey,
@@ -37,6 +38,28 @@ describe("artistMeta", () => {
   it("omits empty fields", () => {
     expect(artistMeta({ area: "US" })).toBe("US");
     expect(artistMeta({})).toBe("");
+  });
+  it("leads with genres when present", () => {
+    expect(artistMeta({ genres: ["black metal", "thrash"], area: "NO" })).toBe(
+      "black metal, thrash · NO"
+    );
+  });
+  it("ignores an empty genres list", () => {
+    expect(artistMeta({ genres: [], area: "US" })).toBe("US");
+  });
+});
+
+describe("allArtistIds", () => {
+  it("collects ids across all groups", () => {
+    const groups = [
+      { artists: [{ id: "a" }, { id: "b" }] },
+      { artists: [] },
+      { artists: [{ id: "c" }] },
+    ];
+    expect(allArtistIds(groups)).toEqual(["a", "b", "c"]);
+  });
+  it("is empty for no artists", () => {
+    expect(allArtistIds([{ artists: [] }])).toEqual([]);
   });
 });
 

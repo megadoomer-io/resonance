@@ -84,6 +84,7 @@ Commands:
   dedup <type> [--no-wait]     Run deduplication
   backfill-mbids [opts]        Backfill MusicBrainz MBIDs (#71)
   backfill-popularity [opts]   Backfill ListenBrainz popularity
+  backfill-genres [opts]       Backfill artist genre tags (#136)
   task <task_id>               Check task status
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
@@ -1254,6 +1255,39 @@ def _cmd_backfill_popularity() -> None:
     print(json.dumps(result, indent=2))
 
 
+_GENRE_BACKFILL_USAGE = """\
+Usage: resonance-api backfill-genres [opts]
+
+Options:
+  --status       Show coverage (mb-linked / attempted / with-tags), do not enqueue
+  --no-wait      Enqueue and return immediately (don't poll)
+
+Fetches MusicBrainz genre/folksonomy tags for every MBID-bearing artist from
+ListenBrainz's public artist metadata endpoint and stores them in artist_tags.
+Default polls the task to completion and prints the updated/no-tags counts.
+"""
+
+
+def _cmd_backfill_genres() -> None:
+    args = sys.argv[2:]
+    if "--help" in args or "-h" in args:
+        print(_GENRE_BACKFILL_USAGE)
+        return
+    if "--status" in args:
+        resp = _api_request("GET", "/api/v1/admin/backfill-genres")
+        print(json.dumps(resp.json(), indent=2))
+        return
+
+    resp = _api_request("POST", "/api/v1/admin/backfill-genres")
+    task_id = resp.json().get("task_id", "")
+
+    if "--no-wait" in args:
+        print(f"backfill-genres: task {task_id}")
+        return
+    result = _poll_task(task_id, "Backfilling genres")
+    print(json.dumps(result, indent=2))
+
+
 _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "healthz": ("Health + deployed revision", _cmd_healthz),
     "status": ("Recent sync job overview", _cmd_status),
@@ -1267,6 +1301,10 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "backfill-popularity": (
         "Backfill ListenBrainz popularity",
         _cmd_backfill_popularity,
+    ),
+    "backfill-genres": (
+        "Backfill artist genre tags",
+        _cmd_backfill_genres,
     ),
     "task": ("Check task status", _cmd_task),
     "track": ("Search tracks by title", _cmd_track),

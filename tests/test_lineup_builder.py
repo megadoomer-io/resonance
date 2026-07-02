@@ -285,8 +285,10 @@ class TestArtistSearchInLibrary:
         db = FakeAsyncSession()
         db.set_results(
             [
-                FakeResult([nite_metal, nite_electronic]),  # name search
+                FakeResult([nite_metal, nite_electronic]),  # exact-name matches
+                FakeResult([]),  # substring pool (already covered by exact)
                 FakeResult([nite_metal.id]),  # in-library subset
+                FakeResult([]),  # genre tags (none)
             ]
         )
         app = _api_app(user_id, db)

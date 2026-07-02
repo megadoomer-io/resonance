@@ -24,10 +24,22 @@ export function escapeHtml(s) {
 
 export function artistMeta(a) {
   const bits = [];
+  // Genres lead — the strongest disambiguator between same-name artists
+  // (#136: the metal "Nite" vs the electronic one).
+  if (a.genres && a.genres.length) bits.push(a.genres.join(", "));
   if (a.disambiguation) bits.push(a.disambiguation);
   if (a.area) bits.push(a.area);
   if (a.begin_year) bits.push(String(a.begin_year));
   return bits.join(" · ");
+}
+
+/* All artist IDs currently in the builder, for seeding genre-affinity search. */
+export function allArtistIds(groups) {
+  const ids = [];
+  for (const g of groups) {
+    for (const a of g.artists) ids.push(a.id);
+  }
+  return ids;
 }
 
 /* Stable identity for a group, used to target toggle/remove operations. */

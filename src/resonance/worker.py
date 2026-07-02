@@ -63,6 +63,7 @@ import resonance.models.task as task_module
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.services.artist_import as artist_import_module
+import resonance.services.artist_tags as artist_tags_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
 import resonance.sync.backfill as backfill_module
@@ -127,6 +128,10 @@ _TASK_DISPATCH: dict[
     ),
     types_module.TaskType.RELATED_ARTIST_ENRICHMENT: (
         "enrich_related_artists",
+        lambda t: (str(t.id),),
+    ),
+    types_module.TaskType.GENRE_BACKFILL: (
+        "backfill_genres",
         lambda t: (str(t.id),),
     ),
 }
@@ -709,6 +714,60 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
+
+
+async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
+    """Execute a GENRE_BACKFILL task (#136): fetch artist genre/folksonomy tags.
+
+    Fetches MusicBrainz tags for each MBID-bearing artist from ListenBrainz's
+    public artist metadata endpoint (token-free) and wholesale-replaces the
+    artist's ArtistTag rows. Batched and resumable across worker restarts off
+    ``genre_attempted_at IS NULL``; a transient endpoint outage leaves the
+    remainder unattempted for retry.
+
+    Args:
+        ctx: arq worker context dict.
+        task_id: UUID string of the GENRE_BACKFILL Task.
+    """
+    wctx = typing.cast("WorkerContext", ctx)
+    settings = wctx["settings"]
+    session_factory = wctx["session_factory"]
+    log = logger.bind(task_id=task_id)
+
+    client = artist_tags_module.ArtistTagsClient(settings)
+
+    async with session_factory() as session:
+        task: task_module.Task | None = None
+        try:
+            task = await _load_task(session, task_id)
+            if task is None:
+                log.error("genre_backfill_task_not_found")
+                return
+
+            if await lifecycle_module.is_cancelled(session, task):
+                await lifecycle_module.fail_task(
+                    session, task, "Parent task was cancelled"
+                )
+                await session.commit()
+                return
+
+            task.status = types_module.SyncStatus.RUNNING
+            task.started_at = datetime.datetime.now(datetime.UTC)
+            await session.commit()
+
+            log.info("genre_backfill_started")
+            counts = await backfill_module.run_genre_backfill(session, settings, client)
+            result: dict[str, object] = dataclasses.asdict(counts)
+            await lifecycle_module.complete_task(session, task, result)
+            await session.commit()
+            log.info("genre_backfill_done", result=result)
+        except Exception:
+            log.exception("genre_backfill_failed")
+            if task is not None:
+                await lifecycle_module.fail_task(session, task, traceback.format_exc())
+                await session.commit()
+        finally:
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -2995,6 +3054,7 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(backfill_mbids), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(backfill_popularity), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(enrich_related_artists), timeout=3600),
+        arq.func(heartbeat_module.with_heartbeat(backfill_genres), timeout=3600),
     ]
     on_startup = startup
     on_shutdown = shutdown

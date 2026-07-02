@@ -54,10 +54,82 @@ class Artist(base_module.TimestampMixin, base_module.Base):
         nullable=True,
         default=None,
     )
+    # Genre-tag backfill bookkeeping (#136 genre model, Arc 1). genre_attempted_at
+    # IS NULL means "not yet attempted" and is the resume key for GENRE_BACKFILL;
+    # the tags themselves live in the artist_tags table. "attempted but no tags"
+    # is genre_attempted_at IS NOT NULL AND no ArtistTag rows -- distinct from
+    # unattempted (NULL).
+    genre_attempted_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
 
     tracks: orm.Mapped[list[Track]] = orm.relationship(
         back_populates="artist", cascade="all, delete-orphan"
     )
+    # Named "tags" not "genres" because rows include non-genre folksonomy tags
+    # ("seen live", "american"); the genre subset is those with genre_mbid set.
+    # Async: access requires eager loading (selectinload) or awaitable_attrs.
+    tags: orm.Mapped[list[ArtistTag]] = orm.relationship(
+        back_populates="artist", cascade="all, delete-orphan"
+    )
+
+
+class ArtistTag(base_module.TimestampMixin, base_module.Base):
+    """A genre/folksonomy tag for an artist (#136 genre model, Arc 1).
+
+    Durable domain data, NOT a cache -- mirrors ArtistSimilarity. Each row records
+    that ``source`` (default MusicBrainz, fetched via the ListenBrainz artist
+    metadata endpoint) reports ``tag`` on the artist with folksonomy ``count``.
+    ``genre_mbid`` is non-NULL only for canonical MusicBrainz *genres* (e.g.
+    "electronic", "death metal"); it is NULL for free folksonomy tags ("seen
+    live", "american"), so genre-vs-noise filtering is data-driven, not a
+    hand-maintained stoplist. ``fetched_at`` drives refresh-if-old, not eviction.
+
+    ``source`` is a plain string (default "musicbrainz"), NOT the ServiceType
+    enum used for connector provenance elsewhere: ServiceType has no MUSICBRAINZ
+    member, and this records the tag *taxonomy origin* (MusicBrainz) rather than
+    the fetch transport (ListenBrainz). The writer normalizes it lowercase. Kept
+    a string (not an enum + CHECK) so a future taxonomy source needs no migration.
+
+    Tags for an artist are replaced wholesale on refresh; the unique constraint
+    guards against in-batch duplicates.
+    """
+
+    __tablename__ = "artist_tags"
+    # The (artist_id, tag) unique constraint's composite btree also serves every
+    # artist_id lookup (leftmost prefix): per-artist reads, the batch-load
+    # WHERE artist_id IN (...), and the coverage NOT EXISTS anti-join. No separate
+    # ix_artist_tags_artist_id is needed (the ArtistSimilarity precedent's extra
+    # index is redundant for the same reason) -- do not "restore" it.
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "artist_id",
+            "tag",
+            name="uq_artist_tags_artist_tag",
+        ),
+        sa.CheckConstraint("count >= 0", name="ck_artist_tags_count_nonneg"),
+    )
+
+    id: orm.Mapped[uuid.UUID] = orm.mapped_column(
+        sa.Uuid, primary_key=True, default=uuid.uuid4
+    )
+    artist_id: orm.Mapped[uuid.UUID] = orm.mapped_column(
+        sa.ForeignKey("artists.id", ondelete="CASCADE"), nullable=False
+    )
+    tag: orm.Mapped[str] = orm.mapped_column(sa.String(256), nullable=False)
+    # Non-NULL only for canonical MusicBrainz genres; NULL for folksonomy tags.
+    genre_mbid: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(64), nullable=True, default=None
+    )
+    count: orm.Mapped[int] = orm.mapped_column(sa.Integer, nullable=False)
+    source: orm.Mapped[str] = orm.mapped_column(
+        sa.String(64), nullable=False, default="musicbrainz"
+    )
+    fetched_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+    )
+
+    artist: orm.Mapped[Artist] = orm.relationship(back_populates="tags")
 
 
 class Track(base_module.TimestampMixin, base_module.Base):

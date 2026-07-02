@@ -96,7 +96,7 @@ class TestTaskTypeNewValues:
 
     def test_tasktype_member_count(self) -> None:
         """TaskType members (bump when adding a task type)."""
-        assert len(types_module.TaskType) == 14
+        assert len(types_module.TaskType) == 15
 
     def test_mbid_backfill_value(self) -> None:
         assert types_module.TaskType.MBID_BACKFILL == "mbid_backfill"

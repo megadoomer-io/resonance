@@ -12,7 +12,7 @@ from resonance.models.concert import (
     VenueCandidate,
 )
 from resonance.models.generator import GenerationRecord, GeneratorProfile
-from resonance.models.music import Artist, ListeningEvent, Track
+from resonance.models.music import Artist, ArtistTag, ListeningEvent, Track
 from resonance.models.playlist import Playlist, PlaylistTrack
 from resonance.models.task import Task
 from resonance.models.taste import (
@@ -25,6 +25,7 @@ from resonance.models.user import ServiceConnection, User
 __all__ = [
     "Artist",
     "ArtistSimilarity",
+    "ArtistTag",
     "Base",
     "EntityExclusion",
     "Event",

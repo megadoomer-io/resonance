@@ -9,6 +9,7 @@
 import {
   addEventGroup,
   addManualArtist,
+  allArtistIds,
   artistMeta,
   escapeHtml,
   groupKey,
@@ -423,10 +424,19 @@ function onSearch() {
     resultsEl.innerHTML = "";
     return;
   }
+  // Seed genre-affinity ranking with the artists already in the builder, so an
+  // ambiguous name resolves toward the pool's genre (#136). Dedup so an artist in
+  // two groups doesn't double-weight the seed profile or bloat the URL.
+  const seedParams = [...new Set(allArtistIds(state.groups))]
+    .map((id) => "&seed_artist_ids=" + encodeURIComponent(id))
+    .join("");
   searchTimer = setTimeout(() => {
-    fetch("/api/v1/artists/search?q=" + encodeURIComponent(q) + "&limit=8", {
-      credentials: "same-origin",
-    })
+    fetch(
+      "/api/v1/artists/search?q=" + encodeURIComponent(q) + "&limit=8" + seedParams,
+      {
+        credentials: "same-origin",
+      },
+    )
       .then((r) => (r.ok ? r.json() : { items: [] }))
       .then((data) => renderResults(data.items || []))
       .catch(() => {
