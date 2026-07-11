@@ -50,9 +50,13 @@ class TestApplyDefaults:
         assert result["familiarity"] == 50
 
     def test_preserves_all_provided(self) -> None:
+        # apply_defaults returns every registry parameter, so provided values are
+        # preserved (a superset that also carries the rediscovery dials' defaults).
         provided = {"hit_depth": 25, "familiarity": 80}
         result = params_module.apply_defaults(provided)
-        assert result == provided
+        assert result.items() >= provided.items()
+        assert result["new_ratio"] == 50
+        assert result["less_heard_percentile"] == 33
 
     def test_rejects_removed_similar_artist_ratio(self) -> None:
         # The dead parameter must be rejected, not silently accepted (#133).

@@ -53,6 +53,7 @@ import resonance.generators.concert_prep as concert_prep_module
 import resonance.generators.genre as genre_module
 import resonance.generators.parameters as params_module
 import resonance.generators.pool as pool_module
+import resonance.generators.rediscovery as rediscovery_module
 import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
 import resonance.migrations as migrations_module
@@ -807,9 +808,50 @@ def _artists_needing_discovery(
     ]
 
 
+async def _seed_artists_in_window(
+    session: sa_async.AsyncSession,
+    user_id: uuid.UUID,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    limit: int,
+) -> list[uuid.UUID]:
+    """Top artists by distinct-track listens in ``[start, end]`` (#rediscovery).
+
+    Ranks by ``COUNT(DISTINCT track_id)`` per artist (not raw scrobbles), matching
+    the ``track_coverage`` definition elsewhere, so one repeat-played track can't
+    dominate the seed set. Bounds are inclusive on both ends. Returns artist ids
+    highest-count-first, capped at ``limit``. The DB half of the seed-window
+    primitive; the pure bounds computation is ``pool.resolve_window_bounds``.
+    """
+    result = await session.execute(
+        sa.select(
+            music_models.Track.artist_id,
+            sa.func.count(sa.distinct(music_models.ListeningEvent.track_id)).label(
+                "cnt"
+            ),
+        )
+        .join(
+            music_models.Track,
+            music_models.Track.id == music_models.ListeningEvent.track_id,
+        )
+        .where(
+            music_models.ListeningEvent.user_id == user_id,
+            music_models.ListeningEvent.listened_at >= start,
+            music_models.ListeningEvent.listened_at <= end,
+        )
+        .group_by(music_models.Track.artist_id)
+        .order_by(sa.desc("cnt"))
+        .limit(limit)
+    )
+    return [row[0] for row in result.all()]
+
+
 async def resolve_pool(
     session: sa_async.AsyncSession,
     input_references: collections.abc.Mapping[str, object],
+    *,
+    user_id: uuid.UUID | None = None,
+    now: datetime.datetime | None = None,
 ) -> list[pool_module.ResolvedArtist]:
     """Resolve a profile's ``input_references`` into a deduplicated artist pool.
 
@@ -823,13 +865,22 @@ async def resolve_pool(
     * ``event``  -> the event's confirmed ``EventArtist`` rows plus accepted
       ``EventArtistCandidate`` matches. Every enabled event source is resolved in
       one ``event_id IN (...)`` query per table rather than per-event (#128 T14).
+    * ``listening_range`` -> the user's top seed artists in the window's time
+      bounds (#rediscovery). ``relative`` windows re-resolve to ``[now-N, now]``
+      each call (seed rolls forward); ``absolute`` windows read their frozen
+      stored bounds. Requires ``user_id`` (listens are per-user); ``now`` defaults
+      to the current UTC time when omitted.
     * ``artist`` -> the artist itself (including artists added by related-artist
       enrichment, which persists them as concrete ``artist`` sources, #133).
 
-    Returns the deduplicated, exclude-filtered artists in first-seen order (event
-    sources before artist sources), each tagged with provenance. This is the single
-    target-resolution path shared by both worker generation functions, replacing the
-    event-resolution blocks that were duplicated across them.
+    Returns the deduplicated, exclude-filtered artists in first-seen order (event,
+    then listening-range seeds, then artist sources), each tagged with provenance.
+    This is the single target-resolution path shared by both worker generation
+    functions, replacing the event-resolution blocks that were duplicated across
+    them.
+
+    Raises:
+        ValueError: If a listening_range source is present but ``user_id`` is None.
     """
     sources = pool_module.normalize_sources(input_references)
     exclude_ids = pool_module.extract_excludes(input_references)
@@ -869,6 +920,33 @@ async def resolve_pool(
                     pool_module.ResolvedArtist(
                         artist_id=cand.matched_artist_id,
                         via=pool_module.PoolProvenance.EVENT,
+                    )
+                )
+
+    # Listening-range sources: resolve each window to its top seed artists
+    # (#rediscovery). Per-user, so user_id is required when one is present.
+    range_sources = [
+        s
+        for s in sources
+        if isinstance(s, pool_module.ListeningRangeSource) and s.enabled
+    ]
+    if range_sources:
+        if user_id is None:
+            msg = "resolve_pool requires user_id to resolve a listening_range source"
+            raise ValueError(msg)
+        resolve_now = now or datetime.datetime.now(datetime.UTC)
+        for range_source in range_sources:
+            start, end = pool_module.resolve_window_bounds(
+                range_source.window, resolve_now
+            )
+            seed_ids = await _seed_artists_in_window(
+                session, user_id, start, end, range_source.seed_artist_count
+            )
+            for seed_id in seed_ids:
+                resolved.append(
+                    pool_module.ResolvedArtist(
+                        artist_id=seed_id,
+                        via=pool_module.PoolProvenance.LISTENING_RANGE,
                     )
                 )
 
@@ -945,7 +1023,9 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             event_id = str(profile.input_references.get("event_id", ""))
             log = log.bind(event_id=event_id)
 
-            pool = await resolve_pool(session, profile.input_references)
+            pool = await resolve_pool(
+                session, profile.input_references, user_id=task.user_id
+            )
             artist_ids: list[uuid.UUID] = [r.artist_id for r in pool]
             log = log.bind(pool_size=len(artist_ids))
 
@@ -1731,7 +1811,7 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                 for s in sources
                 if isinstance(s, pool_module.ArtistSource) and s.via_seed is not None
             }
-            pool = await resolve_pool(session, refs)
+            pool = await resolve_pool(session, refs, user_id=task.user_id)
             current_pool_ids = {r.artist_id for r in pool}
 
             # Load every artist we might seed from (pool + explicit seeds).
@@ -1961,6 +2041,71 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
 
 
+def _select_rediscovery(
+    *,
+    candidates: list[concert_prep_module.CandidateTrack],
+    input_references: collections.abc.Mapping[str, object],
+    listen_counts: collections.abc.Mapping[uuid.UUID, int],
+    params: dict[str, int],
+    max_tracks: int,
+    previous_track_ids: set[uuid.UUID],
+    freshness_target: int | None,
+) -> rediscovery_module.SelectionResult:
+    """Assemble rediscovery inputs from resolved data and run two-stream select.
+
+    Derives, from already-fetched data (no new queries):
+
+    * the new-artist set -- artists materialized by enrichment (``via_seed`` sources),
+      which form the never-heard "new" stream;
+    * each seed artist's deep-cut track ids -- the bottom ``less_heard_percentile``
+      of that artist's lifetime play distribution, with the thin-seed guard
+      (:func:`rediscovery.select_deep_cut_track_ids`). The deep-cut stream is every
+      pool artist that is NOT a via_seed discovery.
+
+    Deep cuts are exempt from the freshness filter only under an ``absolute`` window
+    (design R4), so rediscovered cuts persist across regenerates; a ``relative``
+    window applies normal freshness. Delegates to
+    :func:`rediscovery.score_and_select`.
+    """
+    new_artist_ids = {
+        source.artist_id
+        for source in pool_module.normalize_sources(input_references)
+        if isinstance(source, pool_module.ArtistSource) and source.via_seed is not None
+    }
+
+    # Group each deep-cut-stream artist's candidate tracks into a lifetime play
+    # distribution, then pick its deep cuts. via_seed (new-stream) artists are not
+    # deep-cut sources.
+    percentile = params.get("less_heard_percentile", 33)
+    per_artist_counts: dict[uuid.UUID, dict[uuid.UUID, int]] = {}
+    for candidate in candidates:
+        if candidate.artist_id in new_artist_ids:
+            continue
+        per_artist_counts.setdefault(candidate.artist_id, {})[candidate.track_id] = (
+            listen_counts.get(candidate.track_id, 0)
+        )
+    deep_cut_track_ids: set[uuid.UUID] = set()
+    for track_counts in per_artist_counts.values():
+        deep_cut_track_ids |= rediscovery_module.select_deep_cut_track_ids(
+            track_counts, percentile=percentile
+        )
+
+    source = pool_module.find_listening_range_source(input_references)
+    exempt = source is not None and source.window.kind == "absolute"
+
+    return rediscovery_module.score_and_select(
+        candidates=candidates,
+        new_artist_ids=new_artist_ids,
+        deep_cut_track_ids=deep_cut_track_ids,
+        params=params,
+        new_ratio=params.get("new_ratio", 50),
+        max_tracks=max_tracks,
+        previous_track_ids=previous_track_ids,
+        freshness_target=freshness_target,
+        exempt_deep_cuts_from_freshness=exempt,
+    )
+
+
 async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
     """Score tracks and build the final playlist.
 
@@ -2028,7 +2173,9 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             event_id = str(profile.input_references.get("event_id", ""))
             log = log.bind(event_id=event_id)
 
-            pool = await resolve_pool(session, profile.input_references)
+            pool = await resolve_pool(
+                session, profile.input_references, user_id=task.user_id
+            )
             artist_ids: set[uuid.UUID] = {r.artist_id for r in pool}
 
             params = params_module.apply_defaults(dict(profile.parameter_values))
@@ -2170,14 +2317,28 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 else None
             )
 
-            # Score and select
-            selection = concert_prep_module.score_and_select(
-                candidates=candidates,
-                params=params,
-                max_tracks=max_tracks,
-                previous_track_ids=previous_track_ids,
-                freshness_target=freshness_target,
-            )
+            # Score and select. Dispatch on generator type: rediscovery runs the
+            # two-stream (new artists vs deep cuts) selection with its own budget
+            # split and window-aware freshness exemption; every other type uses the
+            # single-pool concert_prep path unchanged.
+            if profile.generator_type == types_module.GeneratorType.REDISCOVERY:
+                selection = _select_rediscovery(
+                    candidates=candidates,
+                    input_references=profile.input_references,
+                    listen_counts=listen_counts,
+                    params=params,
+                    max_tracks=max_tracks,
+                    previous_track_ids=previous_track_ids,
+                    freshness_target=freshness_target,
+                )
+            else:
+                selection = concert_prep_module.score_and_select(
+                    candidates=candidates,
+                    params=params,
+                    max_tracks=max_tracks,
+                    previous_track_ids=previous_track_ids,
+                    freshness_target=freshness_target,
+                )
 
             # Regenerate in place (#versions): reuse the current Playlist row when one
             # exists, so its identity -- and the Spotify export anchor in
