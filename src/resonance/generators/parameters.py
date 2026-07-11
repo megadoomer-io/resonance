@@ -45,6 +45,20 @@ class GeneratorTypeConfig:
     # event for concert prep). None means no default seed -- the caller supplies
     # sources. Value is a ``pool.PoolSourceKind``.
     default_pool_seed: str | None = None
+    # Editor slider ordering (#rediscovery-ui). ``lead_parameters`` render first,
+    # ``advanced_parameters`` behind an "Advanced" disclosure. Both are ordered
+    # (unlike the unordered ``featured_parameters`` set) and together should equal
+    # ``featured_parameters``: only a type's featured dials render in the editor,
+    # so inert dials (e.g. new_ratio for concert_prep) never show. Empty
+    # ``lead_parameters`` falls back to the featured set in registry order.
+    lead_parameters: tuple[str, ...] = ()
+    advanced_parameters: tuple[str, ...] = ()
+
+    def ordered_lead(self) -> tuple[str, ...]:
+        """Lead slider names, defaulting to featured params in registry order."""
+        if self.lead_parameters:
+            return self.lead_parameters
+        return tuple(n for n in PARAMETER_REGISTRY if n in self.featured_parameters)
 
 
 PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
@@ -102,6 +116,7 @@ GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
         required_inputs=frozenset(),
         description="Generate a playlist to prepare for a concert",
         default_pool_seed=pool_module.PoolSourceKind.EVENT.value,
+        lead_parameters=("familiarity", "hit_depth"),
     ),
     types_module.GeneratorType.REDISCOVERY: GeneratorTypeConfig(
         featured_parameters=frozenset(
@@ -120,6 +135,11 @@ GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
         # the registry defaults; stated explicitly so the type's intended vibe is
         # documented at the config, not inferred from the registry.
         default_param_values={"new_ratio": 50, "less_heard_percentile": 33},
+        # Lead with the two dials that define rediscovery (new-vs-deep-cut split +
+        # deep-cut depth); familiarity/hit_depth tuck behind "Advanced" so four peer
+        # sliders don't flatten the hierarchy (#rediscovery-ui design decision 2).
+        lead_parameters=("new_ratio", "less_heard_percentile"),
+        advanced_parameters=("familiarity", "hit_depth"),
     ),
 }
 

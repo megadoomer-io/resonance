@@ -54,6 +54,7 @@ import resonance.generators.genre as genre_module
 import resonance.generators.parameters as params_module
 import resonance.generators.pool as pool_module
 import resonance.generators.rediscovery as rediscovery_module
+import resonance.generators.seed_window as seed_window_module
 import resonance.heartbeat as heartbeat_module
 import resonance.logging as logging_module
 import resonance.migrations as migrations_module
@@ -817,33 +818,14 @@ async def _seed_artists_in_window(
 ) -> list[uuid.UUID]:
     """Top artists by distinct-track listens in ``[start, end]`` (#rediscovery).
 
-    Ranks by ``COUNT(DISTINCT track_id)`` per artist (not raw scrobbles), matching
-    the ``track_coverage`` definition elsewhere, so one repeat-played track can't
-    dominate the seed set. Bounds are inclusive on both ends. Returns artist ids
-    highest-count-first, capped at ``limit``. The DB half of the seed-window
-    primitive; the pure bounds computation is ``pool.resolve_window_bounds``.
+    Thin wrapper over :func:`generators.seed_window.seed_artists_in_window` (the
+    query moved to its own lightweight module so the web seed-preview endpoint can
+    reuse it without importing the whole worker graph, #rediscovery-ui T5). The
+    pure bounds computation is ``pool.resolve_window_bounds``.
     """
-    result = await session.execute(
-        sa.select(
-            music_models.Track.artist_id,
-            sa.func.count(sa.distinct(music_models.ListeningEvent.track_id)).label(
-                "cnt"
-            ),
-        )
-        .join(
-            music_models.Track,
-            music_models.Track.id == music_models.ListeningEvent.track_id,
-        )
-        .where(
-            music_models.ListeningEvent.user_id == user_id,
-            music_models.ListeningEvent.listened_at >= start,
-            music_models.ListeningEvent.listened_at <= end,
-        )
-        .group_by(music_models.Track.artist_id)
-        .order_by(sa.desc("cnt"))
-        .limit(limit)
+    return await seed_window_module.seed_artists_in_window(
+        session, user_id, start, end, limit
     )
-    return [row[0] for row in result.all()]
 
 
 async def resolve_pool(

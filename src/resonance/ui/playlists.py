@@ -16,6 +16,7 @@ import resonance.api.v1.artists as artists_api
 import resonance.api.v1.generators as generators_api
 import resonance.dependencies as deps_module
 import resonance.generators.pool as pool_module
+import resonance.generators.seed_window as seed_window_module
 import resonance.models.concert as concert_models
 import resonance.models.generator as generator_models
 import resonance.models.music as music_models
@@ -390,7 +391,7 @@ async def _hydrate_lineup(
             }
         )
 
-    return {
+    result: dict[str, object] = {
         "profile_id": str(profile.id),
         "version": profile.version,
         "name": profile.name,
@@ -398,6 +399,29 @@ async def _hydrate_lineup(
         "parameter_values": profile.parameter_values,
         "groups": groups,
     }
+
+    # Rediscovery window (#rediscovery-ui T6b): surface the stored listening_range
+    # window + seed count so the editor's window panel restores its preset/dates on
+    # reload. Round-trip is preset IDENTITY-lossy by design (relative -> the rolling
+    # preset, absolute -> Custom with its dates); the client maps kind to a pill.
+    lr = pool_module.find_listening_range_source(refs)
+    if lr is not None:
+        window: dict[str, object] = {"kind": lr.window.kind}
+        if lr.window.kind == "relative":
+            window["lookback_days"] = lr.window.lookback_days
+        else:
+            window["start"] = (
+                lr.window.start.isoformat() if lr.window.start is not None else None
+            )
+            window["end"] = (
+                lr.window.end.isoformat() if lr.window.end is not None else None
+            )
+        result["listening_range"] = {
+            "window": window,
+            "seed_artist_count": lr.seed_artist_count,
+        }
+
+    return result
 
 
 def _is_uuid(value: str) -> bool:
@@ -430,15 +454,33 @@ async def new_playlist_page(
     sources: list[dict[str, object]] = []
     if event_id and _is_uuid(event_id):
         sources.append({"kind": "event", "event_id": event_id, "enabled": True})
+    # A rediscovery draft seeds its pool from a listening-history window so the
+    # editor's window panel renders immediately and the draft is a valid pool
+    # (a listening_range is an enabled source, #rediscovery-ui T1). Default to the
+    # rolling "Last 2 Weeks" relative window. Only seed it when the caller didn't
+    # already supply an event source.
+    is_rediscovery = gen_type_enum is types_module.GeneratorType.REDISCOVERY
+    if is_rediscovery and not sources:
+        sources.append(
+            {
+                "kind": "listening_range",
+                "enabled": True,
+                "window": {"kind": "relative", "lookback_days": 14},
+                "seed_artist_count": 20,
+                "deep_cut_basis": "lifetime",
+                "novelty_basis": "lifetime",
+            }
+        )
     input_references: dict[str, object] = {
         "sources": sources,
         "exclude_artist_ids": [],
     }
 
+    default_name = "New Rediscovery" if is_rediscovery else "New Playlist"
     name = (
         await _default_playlist_name(db, input_references)
-        if sources
-        else "New Playlist"
+        if event_id and _is_uuid(event_id)
+        else default_name
     )
     profile = generator_models.GeneratorProfile(
         user_id=user_id,
@@ -474,8 +516,34 @@ async def edit_playlist_page(
     if profile is None:
         raise fastapi.HTTPException(status_code=404, detail="Profile not found")
 
+    import resonance.generators.parameters as params_module
+
     ctx = await _new_playlist_context(request, db)
     lineup = await _hydrate_lineup(db, profile)
+
+    # Only the type's featured dials render, split lead vs "Advanced" (#rediscovery-ui
+    # T6a): concert_prep shows familiarity/hit_depth; rediscovery leads with
+    # new_ratio/less_heard and tucks familiarity/hit_depth behind the disclosure.
+    # Filtering here is also what stops concert_prep from rendering the inert
+    # rediscovery dials it showed when the template looped the whole registry.
+    config = params_module.GENERATOR_TYPE_CONFIG.get(profile.generator_type)
+    if config is not None:
+        lead_names = config.ordered_lead()
+        advanced_names = config.advanced_parameters
+    else:
+        lead_names = tuple(params_module.PARAMETER_REGISTRY)
+        advanced_names = ()
+    reg = params_module.PARAMETER_REGISTRY
+    param_sections = [
+        {
+            "advanced": False,
+            "params": [(n, reg[n]) for n in lead_names if n in reg],
+        },
+        {
+            "advanced": True,
+            "params": [(n, reg[n]) for n in advanced_names if n in reg],
+        },
+    ]
     # Whether a similar-artists service is connected (drives the enrich hint).
     conn_result = await db.execute(
         sa.select(user_models.ServiceConnection.id).where(
@@ -496,8 +564,88 @@ async def edit_playlist_page(
         profile_name=profile.name,
         parameter_values=profile.parameter_values,
         similar_available=similar_available,
+        param_sections=param_sections,
+        generator_type=profile.generator_type.value,
     )
     return common.templates.TemplateResponse(request, "playlists_new.html", ctx)
+
+
+# Max seed artists rendered in the preview before collapsing to "+N more".
+_SEED_PREVIEW_DISPLAY_CAP = 30
+
+
+@router.get("/playlists/{profile_id}/seed-preview", response_model=None)
+async def seed_preview_partial(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    profile_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse:
+    """Read-only preview of what a rediscovery window resolves to (#rediscovery-ui T5).
+
+    Resolves the profile's *currently stored* listening_range window to the top
+    seed artists (the deep-cut side of the recipe), so the panel can show "You'll
+    rediscover: …" as live tuning feedback. Reads the persisted window (the editor
+    PATCHes it before refreshing), so no window is passed in the request. Renders
+    the resolved date range as an echo and a first-class empty state for a window
+    with no listening data (which drives Generate-disable client-side).
+    """
+    result = await db.execute(
+        sa.select(generator_models.GeneratorProfile).where(
+            generator_models.GeneratorProfile.id == profile_id,
+            generator_models.GeneratorProfile.user_id == user_id,
+        )
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise fastapi.HTTPException(status_code=404, detail="Profile not found")
+
+    lr = pool_module.find_listening_range_source(profile.input_references)
+    ctx = common.base_context(request)
+    if lr is None:
+        # Not a rediscovery profile (or window not set yet): nothing to preview.
+        ctx.update(artists=[], start=None, end=None, total=0, more=0, empty=True)
+        return common.templates.TemplateResponse(
+            request, "partials/rediscovery_seed_preview.html", ctx
+        )
+
+    now = datetime.datetime.now(datetime.UTC)
+    start, end = pool_module.resolve_window_bounds(lr.window, now)
+    seed_ids = await seed_window_module.seed_artists_in_window(
+        db, user_id, start, end, lr.seed_artist_count
+    )
+
+    artists: list[dict[str, object]] = []
+    if seed_ids:
+        display_ids = seed_ids[:_SEED_PREVIEW_DISPLAY_CAP]
+        artist_result = await db.execute(
+            sa.select(music_models.Artist).where(
+                music_models.Artist.id.in_(display_ids)
+            )
+        )
+        by_id = {a.id: a for a in artist_result.scalars().all()}
+        for aid in display_ids:
+            artist = by_id.get(aid)
+            if artist is None:
+                continue
+            summary = artists_api.format_artist_summary(artist)
+            genres = summary.get("genres")
+            meta = ", ".join(genres) if isinstance(genres, list) and genres else ""
+            artists.append({"id": str(aid), "name": artist.name, "meta": meta})
+
+    total = len(seed_ids)
+    more = max(0, total - len(artists))
+    ctx.update(
+        artists=artists,
+        start=start,
+        end=end,
+        total=total,
+        more=more,
+        empty=(total == 0),
+    )
+    return common.templates.TemplateResponse(
+        request, "partials/rediscovery_seed_preview.html", ctx
+    )
 
 
 # ---------------------------------------------------------------------------
