@@ -456,9 +456,13 @@ Subcommands:
   create --type <type> --name <n>   Create a profile
            [--source event:<uuid> ...]    Layered pool sources (#128)
            [--source artist:<uuid> ...]
-           [--source related:<n>[:seed] ...]
            [--exclude <artist-uuid> ...]  Drop artists from the pool
-           [--param key=val ...]
+           [--window <spec>]              Rediscovery: seed from listening history.
+                                          <spec>: last-2-weeks | a-month-ago |
+                                          this-time-last-year | relative:<days> |
+                                          absolute:<start>:<end> (ISO dates)
+           [--seed-count <n>]             Rediscovery: # of seed artists (def 20)
+           [--param key=val ...]          e.g. new_ratio=50 (rediscovery dials)
            [--input key=val ...]          Legacy (e.g. event_id=<uuid>)
   update <profile-id>               Update a profile
            [--name <n>]
@@ -567,6 +571,104 @@ def _parse_pool_sources(args: list[str]) -> dict[str, object] | None:
     return {"sources": sources, "exclude_artist_ids": excludes}
 
 
+_REDISCOVERY_PRESETS = ("last-2-weeks", "a-month-ago", "this-time-last-year")
+
+
+def _preset_window(preset: str, now: datetime.datetime) -> dict[str, object]:
+    """Build a listening window from a named preset (#rediscovery).
+
+    Relative presets store a lookback (seed rolls forward on regenerate); the
+    older-anchor absolute presets freeze dates computed once at create time and
+    widen the window +/- 2 weeks around the anchor so enough seeds fall inside.
+    """
+    if preset == "last-2-weeks":
+        return {"kind": "relative", "lookback_days": 14}
+    if preset == "a-month-ago":
+        center = now - datetime.timedelta(days=30)
+        return {
+            "kind": "absolute",
+            "start": (center - datetime.timedelta(days=14)).isoformat(),
+            "end": (center + datetime.timedelta(days=14)).isoformat(),
+        }
+    if preset == "this-time-last-year":
+        center = now - datetime.timedelta(days=365)
+        return {
+            "kind": "absolute",
+            "start": (center - datetime.timedelta(days=14)).isoformat(),
+            "end": (center + datetime.timedelta(days=14)).isoformat(),
+        }
+    print(
+        f"Unknown window preset: {preset!r} (expected one of "
+        f"{', '.join(_REDISCOVERY_PRESETS)}, relative:N, or absolute:START:END)"
+    )
+    sys.exit(1)
+
+
+def _parse_window_spec(spec: str, now: datetime.datetime) -> dict[str, object]:
+    """Parse a ``--window`` spec into a window dict.
+
+    Grammar: a preset name (``last-2-weeks``, ``a-month-ago``,
+    ``this-time-last-year``), ``relative:<days>``, or
+    ``absolute:<start>:<end>`` (ISO dates, naive treated as UTC).
+    """
+    if spec in _REDISCOVERY_PRESETS:
+        return _preset_window(spec, now)
+    kind, _, rest = spec.partition(":")
+    if kind == "relative":
+        try:
+            days = int(rest)
+        except ValueError:
+            print(f"Invalid relative lookback: {rest!r} (expected an integer)")
+            sys.exit(1)
+        return {"kind": "relative", "lookback_days": days}
+    if kind == "absolute":
+        start_s, _, end_s = rest.partition(":")
+        try:
+            start = datetime.datetime.fromisoformat(start_s)
+            end = datetime.datetime.fromisoformat(end_s)
+        except ValueError:
+            print(f"Invalid absolute window: {rest!r} (expected START:END ISO dates)")
+            sys.exit(1)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=datetime.UTC)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=datetime.UTC)
+        return {"kind": "absolute", "start": start.isoformat(), "end": end.isoformat()}
+    print(f"Unknown window spec: {spec!r} (expected a preset, relative:N, or absolute)")
+    sys.exit(1)
+
+
+def _parse_listening_range(args: list[str]) -> dict[str, object] | None:
+    """Parse ``--window`` / ``--seed-count`` into a listening_range recipe.
+
+    Returns a ``{"sources": [listening_range], "exclude_artist_ids": []}`` dict for
+    a rediscovery profile, or None when ``--window`` is absent so the caller falls
+    back to the event/artist source grammar.
+    """
+    window_spec: str | None = None
+    seed_count = 20
+    i = 0
+    while i < len(args):
+        if args[i] == "--window" and i + 1 < len(args):
+            window_spec = args[i + 1]
+            i += 2
+        elif args[i] == "--seed-count" and i + 1 < len(args):
+            seed_count = int(args[i + 1])
+            i += 2
+        else:
+            i += 1
+    if window_spec is None:
+        return None
+    now = datetime.datetime.now(datetime.UTC)
+    source: dict[str, object] = {
+        "kind": "listening_range",
+        "enabled": True,
+        "window": _parse_window_spec(window_spec, now),
+        "seed_artist_count": seed_count,
+    }
+    return {"sources": [source], "exclude_artist_ids": []}
+
+
 def _cmd_profile() -> None:
     if len(sys.argv) < 3:
         print(_PROFILE_USAGE)
@@ -643,14 +745,19 @@ def _cmd_profile() -> None:
         if not name or not gen_type:
             print("Usage: resonance-api profile create --type <type> --name <name>")
             sys.exit(1)
-        # Prefer the layered --source/--exclude grammar; fall back to the legacy
+        # Rediscovery: a --window flag builds a listening_range source. Otherwise
+        # prefer the layered --source/--exclude grammar; fall back to the legacy
         # --input key=value form (e.g. --input event_id=<uuid>) (#128).
-        layered = _parse_pool_sources(remaining)
-        input_refs: dict[str, object] = (
-            layered
-            if layered is not None
-            else dict(_parse_key_value_args(remaining, "--input"))
-        )
+        rediscovery_refs = _parse_listening_range(remaining)
+        if rediscovery_refs is not None:
+            input_refs: dict[str, object] = rediscovery_refs
+        else:
+            layered = _parse_pool_sources(remaining)
+            input_refs = (
+                layered
+                if layered is not None
+                else dict(_parse_key_value_args(remaining, "--input"))
+            )
         params = _parse_key_value_args(remaining, "--param")
         body: dict[str, object] = {
             "name": name,
