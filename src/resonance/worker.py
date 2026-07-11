@@ -50,6 +50,7 @@ import resonance.connectors.test as test_connector_module
 import resonance.crypto as crypto_module
 import resonance.database as database_module
 import resonance.generators.concert_prep as concert_prep_module
+import resonance.generators.genre as genre_module
 import resonance.generators.parameters as params_module
 import resonance.generators.pool as pool_module
 import resonance.heartbeat as heartbeat_module
@@ -1505,6 +1506,90 @@ async def _fetch_similar_with_store(
     return neighbors
 
 
+async def _load_genre_pairs(
+    session: sa_async.AsyncSession,
+    artist_ids: collections.abc.Sequence[uuid.UUID],
+) -> dict[uuid.UUID, list[tuple[str | None, float]]]:
+    """Load each artist's ArtistTag rows as affinity ``(genre_mbid, count)`` pairs.
+
+    One query, grouped by artist. Used to build the seed genre profile for the
+    enrich genre guard (#153).
+    """
+    if not artist_ids:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                sa.select(music_models.ArtistTag).where(
+                    music_models.ArtistTag.artist_id.in_(list(artist_ids))
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[uuid.UUID, list[tuple[str | None, float]]] = {}
+    for tag in rows:
+        out.setdefault(tag.artist_id, []).append((tag.genre_mbid, float(tag.count)))
+    return out
+
+
+def _rank_candidates_by_genre(
+    candidates: collections.abc.Sequence[tuple[str, str]],
+    pairs_by_mbid: dict[str, list[tuple[str | None, float]]],
+    seed_tag_lists: collections.abc.Sequence[
+        collections.abc.Iterable[tuple[str | None, float]]
+    ],
+) -> list[tuple[str, str]]:
+    """Stable-sort ``(name, mbid)`` candidates by genre affinity to the seeds (#153).
+
+    Pure. On-genre candidates rise, no-genre-data stays neutral (never penalized),
+    a confirmed off-genre neighbor sinks (:func:`genre.sort_value`). The original
+    order (provider similarity rank) breaks ties, so within an affinity tier the
+    similarity ranking is preserved. Returns the input order unchanged when there
+    is no seed genre basis.
+    """
+    seeds = [list(s) for s in seed_tag_lists]
+    if not any(seeds):
+        return list(candidates)
+
+    def key(item: tuple[int, tuple[str, str]]) -> tuple[float, int]:
+        idx, (_name, mbid) = item
+        affinity = genre_module.affinity_score(pairs_by_mbid.get(mbid, []), seeds)
+        return (-genre_module.sort_value(affinity), idx)
+
+    return [candidate for _, candidate in sorted(enumerate(candidates), key=key)]
+
+
+async def _genre_rank_candidates(
+    genre_client: artist_tags_module.ArtistTagsClient,
+    candidates: list[tuple[str, str]],
+    seed_tag_lists: collections.abc.Sequence[
+        collections.abc.Iterable[tuple[str | None, float]]
+    ],
+) -> list[tuple[str, str]]:
+    """Re-order import candidates by genre affinity to the pool (#153).
+
+    Import candidates are pre-import ``(name, MBID)`` pairs with no ArtistTag rows,
+    so their tags are fetched by MBID on demand -- ephemeral, never persisted (they
+    may never be imported). Candidates are then ranked by
+    :func:`_rank_candidates_by_genre`. Best-effort: on any tag-fetch failure the
+    original similarity order is returned, so the guard never blocks enrichment.
+    """
+    mbids = list({mbid for _, mbid in candidates if mbid})
+    if not mbids:
+        return candidates
+    try:
+        tags_by_mbid = await genre_client.fetch_tags(mbids)
+    except artist_tags_module.ArtistTagsUnavailableError, httpx.HTTPError:
+        return candidates
+    pairs_by_mbid = {
+        mbid: [(res.genre_mbid, float(res.count)) for res in results]
+        for mbid, results in tags_by_mbid.items()
+    }
+    return _rank_candidates_by_genre(candidates, pairs_by_mbid, seed_tag_lists)
+
+
 async def _collect_related(
     session: sa_async.AsyncSession,
     similar_connectors: collections.abc.Sequence[Any],
@@ -1514,6 +1599,12 @@ async def _collect_related(
     target_n: int,
     neighbor_fetch: NeighborFetch,
     log: Any,
+    *,
+    genre_client: artist_tags_module.ArtistTagsClient | None = None,
+    seed_tag_lists: collections.abc.Sequence[
+        collections.abc.Iterable[tuple[str | None, float]]
+    ]
+    | None = None,
 ) -> list[uuid.UUID]:
     """Collect up to ``target_n`` new related artist ids for a scope (#133).
 
@@ -1548,6 +1639,15 @@ async def _collect_related(
     new_ids = library[:target_n]
     remaining = target_n - len(new_ids)
     if remaining > 0 and lb_connector is not None and import_candidates:
+        # Genre guard (#153): before importing the top-up, re-rank candidates so a
+        # wrong/ambiguous seed's off-genre neighbors sink below on-genre ones. The
+        # library matches above keep provider rank (they are already high-confidence
+        # in-library picks); the guard applies only to the imported expansion, which
+        # is where an off-genre seed does the most damage.
+        if genre_client is not None and seed_tag_lists is not None:
+            import_candidates = await _genre_rank_candidates(
+                genre_client, import_candidates, seed_tag_lists
+            )
         imported = await _import_adjacent_candidates(
             session,
             lb_connector,
@@ -1731,36 +1831,68 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     session, connector, artist, limit=limit, now=now
                 )
 
+            settings = wctx["settings"]
+
             # Phase 1: resolve each scope's new artists, persisting similarity
             # edges + any imported artists. Commit so that work survives a later
             # optimistic-version retry on the profile row.
             scope_results: list[tuple[str, list[uuid.UUID]]] = []
             running_pool_ids = set(current_pool_ids)
             total_found = 0
-            for scope, seed_artists, needed in scope_plans:
-                if needed == 0:
-                    scope_results.append((scope, []))
-                    continue
-                # Never re-find anything already in the pool, the seeds themselves
-                # (an artist is not its own neighbor), or a globally-excluded artist
-                # (we must not re-suggest one the user removed). Because we APPEND
-                # (top-up) rather than replace, this scope's existing discoveries
-                # stay put and are excluded from re-discovery too.
-                exclude = running_pool_ids | {a.id for a in seed_artists} | excluded_ids
-                new_ids = await _collect_related(
-                    session,
-                    similar_connectors,
-                    lb_connector,
-                    seed_artists,
-                    exclude,
-                    needed,
-                    _store_fetch,
-                    log,
+            # Genre guard (#153): a shared on-demand tags client for both halves --
+            # ensuring the seeds/core have genre tags (fetch+persist any that missed
+            # the scheduled backfill) and fetching import-candidate tags by MBID so
+            # off-genre neighbors of a wrong/ambiguous seed sink in the expansion.
+            async with contextlib.aclosing(
+                artist_tags_module.ArtistTagsClient(settings)
+            ) as genre_client:
+                seed_artists_all = [a for _, seeds, _ in scope_plans for a in seeds]
+                # Best-effort: a tag-endpoint outage degrades to unguarded ranking.
+                # No commit here -- the freshly-persisted tags are visible to the
+                # _load_genre_pairs read within this same session, and they ride the
+                # phase-1 commit below (atomic with the edges/imports, so a later
+                # failure rolls the stamp back and they are re-fetched next run).
+                await backfill_module.fetch_and_persist_tags(
+                    session, genre_client, seed_artists_all
                 )
-                scope_results.append((scope, new_ids))
-                running_pool_ids |= set(new_ids)
-                total_found += len(new_ids)
-            await session.commit()
+                genre_pairs_by_id = await _load_genre_pairs(
+                    session, [a.id for a in seed_artists_all]
+                )
+
+                for scope, seed_artists, needed in scope_plans:
+                    if needed == 0:
+                        scope_results.append((scope, []))
+                        continue
+                    # Never re-find anything already in the pool, the seeds
+                    # themselves (an artist is not its own neighbor), or a
+                    # globally-excluded artist (we must not re-suggest one the user
+                    # removed). Because we APPEND (top-up) rather than replace, this
+                    # scope's existing discoveries stay put and are excluded from
+                    # re-discovery too.
+                    exclude = (
+                        running_pool_ids | {a.id for a in seed_artists} | excluded_ids
+                    )
+                    seed_tag_lists = [
+                        genre_pairs_by_id[a.id]
+                        for a in seed_artists
+                        if genre_pairs_by_id.get(a.id)
+                    ]
+                    new_ids = await _collect_related(
+                        session,
+                        similar_connectors,
+                        lb_connector,
+                        seed_artists,
+                        exclude,
+                        needed,
+                        _store_fetch,
+                        log,
+                        genre_client=genre_client,
+                        seed_tag_lists=seed_tag_lists,
+                    )
+                    scope_results.append((scope, new_ids))
+                    running_pool_ids |= set(new_ids)
+                    total_found += len(new_ids)
+                await session.commit()
 
             # Phase 2: apply the discovered artists to the profile under optimistic
             # concurrency. If a concurrent writer (editor PATCH, CLI, agent)
