@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated, Any
 
 import fastapi
+import httpx
 import pydantic
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
@@ -18,6 +20,8 @@ import resonance.generators.genre as genre_module
 import resonance.models.music as music_models
 import resonance.models.user as user_models
 import resonance.services.artist_import as artist_import_module
+import resonance.services.artist_tags as artist_tags_module
+import resonance.sync.backfill as backfill_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -28,6 +32,12 @@ _PAGE_SIZE = 50
 _SEARCH_CANDIDATE_CAP = 50
 # How many genre names to surface in a picker result for disambiguation.
 _DISPLAY_GENRES = 3
+# On-demand seed tag fetch (#152): fetch tags for at most this many seeds per
+# search request, and give the whole fetch this many seconds before degrading --
+# a bound so a slow/absent ListenBrainz endpoint can't dominate the search hot
+# path (the client's own retries/backoff could otherwise run for minutes).
+_SEED_TAG_FETCH_CAP = 3
+_SEED_TAG_FETCH_TIMEOUT = 5.0
 
 router = fastapi.APIRouter(prefix="/artists", tags=["artists"])
 
@@ -105,21 +115,6 @@ def display_genres(tags: list[music_models.ArtistTag]) -> list[str]:
     return [t.tag for t in genres[:_DISPLAY_GENRES]]
 
 
-def _genre_sort_value(affinity: float | None) -> float:
-    """Rank key from an affinity score, keeping unknown distinct from mismatch.
-
-    Positive overlap ranks highest (its value), an unknown-genre candidate
-    (``None``) is neutral at 0.0, and a confirmed 0.0 genre mismatch sinks below
-    neutral -- so an untagged possible-match is never tied below a known off-genre
-    artist (#136 / affinity primitive finding).
-    """
-    if affinity is None:
-        return 0.0
-    if affinity == 0.0:
-        return -1.0
-    return affinity
-
-
 def rank_search_candidates(
     candidates: list[music_models.Artist | Any],
     in_library: set[uuid.UUID],
@@ -141,7 +136,7 @@ def rank_search_candidates(
             if seed_tag_lists
             else None
         )
-        affinity_sort[a.id] = _genre_sort_value(score)
+        affinity_sort[a.id] = genre_module.sort_value(score)
 
     return sorted(
         candidates,
@@ -210,6 +205,54 @@ async def list_artists(
     }
 
 
+async def _ensure_seed_tags(
+    request: fastapi.Request,
+    db: sa_async.AsyncSession,
+    seed_ids: list[uuid.UUID],
+) -> None:
+    """Fetch+persist genre tags on demand for seed artists missing them (#152).
+
+    Loads the seed artists and, for those unattempted with a valid MBID, fetches
+    their tags from the ListenBrainz endpoint and persists them -- so a seed that
+    gained an MBID after the last GENRE_BACKFILL still ranks candidates by genre
+    instead of falling to neutral. Best-effort: bounded to
+    :data:`_SEED_TAG_FETCH_CAP` seeds and wrapped in a
+    :data:`_SEED_TAG_FETCH_TIMEOUT` deadline, and any failure (endpoint down,
+    timeout, hard HTTP error) degrades to the existing tags rather than failing the
+    search. Commits only when tags were actually written.
+    """
+    seed_artists = list(
+        (
+            await db.execute(
+                sa.select(music_models.Artist).where(
+                    music_models.Artist.id.in_(seed_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    settings = request.app.state.settings
+    client = artist_tags_module.ArtistTagsClient(settings)
+    try:
+        ok = await asyncio.wait_for(
+            backfill_module.fetch_and_persist_tags(
+                db, client, seed_artists[:_SEED_TAG_FETCH_CAP]
+            ),
+            timeout=_SEED_TAG_FETCH_TIMEOUT,
+        )
+    except TimeoutError, httpx.HTTPError:
+        # Best-effort enrichment on a hot path: never fail the search. Roll back
+        # any partial writes so the request's session is clean for later queries.
+        await db.rollback()
+        logger.warning("seed_tag_fetch_degraded", seeds=len(seed_ids))
+    else:
+        if ok:
+            await db.commit()
+    finally:
+        await client.aclose()
+
+
 @router.get(
     "/search",
     summary="Search artists by name",
@@ -217,6 +260,7 @@ async def list_artists(
 )
 async def search_artists(
     q: str,
+    request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     limit: Annotated[int, fastapi.Query(ge=1, le=_SEARCH_CANDIDATE_CAP)] = 10,
@@ -264,8 +308,15 @@ async def search_artists(
 
     in_library = await artists_in_library(db, [a.id for a in candidates])
 
-    # Batch-load genre tags for candidates + seeds in one query each (no N+1).
     seed_ids = list(seed_artist_ids or [])
+    # On-demand seed tag fetch (#152): a seed that gained an MBID after the last
+    # GENRE_BACKFILL has no tags yet, so its affinity would be neutral and the
+    # disambiguation weaker. Fetch+persist for such seeds (bounded, best-effort)
+    # so the tag load below reads fresh rows.
+    if seed_ids:
+        await _ensure_seed_tags(request, db, seed_ids)
+
+    # Batch-load genre tags for candidates + seeds in one query each (no N+1).
     tags_by_artist = await load_artist_tags(db, [a.id for a in candidates] + seed_ids)
     seed_tag_lists = [
         genre_pairs(tags_by_artist.get(sid, []))

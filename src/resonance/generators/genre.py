@@ -109,6 +109,22 @@ def cosine(a: GenreVector, b: GenreVector) -> float:
     return min(1.0, dot / (norm_a * norm_b))
 
 
+def sort_value(affinity: float | None) -> float:
+    """Rank key from an affinity score, keeping unknown distinct from mismatch.
+
+    Positive overlap ranks by its own value, an unknown-genre candidate (``None``)
+    stays neutral at 0.0, and a confirmed 0.0 mismatch sinks below neutral (-1.0)
+    -- so an untagged possible match is never ranked below a known off-genre one.
+    Shared by the disambiguation picker (#136) and the enrich genre guard (#153);
+    consumers sort by ``-sort_value(...)`` for on-genre-first order.
+    """
+    if affinity is None:
+        return 0.0
+    if affinity == 0.0:
+        return -1.0
+    return affinity
+
+
 def affinity_score(
     candidate_tags: abc.Iterable[tuple[str | None, float]],
     seed_tag_lists: abc.Iterable[abc.Iterable[tuple[str | None, float]]],

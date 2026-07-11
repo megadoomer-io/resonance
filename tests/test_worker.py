@@ -2,6 +2,7 @@
 
 import datetime
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,7 @@ import resonance.models.generator as generator_models
 import resonance.models.task as task_module
 import resonance.models.taste as taste_models
 import resonance.models.user as user_models
+import resonance.services.artist_tags as artist_tags_module
 import resonance.sync.base as sync_base
 import resonance.types as types_module
 import resonance.worker as worker_module
@@ -3876,6 +3878,13 @@ def _artist_ns(name: str = "Seed", **over: Any) -> Any:
     return MagicMock(**base)
 
 
+def _genre_pairs_res(rows: list[Any]) -> Any:
+    """A SELECT result for the enrich genre guard's _load_genre_pairs query (#153)."""
+    res = MagicMock()
+    res.scalars.return_value.all.return_value = rows
+    return res
+
+
 class TestFetchSimilarWithStore:
     """_fetch_similar_with_store: stored-first, live fallback, refresh-if-old."""
 
@@ -4037,7 +4046,7 @@ def _enrich_ctx(session: AsyncMock, *, has_similar: bool = True) -> dict[str, An
     registry.get_base_connector.return_value = AsyncMock()
     return {
         "session_factory": _mock_session_factory(session),
-        "settings": MagicMock(),
+        "settings": SimpleNamespace(mbid_mapper_batch_size=50),
         "connector_registry": registry,
         "strategies": {},
         "redis": AsyncMock(),
@@ -4103,7 +4112,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = []
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
         with patch.object(worker_module, "resolve_pool", AsyncMock(return_value=[])):
             await worker_module.enrich_related_artists(
                 _enrich_ctx(session, has_similar=False), str(task.id or uuid.uuid4())
@@ -4136,7 +4150,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [core_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
 
         collect = AsyncMock(return_value=[new1, new2])
         with (
@@ -4196,7 +4215,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [seed_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
 
         with (
             patch.object(
@@ -4256,7 +4280,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [core_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
         # Commits in order: phase-0 RUNNING, phase-1 edges, phase-2 attempt 0
         # (conflict), phase-2 attempt 1 (succeeds after reload + merge).
         session.commit.side_effect = [None, None, orm_exc.StaleDataError("x"), None]
@@ -4337,7 +4366,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [seed_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
 
         collect = AsyncMock(return_value=[new1, new2])
         with (
@@ -4403,7 +4437,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [seed_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
 
         collect = AsyncMock(return_value=[uuid.uuid4()])
         with (
@@ -4467,7 +4506,12 @@ class TestEnrichRelatedArtists:
         profile_res.scalar_one_or_none.return_value = profile
         artists_res = MagicMock()
         artists_res.scalars.return_value.all.return_value = [seed_artist]
-        session.execute.side_effect = [task_res, profile_res, artists_res]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
 
         collect = AsyncMock(return_value=[new1])
         with (
@@ -4494,3 +4538,218 @@ class TestEnrichRelatedArtists:
         assert collect.await_args.args[5] == 1
         # The excluded artist is in the exclude set -> never re-suggested.
         assert disc2 in collect.await_args.args[4]
+
+
+class TestRankCandidatesByGenre:
+    """_rank_candidates_by_genre: pure genre re-ranking of import candidates (#153)."""
+
+    def test_off_genre_sinks_unknown_neutral_on_genre_first(self) -> None:
+        candidates = [
+            ("Polka", "m-polka"),
+            ("Unknown", "m-unk"),
+            ("Metal", "m-metal"),
+        ]
+        pairs = {
+            "m-polka": [("g-polka", 5.0)],  # confirmed off-genre
+            "m-metal": [("g-metal", 9.0)],  # on-genre
+            # m-unk absent -> no genre data -> neutral (never penalized)
+        }
+        seeds = [[("g-metal", 8.0)]]
+
+        out = worker_module._rank_candidates_by_genre(candidates, pairs, seeds)
+
+        assert out == [
+            ("Metal", "m-metal"),  # on-genre rises
+            ("Unknown", "m-unk"),  # unknown neutral, above confirmed mismatch
+            ("Polka", "m-polka"),  # off-genre sinks last
+        ]
+
+    def test_no_seed_basis_returns_input_order(self) -> None:
+        candidates = [("A", "m1"), ("B", "m2")]
+        assert worker_module._rank_candidates_by_genre(candidates, {}, []) == candidates
+
+    def test_empty_seed_vectors_return_input_order(self) -> None:
+        candidates = [("A", "m1"), ("B", "m2")]
+        # A seed list of empty vectors is no basis -> unchanged order.
+        assert (
+            worker_module._rank_candidates_by_genre(candidates, {}, [[]]) == candidates
+        )
+
+    def test_stable_within_affinity_tier(self) -> None:
+        # Two equally on-genre candidates keep their similarity (input) order.
+        candidates = [("First", "m1"), ("Second", "m2")]
+        pairs = {"m1": [("g-metal", 5.0)], "m2": [("g-metal", 5.0)]}
+        seeds = [[("g-metal", 8.0)]]
+        assert (
+            worker_module._rank_candidates_by_genre(candidates, pairs, seeds)
+            == candidates
+        )
+
+
+class TestGenreRankCandidates:
+    """_genre_rank_candidates: on-demand tag fetch + re-rank, best-effort (#153)."""
+
+    @pytest.mark.anyio()
+    async def test_fetches_by_mbid_and_reranks(self) -> None:
+        client = SimpleNamespace(
+            fetch_tags=AsyncMock(
+                return_value={
+                    "m-metal": [
+                        artist_tags_module.ArtistTagResult(
+                            tag="metal", count=9, genre_mbid="g-metal"
+                        )
+                    ],
+                    "m-polka": [
+                        artist_tags_module.ArtistTagResult(
+                            tag="polka", count=5, genre_mbid="g-polka"
+                        )
+                    ],
+                }
+            )
+        )
+        candidates = [("Polka", "m-polka"), ("Metal", "m-metal")]
+        out = await worker_module._genre_rank_candidates(
+            client, candidates, [[("g-metal", 8.0)]]
+        )
+        assert out == [("Metal", "m-metal"), ("Polka", "m-polka")]
+
+    @pytest.mark.anyio()
+    async def test_degrades_to_similarity_order_on_unavailable(self) -> None:
+        client = SimpleNamespace(
+            fetch_tags=AsyncMock(
+                side_effect=artist_tags_module.ArtistTagsUnavailableError("down")
+            )
+        )
+        candidates = [("A", "m1"), ("B", "m2")]
+        out = await worker_module._genre_rank_candidates(
+            client, candidates, [[("g-metal", 8.0)]]
+        )
+        assert out == candidates  # unchanged, never blocks enrichment
+
+    @pytest.mark.anyio()
+    async def test_no_mbids_skips_fetch(self) -> None:
+        fetch = AsyncMock()
+        client = SimpleNamespace(fetch_tags=fetch)
+        candidates: list[tuple[str, str]] = []
+        out = await worker_module._genre_rank_candidates(
+            client, candidates, [[("g-metal", 8.0)]]
+        )
+        assert out == candidates
+        fetch.assert_not_awaited()
+
+
+class TestCollectRelatedGenreGuard:
+    """_collect_related applies the genre guard to imports, not library (#153)."""
+
+    @pytest.mark.anyio()
+    async def test_guard_reorders_imports_off_genre_last(self) -> None:
+        seed = MagicMock()
+        seed.name = "Metal Seed"
+        seed.service_links = None
+        seed.id = uuid.uuid4()
+
+        # Similarity order puts the OFF-genre neighbor first; the guard must move
+        # the on-genre one ahead of it before import.
+        async def neighbor_fetch(
+            connector: Any, artist: Any, limit: int
+        ) -> list[dict[str, Any]]:
+            return [
+                {"name": "Polka Band", "mbid": "m-polka"},
+                {"name": "Metal Band", "mbid": "m-metal"},
+            ]
+
+        # No library matches -> both neighbors become import candidates.
+        empty = MagicMock()
+        empty.all.return_value = []
+        session = AsyncMock()
+        session.execute.return_value = empty
+
+        genre_client = SimpleNamespace(
+            fetch_tags=AsyncMock(
+                return_value={
+                    "m-metal": [
+                        artist_tags_module.ArtistTagResult(
+                            tag="metal", count=9, genre_mbid="g-metal"
+                        )
+                    ],
+                    "m-polka": [
+                        artist_tags_module.ArtistTagResult(
+                            tag="polka", count=5, genre_mbid="g-polka"
+                        )
+                    ],
+                }
+            )
+        )
+
+        metal_id, polka_id = uuid.uuid4(), uuid.uuid4()
+        imported_order: list[str] = []
+
+        async def fake_import(session: Any, connector: Any, mbid: str) -> Any:
+            imported_order.append(mbid)
+            return SimpleNamespace(id=metal_id if mbid == "m-metal" else polka_id)
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            side_effect=fake_import,
+        ):
+            new_ids = await worker_module._collect_related(
+                session,
+                [AsyncMock()],
+                MagicMock(),  # lb_connector (not None -> imports run)
+                [seed],
+                set(),
+                5,  # target_n large enough to import both
+                neighbor_fetch,
+                MagicMock(),  # log
+                genre_client=genre_client,
+                seed_tag_lists=[[("g-metal", 8.0)]],
+            )
+
+        assert imported_order == ["m-metal", "m-polka"]  # on-genre imported first
+        assert new_ids == [metal_id, polka_id]
+
+    @pytest.mark.anyio()
+    async def test_no_guard_keeps_similarity_order(self) -> None:
+        # Without a genre_client the import order is provider similarity rank.
+        seed = MagicMock()
+        seed.name = "Seed"
+        seed.service_links = None
+        seed.id = uuid.uuid4()
+
+        async def neighbor_fetch(
+            connector: Any, artist: Any, limit: int
+        ) -> list[dict[str, Any]]:
+            return [
+                {"name": "Polka Band", "mbid": "m-polka"},
+                {"name": "Metal Band", "mbid": "m-metal"},
+            ]
+
+        empty = MagicMock()
+        empty.all.return_value = []
+        session = AsyncMock()
+        session.execute.return_value = empty
+
+        imported_order: list[str] = []
+
+        async def fake_import(session: Any, connector: Any, mbid: str) -> Any:
+            imported_order.append(mbid)
+            return SimpleNamespace(id=uuid.uuid4())
+
+        with patch.object(
+            worker_module.artist_import_module,
+            "import_artist_by_mbid",
+            side_effect=fake_import,
+        ):
+            await worker_module._collect_related(
+                session,
+                [AsyncMock()],
+                MagicMock(),
+                [seed],
+                set(),
+                5,
+                neighbor_fetch,
+                MagicMock(),
+            )
+
+        assert imported_order == ["m-polka", "m-metal"]  # unchanged similarity order

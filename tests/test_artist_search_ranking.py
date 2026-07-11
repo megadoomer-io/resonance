@@ -5,8 +5,13 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
 
 import resonance.api.v1.artists as artists_module
+import resonance.sync.backfill as backfill_module
 
 
 def _artist(name: str) -> SimpleNamespace:
@@ -81,3 +86,84 @@ class TestRankSearchCandidates:
             [cold_metal, mine_pop], {mine_pop.id}, tags, seeds
         )
         assert ranked[0] is mine_pop
+
+
+class _FakeScalars:
+    def __init__(self, items: list[Any]) -> None:
+        self._items = items
+
+    def all(self) -> list[Any]:
+        return self._items
+
+
+class _FakeSeedResult:
+    def __init__(self, items: list[Any]) -> None:
+        self._items = items
+
+    def scalars(self) -> _FakeScalars:
+        return _FakeScalars(self._items)
+
+
+class _FakeDB:
+    """Minimal async session: SELECT returns seeds; records commit/rollback."""
+
+    def __init__(self, seeds: list[Any]) -> None:
+        self._seeds = seeds
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def execute(self, *a: Any, **k: Any) -> _FakeSeedResult:
+        return _FakeSeedResult(self._seeds)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def _fake_request() -> Any:
+    settings = SimpleNamespace(mbid_mapper_batch_size=50)
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(settings=settings))
+    )
+
+
+class TestEnsureSeedTags:
+    """_ensure_seed_tags orchestration: commit on success, degrade on failure (#152)."""
+
+    @pytest.mark.anyio()
+    async def test_commits_when_tags_written(self, monkeypatch: Any) -> None:
+        db = _FakeDB([SimpleNamespace(id=uuid.uuid4())])
+        monkeypatch.setattr(
+            backfill_module, "fetch_and_persist_tags", AsyncMock(return_value=True)
+        )
+        await artists_module._ensure_seed_tags(_fake_request(), db, [uuid.uuid4()])
+        assert db.commits == 1
+        assert db.rollbacks == 0
+
+    @pytest.mark.anyio()
+    async def test_no_commit_when_endpoint_unavailable(self, monkeypatch: Any) -> None:
+        # fetch_and_persist_tags returns False (LB down) -> nothing written, no commit.
+        db = _FakeDB([SimpleNamespace(id=uuid.uuid4())])
+        monkeypatch.setattr(
+            backfill_module, "fetch_and_persist_tags", AsyncMock(return_value=False)
+        )
+        await artists_module._ensure_seed_tags(_fake_request(), db, [uuid.uuid4()])
+        assert db.commits == 0
+        assert db.rollbacks == 0
+
+    @pytest.mark.anyio()
+    async def test_rolls_back_and_degrades_on_http_error(
+        self, monkeypatch: Any
+    ) -> None:
+        # A hard HTTP error must not fail the search: roll back, do not commit.
+        db = _FakeDB([SimpleNamespace(id=uuid.uuid4())])
+        monkeypatch.setattr(
+            backfill_module,
+            "fetch_and_persist_tags",
+            AsyncMock(side_effect=httpx.HTTPError("boom")),
+        )
+        await artists_module._ensure_seed_tags(_fake_request(), db, [uuid.uuid4()])
+        assert db.commits == 0
+        assert db.rollbacks == 1

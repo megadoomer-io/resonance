@@ -189,3 +189,111 @@ class TestRunGenreBackfill:
         assert counts.candidates == 2
         assert counts.updated == 2
         assert session.commits == 2  # one per populated batch
+
+
+class _SimpleSession:
+    """Fake session for the on-demand path: records deletes/adds, no SELECT routing."""
+
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+        self.deletes = 0
+
+    async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
+        if isinstance(stmt, sa.Delete):
+            self.deletes += 1
+        return SimpleNamespace()
+
+    def add(self, obj: Any) -> None:
+        self.added.append(obj)
+
+
+class TestFetchAndPersistTags:
+    """On-demand fetch+persist for a bounded artist set (#152)."""
+
+    @pytest.mark.anyio()
+    async def test_happy_path_persists_and_stamps(self) -> None:
+        art = _artist("33333333-3333-3333-3333-333333333333")
+        session = _SimpleSession()
+        client = _client(
+            {"33333333-3333-3333-3333-333333333333": [_tag("rock", 5, "g-rock")]}
+        )
+
+        ok = await backfill_module.fetch_and_persist_tags(session, client, [art])
+
+        assert ok is True
+        assert art.genre_attempted_at is not None
+        assert session.deletes == 1  # wholesale-replace
+        assert session.added[0].tag == "rock"
+        assert session.added[0].genre_mbid == "g-rock"
+
+    @pytest.mark.anyio()
+    async def test_no_tags_still_stamps(self) -> None:
+        art = _artist("33333333-3333-3333-3333-333333333333")
+        session = _SimpleSession()
+        client = _client({})  # LB knows nothing for this MBID
+
+        ok = await backfill_module.fetch_and_persist_tags(session, client, [art])
+
+        assert ok is True
+        assert art.genre_attempted_at is not None  # attempted, no tags
+        assert session.added == []
+        assert session.deletes == 1  # clears any stale tags
+
+    @pytest.mark.anyio()
+    async def test_transient_returns_false_writes_nothing(self) -> None:
+        art = _artist("33333333-3333-3333-3333-333333333333")
+        session = _SimpleSession()
+        client = SimpleNamespace(
+            fetch_tags=AsyncMock(
+                side_effect=artist_tags_module.ArtistTagsUnavailableError("down")
+            )
+        )
+
+        ok = await backfill_module.fetch_and_persist_tags(session, client, [art])
+
+        assert ok is False  # caller degrades to existing tags
+        assert art.genre_attempted_at is None  # not stamped -> retried later
+        assert session.added == []
+        assert session.deletes == 0
+
+    @pytest.mark.anyio()
+    async def test_skips_already_attempted(self) -> None:
+        art = _artist("33333333-3333-3333-3333-333333333333")
+        art.genre_attempted_at = object()  # already attempted
+        session = _SimpleSession()
+        fetch = AsyncMock(return_value={})
+        client = SimpleNamespace(fetch_tags=fetch)
+
+        ok = await backfill_module.fetch_and_persist_tags(session, client, [art])
+
+        assert ok is True
+        fetch.assert_not_awaited()  # nothing pending -> no LB call
+        assert session.deletes == 0
+
+    @pytest.mark.anyio()
+    async def test_skips_invalid_and_missing_mbid(self) -> None:
+        bad = _artist("not-a-uuid")
+        no_mbid = _artist(None)
+        good = _artist("a74b1b7f-71a5-4011-9441-d0b5e4122711")
+        session = _SimpleSession()
+        fetch = AsyncMock(return_value={"a74b1b7f-71a5-4011-9441-d0b5e4122711": []})
+        client = SimpleNamespace(fetch_tags=fetch)
+
+        ok = await backfill_module.fetch_and_persist_tags(
+            session, client, [bad, no_mbid, good]
+        )
+
+        assert ok is True
+        # Only the valid MBID is sent (a malformed one would 400 the batch).
+        fetch.assert_awaited_once_with(["a74b1b7f-71a5-4011-9441-d0b5e4122711"])
+        assert good.genre_attempted_at is not None
+        assert bad.genre_attempted_at is None  # not a candidate, left alone
+        assert no_mbid.genre_attempted_at is None
+
+    @pytest.mark.anyio()
+    async def test_empty_input_is_noop_success(self) -> None:
+        fetch = AsyncMock()
+        client = SimpleNamespace(fetch_tags=fetch)
+        ok = await backfill_module.fetch_and_persist_tags(_SimpleSession(), client, [])
+        assert ok is True
+        fetch.assert_not_awaited()

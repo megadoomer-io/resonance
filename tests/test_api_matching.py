@@ -271,10 +271,12 @@ class TestArtistSearch:
             artist_id=artist.id, tag="black metal", genre_mbid="g1", count=9
         )
         db = FakeAsyncSession()
-        # Query order: exact-name, substring, in-library, tags.
+        # Query order: exact-name, substring, in-library, seed-load (#152 on-demand
+        # seed tag fetch -- no seed rows here, so no LB fetch), tags.
         db.set_results(
             [
                 FakeResult([artist]),
+                FakeResult([]),
                 FakeResult([]),
                 FakeResult([]),
                 FakeResult([tag]),
