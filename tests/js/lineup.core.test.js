@@ -1,20 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  absoluteWindow,
   addEventGroup,
   addManualArtist,
   allArtistIds,
   artistMeta,
+  clampSeedCount,
   escapeHtml,
   groupKey,
   hasArtist,
   isEmpty,
+  isWindowValid,
+  presetIdForWindow,
   pruneEmpty,
   removeArtistFromGroup,
   removeGroup,
   serializeInputReferences,
+  serializeRediscovery,
   setEventArtists,
   toggleArtist,
+  windowDates,
+  windowFromPreset,
 } from "../../src/resonance/static/lineup.core.js";
 
 const row = (id, included = true) => ({ id, name: id, meta: "", included });
@@ -185,5 +192,147 @@ describe("serializeInputReferences", () => {
       sources: [],
       exclude_artist_ids: [],
     });
+  });
+});
+
+/* ===== Rediscovery window (#rediscovery-ui) ===== */
+
+// A fixed instant so preset date math is deterministic: 2026-07-20 00:00:00 UTC.
+const NOW = Date.UTC(2026, 6, 20);
+
+describe("windowFromPreset", () => {
+  it("last_2_weeks is a rolling relative window", () => {
+    expect(windowFromPreset("last_2_weeks", NOW)).toEqual({
+      kind: "relative",
+      lookback_days: 14,
+    });
+  });
+  it("a_month_ago snaps to absolute now-44..now-16 day bounds", () => {
+    expect(windowFromPreset("a_month_ago", NOW)).toEqual({
+      kind: "absolute",
+      start: "2026-06-06T00:00:00",
+      end: "2026-07-04T23:59:59",
+    });
+  });
+  it("this_time_last_year snaps to absolute now-379..now-351 bounds", () => {
+    expect(windowFromPreset("this_time_last_year", NOW)).toEqual({
+      kind: "absolute",
+      start: "2025-07-06T00:00:00",
+      end: "2025-08-03T23:59:59",
+    });
+  });
+  it("returns null for custom (built from the date inputs)", () => {
+    expect(windowFromPreset("custom", NOW)).toBeNull();
+  });
+});
+
+describe("absoluteWindow", () => {
+  it("snaps end to end-of-day so the end date is inclusive", () => {
+    expect(absoluteWindow("2025-01-01", "2025-01-31")).toEqual({
+      kind: "absolute",
+      start: "2025-01-01T00:00:00",
+      end: "2025-01-31T23:59:59",
+    });
+  });
+});
+
+describe("presetIdForWindow", () => {
+  it("relative -> the rolling preset", () => {
+    expect(presetIdForWindow({ kind: "relative", lookback_days: 14 })).toBe(
+      "last_2_weeks"
+    );
+  });
+  it("absolute -> custom (preset identity not persisted)", () => {
+    expect(presetIdForWindow(absoluteWindow("2025-01-01", "2025-01-31"))).toBe(
+      "custom"
+    );
+  });
+  it("missing window -> the rolling preset default", () => {
+    expect(presetIdForWindow(null)).toBe("last_2_weeks");
+    expect(presetIdForWindow(undefined)).toBe("last_2_weeks");
+  });
+});
+
+describe("windowDates", () => {
+  it("extracts YYYY-MM-DD from an absolute window", () => {
+    expect(windowDates(absoluteWindow("2025-03-04", "2025-03-18"))).toEqual({
+      start: "2025-03-04",
+      end: "2025-03-18",
+    });
+  });
+  it("is empty for a relative or missing window", () => {
+    expect(windowDates({ kind: "relative", lookback_days: 14 })).toEqual({
+      start: "",
+      end: "",
+    });
+    expect(windowDates(null)).toEqual({ start: "", end: "" });
+  });
+});
+
+describe("clampSeedCount", () => {
+  it("clamps to [5, 50]", () => {
+    expect(clampSeedCount(1)).toBe(5);
+    expect(clampSeedCount(999)).toBe(50);
+    expect(clampSeedCount(20)).toBe(20);
+  });
+  it("falls back to 20 on non-numeric input", () => {
+    expect(clampSeedCount("")).toBe(20);
+    expect(clampSeedCount("abc")).toBe(20);
+  });
+  it("parses numeric strings", () => {
+    expect(clampSeedCount("30")).toBe(30);
+  });
+});
+
+describe("isWindowValid", () => {
+  it("relative needs a positive lookback", () => {
+    expect(isWindowValid({ kind: "relative", lookback_days: 14 })).toBe(true);
+    expect(isWindowValid({ kind: "relative", lookback_days: 0 })).toBe(false);
+  });
+  it("absolute needs start before end", () => {
+    expect(isWindowValid(absoluteWindow("2025-01-01", "2025-01-31"))).toBe(true);
+    // same-day is still valid (00:00:00 < 23:59:59)
+    expect(isWindowValid(absoluteWindow("2025-01-01", "2025-01-01"))).toBe(true);
+    expect(
+      isWindowValid({ kind: "absolute", start: "2025-02-01T00:00:00", end: "2025-01-01T23:59:59" })
+    ).toBe(false);
+  });
+  it("null/unknown is invalid", () => {
+    expect(isWindowValid(null)).toBe(false);
+    expect(isWindowValid({ kind: "weekly" })).toBe(false);
+  });
+});
+
+describe("serializeRediscovery", () => {
+  it("leads with the listening_range source and preserves via_seed discoveries", () => {
+    const window = { kind: "relative", lookback_days: 14 };
+    const groups = [
+      { kind: "related", scope: "lineup", artists: [row("r1"), row("r2", false)] },
+    ];
+    const out = serializeRediscovery(window, 20, groups);
+    expect(out.sources[0]).toEqual({
+      kind: "listening_range",
+      enabled: true,
+      window: { kind: "relative", lookback_days: 14 },
+      seed_artist_count: 20,
+      deep_cut_basis: "lifetime",
+      novelty_basis: "lifetime",
+    });
+    expect(out.sources.slice(1)).toEqual([
+      { kind: "artist", artist_id: "r1", enabled: true, via_seed: "lineup" },
+      { kind: "artist", artist_id: "r2", enabled: true, via_seed: "lineup" },
+    ]);
+    expect(out.exclude_artist_ids).toEqual(["r2"]);
+  });
+  it("emits only the window source when there are no discoveries", () => {
+    const out = serializeRediscovery(
+      absoluteWindow("2025-01-01", "2025-01-31"),
+      30,
+      []
+    );
+    expect(out.sources).toHaveLength(1);
+    expect(out.sources[0].kind).toBe("listening_range");
+    expect(out.sources[0].seed_artist_count).toBe(30);
+    expect(out.exclude_artist_ids).toEqual([]);
   });
 });
