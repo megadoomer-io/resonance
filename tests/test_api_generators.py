@@ -259,6 +259,48 @@ class TestValidateProfileInputs:
             )
 
 
+class TestRediscoveryProfile:
+    """Creating/validating a REDISCOVERY profile (#rediscovery)."""
+
+    def test_listening_range_profile_passes_validation(self) -> None:
+        body = {
+            "name": "Last 2 Weeks",
+            "generator_type": "rediscovery",
+            "input_references": {
+                "sources": [
+                    {
+                        "kind": "listening_range",
+                        "enabled": True,
+                        "window": {"kind": "relative", "lookback_days": 14},
+                        "seed_artist_count": 20,
+                    }
+                ]
+            },
+            "parameter_values": {"new_ratio": 50, "less_heard_percentile": 33},
+        }
+        request = generators_module.CreateProfileRequest(**body)
+        assert request.generator_type == types_module.GeneratorType.REDISCOVERY
+        # A listening_range source is a non-empty enabled pool -> passes.
+        generators_module.validate_profile_inputs(
+            request.input_references, request.generator_type
+        )
+
+    def test_malformed_window_rejected(self) -> None:
+        body = {
+            "name": "Bad Window",
+            "generator_type": "rediscovery",
+            "input_references": {
+                "sources": [{"kind": "listening_range", "window": {"kind": "nope"}}]
+            },
+            "parameter_values": {},
+        }
+        request = generators_module.CreateProfileRequest(**body)
+        with pytest.raises(ValueError, match="Invalid input_references"):
+            generators_module.validate_profile_inputs(
+                request.input_references, request.generator_type
+            )
+
+
 # --- enrich endpoint (#133) ---
 
 

@@ -3866,6 +3866,79 @@ class TestResolvePool:
 
         assert [r.artist_id for r in pool] == [a1]  # event wins, artist dup dropped
 
+    async def test_listening_range_resolves_seeds_in_order(self) -> None:
+        import resonance.generators.pool as pool_module
+
+        a1, a2 = uuid.uuid4(), uuid.uuid4()
+        user_id = uuid.uuid4()
+        # _seed_artists_in_window does session.execute(...).all() -> [(artist, cnt)].
+        seed_result = MagicMock()
+        seed_result.all.return_value = [(a1, 5), (a2, 3)]
+        session = AsyncMock()
+        session.execute.return_value = seed_result
+
+        refs = {
+            "sources": [
+                {
+                    "kind": "listening_range",
+                    "enabled": True,
+                    "window": {"kind": "relative", "lookback_days": 14},
+                    "seed_artist_count": 20,
+                }
+            ]
+        }
+        pool = await worker_module.resolve_pool(session, refs, user_id=user_id)
+
+        # Seeds enter in the query's rank order, tagged LISTENING_RANGE provenance.
+        assert [r.artist_id for r in pool] == [a1, a2]
+        assert all(r.via is pool_module.PoolProvenance.LISTENING_RANGE for r in pool)
+
+    async def test_listening_range_requires_user_id(self) -> None:
+        session = AsyncMock()
+        refs = {
+            "sources": [
+                {
+                    "kind": "listening_range",
+                    "window": {"kind": "relative", "lookback_days": 14},
+                }
+            ]
+        }
+        with pytest.raises(ValueError, match="requires user_id"):
+            await worker_module.resolve_pool(session, refs)
+
+    async def test_listening_range_ordered_after_events(self) -> None:
+        import resonance.generators.pool as pool_module
+
+        ev_artist, seed_artist = uuid.uuid4(), uuid.uuid4()
+        eid = uuid.uuid4()
+        user_id = uuid.uuid4()
+        ea = MagicMock()
+        ea.artist_id = ev_artist
+        seed_result = MagicMock()
+        seed_result.all.return_value = [(seed_artist, 4)]
+        session = AsyncMock()
+        # Order of execute calls: EventArtist scalars, candidate scalars, seed query.
+        session.execute.side_effect = [
+            _scalars_result([ea]),
+            _scalars_result([]),
+            seed_result,
+        ]
+
+        refs = {
+            "sources": [
+                {"kind": "event", "event_id": str(eid), "enabled": True},
+                {
+                    "kind": "listening_range",
+                    "window": {"kind": "relative", "lookback_days": 14},
+                },
+            ]
+        }
+        pool = await worker_module.resolve_pool(session, refs, user_id=user_id)
+
+        assert [r.artist_id for r in pool] == [ev_artist, seed_artist]
+        assert pool[0].via is pool_module.PoolProvenance.EVENT
+        assert pool[1].via is pool_module.PoolProvenance.LISTENING_RANGE
+
 
 # ---------------------------------------------------------------------------
 # Related-artist enrichment (#133)

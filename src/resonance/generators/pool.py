@@ -37,9 +37,11 @@ The DB/connector resolution step (event -> artists) lives in the worker's
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import enum
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Literal
 
 
 class PoolSourceKind(enum.StrEnum):
@@ -47,6 +49,12 @@ class PoolSourceKind(enum.StrEnum):
 
     EVENT = "event"
     ARTIST = "artist"
+    # A time window over listening history that resolves to the user's top seed
+    # artists in that window (#rediscovery). The reusable "seed-window" primitive:
+    # scoped as a source kind so a future generic generator can consume it too
+    # (deferred Approach C). Its window kind drives regenerate semantics (see
+    # ListeningWindow).
+    LISTENING_RANGE = "listening_range"
 
 
 # Provenance shares the source vocabulary: an artist enters the pool *via* the kind
@@ -80,7 +88,51 @@ class ArtistSource:
     via_seed: str | None = None
 
 
-PoolSource = EventSource | ArtistSource
+@dataclasses.dataclass(frozen=True)
+class ListeningWindow:
+    """A time window over listening history, selecting seed artists (#rediscovery).
+
+    ``kind`` drives regenerate semantics (design R4):
+
+    * ``relative`` -- re-resolves to ``[now - lookback_days, now]`` on every
+      generation, so the seed set rolls forward. A living feed of the current
+      rotation ("last 2 weeks").
+    * ``absolute`` -- fixed ``start``/``end`` (stored once at create), so the seed
+      set is frozen. A stable artifact you return to ("this time last year"), and
+      the kind under which deep cuts are exempt from the freshness drop so a
+      rediscovered cut persists across regenerates.
+
+    Exactly one shape is populated: ``lookback_days`` for ``relative``, or
+    ``start`` + ``end`` for ``absolute``. This is a pure recipe object; the DB
+    query that turns bounds into seed artists lives in the worker.
+    """
+
+    kind: Literal["relative", "absolute"]
+    lookback_days: int | None = None
+    start: datetime.datetime | None = None
+    end: datetime.datetime | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ListeningRangeSource:
+    """Resolve a listening-history window to the user's top seed artists.
+
+    The window defines *which* artists seed the pool; ``seed_artist_count`` caps
+    how many (ranked by distinct-track listens in the window). ``deep_cut_basis``
+    and ``novelty_basis`` are the non-numeric recipe flags the int-only parameter
+    system can't hold (design R1); they live here on the source rather than at the
+    top level so the enrich round-trip (which re-serializes sources) can't drop
+    them. v1 scores lifetime-only; the ``window`` basis path is a plumbed seam.
+    """
+
+    window: ListeningWindow
+    seed_artist_count: int = 20
+    deep_cut_basis: Literal["lifetime", "window"] = "lifetime"
+    novelty_basis: Literal["lifetime", "window"] = "lifetime"
+    enabled: bool = True
+
+
+PoolSource = EventSource | ArtistSource | ListeningRangeSource
 
 
 @dataclasses.dataclass(frozen=True)
@@ -123,6 +175,104 @@ def _parse_via_seed(value: object) -> str | None:
     return value
 
 
+def _parse_positive_int(value: object, field: str) -> int:
+    """Parse a positive integer field, raising a clear error on bad input.
+
+    Accepts an int or a numeric string (JSON round-trips ints, but the CLI may
+    pass strings). ``bool`` is rejected explicitly (it is an ``int`` subclass, so
+    ``True`` would silently parse to 1).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        msg = f"{field} must be an integer, got {value!r}"
+        raise ValueError(msg)
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        msg = f"{field} must be an integer, got {value!r}"
+        raise ValueError(msg) from exc
+    if parsed <= 0:
+        msg = f"{field} must be a positive integer, got {parsed}"
+        raise ValueError(msg)
+    return parsed
+
+
+def _parse_datetime(value: object, field: str) -> datetime.datetime:
+    """Parse an ISO 8601 datetime string (or passthrough a datetime)."""
+    if isinstance(value, datetime.datetime):
+        return value
+    try:
+        return datetime.datetime.fromisoformat(str(value))
+    except (ValueError, TypeError) as exc:
+        msg = f"Invalid datetime for {field}: {value!r}"
+        raise ValueError(msg) from exc
+
+
+def _parse_basis(value: object, field: str) -> Literal["lifetime", "window"]:
+    """Parse a scoring-basis flag, defaulting to ``lifetime`` when absent."""
+    if value is None:
+        return "lifetime"
+    if value in ("lifetime", "window"):
+        return value  # type: ignore[return-value]
+    msg = f"{field} must be 'lifetime' or 'window', got {value!r}"
+    raise ValueError(msg)
+
+
+def _parse_window(raw: object) -> ListeningWindow:
+    """Parse a listening window object into a typed :class:`ListeningWindow`.
+
+    Requires ``kind`` of ``relative`` (with a positive ``lookback_days``) or
+    ``absolute`` (with ``start`` before ``end``). Raises on any other shape.
+    """
+    if not isinstance(raw, Mapping):
+        msg = f"'window' must be an object, got {type(raw).__name__}"
+        raise ValueError(msg)
+    kind = raw.get("kind")
+    if kind == "relative":
+        return ListeningWindow(
+            kind="relative",
+            lookback_days=_parse_positive_int(
+                raw.get("lookback_days"), "window.lookback_days"
+            ),
+        )
+    if kind == "absolute":
+        start = _parse_datetime(raw.get("start"), "window.start")
+        end = _parse_datetime(raw.get("end"), "window.end")
+        if end <= start:
+            msg = (
+                "window.end must be after window.start "
+                f"(start={start.isoformat()}, end={end.isoformat()})"
+            )
+            raise ValueError(msg)
+        return ListeningWindow(kind="absolute", start=start, end=end)
+    msg = f"Unknown window kind: {kind!r} (expected 'relative' or 'absolute')"
+    raise ValueError(msg)
+
+
+def resolve_window_bounds(
+    window: ListeningWindow, now: datetime.datetime
+) -> tuple[datetime.datetime, datetime.datetime]:
+    """Resolve a window to concrete ``(start, end)`` bounds against ``now``.
+
+    ``relative`` computes ``[now - lookback_days, now]`` (rolls forward on every
+    call, so the seed set follows the current rotation); ``absolute`` returns its
+    stored ``start``/``end`` (frozen). Pure -- the caller supplies ``now`` so the
+    resolution is deterministic and unit-testable. This is the reusable
+    seed-window primitive's pure half; the DB seed query lives in the worker.
+
+    Raises:
+        ValueError: If the window's fields are inconsistent with its kind.
+    """
+    if window.kind == "relative":
+        if window.lookback_days is None:
+            msg = "relative window requires lookback_days"
+            raise ValueError(msg)
+        return (now - datetime.timedelta(days=window.lookback_days), now)
+    if window.start is None or window.end is None:
+        msg = "absolute window requires start and end"
+        raise ValueError(msg)
+    return (window.start, window.end)
+
+
 def _parse_source(raw: object) -> PoolSource:
     """Parse one source entry into a typed source.
 
@@ -145,6 +295,16 @@ def _parse_source(raw: object) -> PoolSource:
     if kind is PoolSourceKind.EVENT:
         return EventSource(
             event_id=_parse_uuid(raw.get("event_id"), "event_id"), enabled=enabled
+        )
+    if kind is PoolSourceKind.LISTENING_RANGE:
+        return ListeningRangeSource(
+            window=_parse_window(raw.get("window")),
+            seed_artist_count=_parse_positive_int(
+                raw.get("seed_artist_count", 20), "seed_artist_count"
+            ),
+            deep_cut_basis=_parse_basis(raw.get("deep_cut_basis"), "deep_cut_basis"),
+            novelty_basis=_parse_basis(raw.get("novelty_basis"), "novelty_basis"),
+            enabled=enabled,
         )
     # ARTIST (the only remaining kind; unknown kinds raised above).
     return ArtistSource(
@@ -266,6 +426,17 @@ def build_pool(
     return pool
 
 
+def _serialize_window(window: ListeningWindow) -> dict[str, object]:
+    """Serialize a :class:`ListeningWindow` to its stored JSON shape."""
+    if window.kind == "relative":
+        return {"kind": "relative", "lookback_days": window.lookback_days}
+    return {
+        "kind": "absolute",
+        "start": window.start.isoformat() if window.start is not None else None,
+        "end": window.end.isoformat() if window.end is not None else None,
+    }
+
+
 def serialize_source(source: PoolSource) -> dict[str, object]:
     """Serialize a typed source back to its stored JSON shape."""
     if isinstance(source, EventSource):
@@ -273,6 +444,15 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
             "kind": PoolSourceKind.EVENT.value,
             "event_id": str(source.event_id),
             "enabled": source.enabled,
+        }
+    if isinstance(source, ListeningRangeSource):
+        return {
+            "kind": PoolSourceKind.LISTENING_RANGE.value,
+            "enabled": source.enabled,
+            "window": _serialize_window(source.window),
+            "seed_artist_count": source.seed_artist_count,
+            "deep_cut_basis": source.deep_cut_basis,
+            "novelty_basis": source.novelty_basis,
         }
     # ARTIST (the only remaining kind).
     payload: dict[str, object] = {
@@ -285,6 +465,21 @@ def serialize_source(source: PoolSource) -> dict[str, object]:
     if source.via_seed is not None:
         payload["via_seed"] = source.via_seed
     return payload
+
+
+def find_listening_range_source(
+    input_references: Mapping[str, object],
+) -> ListeningRangeSource | None:
+    """Return the first enabled listening_range source, or None (#rediscovery).
+
+    A rediscovery profile carries exactly one. The worker reads it to get the
+    window (which drives freshness/regenerate semantics) and the basis flags,
+    without re-parsing the whole source list at each use site.
+    """
+    for source in normalize_sources(input_references):
+        if isinstance(source, ListeningRangeSource) and source.enabled:
+            return source
+    return None
 
 
 def serialize_input_references(

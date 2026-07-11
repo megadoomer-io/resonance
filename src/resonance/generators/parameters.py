@@ -67,6 +67,30 @@ PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
     # NOTE: the old "similar_artist_ratio" parameter was removed in #133. Related
     # artists are now added to the pool explicitly via the enrich endpoint as
     # concrete artist sources, not folded in at generation time by a slider.
+    "new_ratio": ParameterDefinition(
+        name="new_ratio",
+        display_name="New vs Deep Cuts",
+        description=(
+            "Balance between never-heard new artists and less-heard deep cuts "
+            "from artists you already spin (#rediscovery)"
+        ),
+        # Unipolar: the value IS the fraction of the track budget given to the
+        # new-artist stream (0 = all deep cuts, 100 = all new), not a -1..1 weight.
+        scale_type=types_module.ParameterScaleType.UNIPOLAR,
+        default_value=50,
+        labels=("All Deep Cuts", "All New Artists"),
+    ),
+    "less_heard_percentile": ParameterDefinition(
+        name="less_heard_percentile",
+        display_name="Deep Cut Depth",
+        description=(
+            "How far down each seed artist's play distribution counts as a deep "
+            "cut -- 33 = bottom third of that artist's own tracks (#rediscovery)"
+        ),
+        scale_type=types_module.ParameterScaleType.UNIPOLAR,
+        default_value=33,
+        labels=("Rarest Only", "Broader Catalog"),
+    ),
 }
 
 GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
@@ -78,6 +102,24 @@ GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
         required_inputs=frozenset(),
         description="Generate a playlist to prepare for a concert",
         default_pool_seed=pool_module.PoolSourceKind.EVENT.value,
+    ),
+    types_module.GeneratorType.REDISCOVERY: GeneratorTypeConfig(
+        featured_parameters=frozenset(
+            {"familiarity", "hit_depth", "new_ratio", "less_heard_percentile"}
+        ),
+        required_inputs=frozenset(),
+        description=(
+            "Rediscover a slice of your listening history: never-heard new artists "
+            "on that period's genres, mixed with less-heard deep cuts from the "
+            "artists you were spinning"
+        ),
+        # A new rediscovery profile seeds its pool from a listening-history window
+        # (the reusable seed-window primitive), not an event.
+        default_pool_seed=pool_module.PoolSourceKind.LISTENING_RANGE.value,
+        # Balanced 50/50 new-vs-deep-cut by default (design premise 2). These match
+        # the registry defaults; stated explicitly so the type's intended vibe is
+        # documented at the config, not inferred from the registry.
+        default_param_values={"new_ratio": 50, "less_heard_percentile": 33},
     ),
 }
 
