@@ -45,7 +45,10 @@ import dataclasses
 import datetime
 import math
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import collections.abc
 
 import httpx
 import sqlalchemy as sa
@@ -514,23 +517,7 @@ async def run_genre_backfill(
             counts.candidates += 1
             mbid = artist_utils.get_mbid(artist.service_links)
             results = tags_by_mbid.get(mbid, []) if mbid else []
-            # Wholesale-replace this artist's tags.
-            await session.execute(
-                sa.delete(music_module.ArtistTag).where(
-                    music_module.ArtistTag.artist_id == artist.id
-                )
-            )
-            for res in results:
-                session.add(
-                    music_module.ArtistTag(
-                        artist_id=artist.id,
-                        tag=res.tag,
-                        genre_mbid=res.genre_mbid,
-                        count=max(0, res.count),
-                        source="musicbrainz",
-                    )
-                )
-            artist.genre_attempted_at = _now()
+            await _persist_artist_tags(session, artist, results)
             if results:
                 counts.updated += 1
             else:
@@ -540,6 +527,90 @@ async def run_genre_backfill(
 
     logger.info("genre_backfill_done", **dataclasses.asdict(counts))
     return counts
+
+
+async def _persist_artist_tags(
+    session: Any,
+    artist: music_module.Artist,
+    results: list[artist_tags_module.ArtistTagResult],
+) -> None:
+    """Wholesale-replace an artist's ArtistTag rows and stamp genre_attempted_at.
+
+    Deletes the artist's existing tags, inserts the fetched ones (count clamped to
+    ``>= 0`` for the CHECK constraint), and marks the artist attempted. The durable
+    -data write shared by the bulk backfill (:func:`run_genre_backfill`) and the
+    on-demand fetch (:func:`fetch_and_persist_tags`, #152). The caller owns the
+    transaction/commit.
+    """
+    await session.execute(
+        sa.delete(music_module.ArtistTag).where(
+            music_module.ArtistTag.artist_id == artist.id
+        )
+    )
+    for res in results:
+        session.add(
+            music_module.ArtistTag(
+                artist_id=artist.id,
+                tag=res.tag,
+                genre_mbid=res.genre_mbid,
+                count=max(0, res.count),
+                source="musicbrainz",
+            )
+        )
+    artist.genre_attempted_at = _now()
+
+
+async def fetch_and_persist_tags(
+    session: Any,
+    client: artist_tags_module.ArtistTagsClient,
+    artists: collections.abc.Sequence[music_module.Artist],
+) -> bool:
+    """On-demand fetch+persist of genre tags for the given artists (#152).
+
+    Fetches tags for the subset that still need them -- ``genre_attempted_at IS
+    NULL`` with a valid-UUID MusicBrainz MBID -- in one call, then wholesale
+    -replaces each artist's ArtistTag rows and stamps ``genre_attempted_at``
+    (:func:`_persist_artist_tags`). Unlike :func:`run_genre_backfill` there is no
+    scan/resume loop: the caller passes an already-bounded set (e.g. a builder's
+    seeds), so this can run on a request hot path or inside a worker before the
+    scheduled backfill has reached these artists.
+
+    Graceful-degrade: on an ``ArtistTagsUnavailableError`` (LB down/timeout)
+    nothing is written and ``False`` is returned, so the caller falls back to
+    whatever tags already exist rather than failing. Artists already
+    attempted or lacking a valid MBID are skipped (a malformed MBID would 400 the
+    whole batch). The caller owns the commit.
+
+    Returns:
+        ``True`` if the fetch succeeded or there was nothing to fetch; ``False`` if
+        the endpoint was unavailable (no rows written).
+    """
+    pending = [
+        artist
+        for artist in artists
+        if artist.genre_attempted_at is None
+        and (mbid := artist_utils.get_mbid(artist.service_links)) is not None
+        and _is_valid_mbid(mbid)
+    ]
+    if not pending:
+        return True
+    mbids = list(
+        {
+            mbid
+            for artist in pending
+            if (mbid := artist_utils.get_mbid(artist.service_links)) is not None
+        }
+    )
+    try:
+        tags_by_mbid = await client.fetch_tags(mbids)
+    except artist_tags_module.ArtistTagsUnavailableError:
+        logger.warning("ondemand_artist_tags_unavailable", count=len(pending))
+        return False
+    for artist in pending:
+        mbid = artist_utils.get_mbid(artist.service_links)
+        results = tags_by_mbid.get(mbid, []) if mbid else []
+        await _persist_artist_tags(session, artist, results)
+    return True
 
 
 async def run_mbid_backfill(

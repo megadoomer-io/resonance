@@ -126,3 +126,24 @@ class TestL2Normalize:
     def test_zero_norm_is_empty(self) -> None:
         assert genre.l2_normalize({}) == {}
         assert genre.l2_normalize({"a": 0.0}) == {}
+
+
+class TestSortValue:
+    """genre.sort_value: rank key that keeps unknown distinct from mismatch (#153)."""
+
+    def test_positive_affinity_passes_through(self) -> None:
+        assert genre.sort_value(0.7) == 0.7
+
+    def test_none_is_neutral_zero(self) -> None:
+        # Unknown-genre candidate -- never penalized for missing data.
+        assert genre.sort_value(None) == 0.0
+
+    def test_confirmed_mismatch_sinks_below_neutral(self) -> None:
+        # A known off-genre neighbor ranks below an untagged possible match.
+        assert genre.sort_value(0.0) == -1.0
+
+    def test_ordering_on_genre_then_unknown_then_off_genre(self) -> None:
+        # Sorting by -sort_value gives on-genre first, unknown neutral, off last.
+        scores = [genre.sort_value(v) for v in (0.0, None, 0.9)]
+        order = sorted(range(len(scores)), key=lambda i: -scores[i])
+        assert order == [2, 1, 0]  # on-genre, unknown, off-genre
