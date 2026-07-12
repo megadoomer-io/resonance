@@ -95,3 +95,76 @@ class TestConcertPrepPanelUnchanged:
         assert 'data-param="less_heard_percentile"' not in html
         # No Advanced disclosure (concert_prep has no advanced params).
         assert "<summary>Advanced</summary>" not in html
+
+
+class TestSeedPreviewPartial:
+    """Directly render the seed-preview partial to catch Jinja/format errors
+    (strftime, the date-range echo, the data-empty flag) without an app/DB."""
+
+    def _render_preview(self, ctx_extra: dict[str, Any]) -> str:
+        ctx: dict[str, Any] = {
+            "request": SimpleNamespace(url=SimpleNamespace(path="/x")),
+            "user_id": "u",
+            "user_tz": "UTC",
+            "user_role": "owner",
+            "actual_role": "owner",
+            "viewing_as": None,
+        }
+        ctx.update(ctx_extra)
+        return common_ui.templates.get_template(
+            "partials/rediscovery_seed_preview.html"
+        ).render(ctx)
+
+    def test_populated_window_lists_artists_and_echoes_dates(self) -> None:
+        import datetime
+
+        html = self._render_preview(
+            {
+                "artists": [
+                    {"id": "a", "name": "Boards of Canada", "meta": "idm, ambient"},
+                    {"id": "b", "name": "Aphex Twin", "meta": ""},
+                ],
+                "start": datetime.datetime(2025, 7, 6, tzinfo=datetime.UTC),
+                "end": datetime.datetime(2025, 8, 3, tzinfo=datetime.UTC),
+                "total": 2,
+                "more": 0,
+                "empty": False,
+            }
+        )
+        assert 'data-empty="false"' in html
+        assert "Boards of Canada" in html
+        assert "Aphex Twin" in html
+        assert "Jul" in html and "Aug" in html  # date-range echo rendered
+
+    def test_more_suffix_when_truncated(self) -> None:
+        import datetime
+
+        html = self._render_preview(
+            {
+                "artists": [{"id": "a", "name": "One", "meta": ""}],
+                "start": datetime.datetime(2026, 6, 6, tzinfo=datetime.UTC),
+                "end": datetime.datetime(2026, 7, 4, tzinfo=datetime.UTC),
+                "total": 31,
+                "more": 30,
+                "empty": False,
+            }
+        )
+        assert "+30 more" in html
+        # Same-year range collapses to one year label.
+        assert html.count("2026") == 1
+
+    def test_empty_window_marks_data_empty(self) -> None:
+        import datetime
+
+        html = self._render_preview(
+            {
+                "artists": [],
+                "start": datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+                "end": datetime.datetime(2020, 1, 14, tzinfo=datetime.UTC),
+                "total": 0,
+                "more": 0,
+                "empty": True,
+            }
+        )
+        assert 'data-empty="true"' in html
+        assert "No listening data" in html
