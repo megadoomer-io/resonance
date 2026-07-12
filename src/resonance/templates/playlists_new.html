@@ -1,9 +1,29 @@
 {% extends "base.html" %}
 {% block title %}Edit Playlist — resonance{% endblock %}
 {% block head %}
+<link rel="stylesheet" href="/static/filters.css">
 <link rel="stylesheet" href="/static/lineup.css">
 {% endblock %}
+
+{% macro param_slider(name, param) %}
+<div class="param">
+    <div class="param-head">
+        <strong>{{ param.display_name }}</strong>
+        <small class="lineup-hint">{{ param.description }}</small>
+    </div>
+    <input type="range" data-param="{{ name }}" min="0" max="100"
+           value="{{ parameter_values.get(name, param.default_value) }}"
+           oninput="this.parentElement.querySelector('.val').textContent = this.value">
+    <div class="slider-scale">
+        <small class="lbl-lo">{{ param.labels[0] }}</small>
+        <small class="val">{{ parameter_values.get(name, param.default_value) }}</small>
+        <small class="lbl-hi">{{ param.labels[1] }}</small>
+    </div>
+</div>
+{% endmacro %}
+
 {% block content %}
+{% set is_rediscovery = generator_type == 'rediscovery' %}
 <p><a class="backlink" href="/playlists">&larr; Back to Playlists</a></p>
 
 <div class="editor-top">
@@ -18,8 +38,51 @@
     <button type="button" id="conflict-reload">Reload</button>
 </div>
 
-<!-- Lineup -->
 <article>
+    {% if is_rediscovery %}
+    <header>Rediscover <small class="lineup-hint">— pick a window; we'll surface what you used to play, then rediscover it.</small></header>
+
+    <div class="rediscovery-panel">
+        <div class="filter-presets window-presets" role="group" aria-label="Listening window">
+            <button type="button" class="preset-btn" data-window-preset="last_2_weeks">Last 2 Weeks</button>
+            <button type="button" class="preset-btn" data-window-preset="a_month_ago">A Month Ago</button>
+            <button type="button" class="preset-btn" data-window-preset="this_time_last_year">This Time Last Year</button>
+            <button type="button" class="preset-btn" data-window-preset="custom">Custom</button>
+        </div>
+
+        <div class="custom-window" id="custom-window" hidden>
+            <label class="cw-field">From <input type="date" id="window-start"></label>
+            <label class="cw-field">To <input type="date" id="window-end"></label>
+            <div class="cw-error" id="window-error" hidden>End date must be on or after the start date.</div>
+        </div>
+
+        <div class="seed-count-field">
+            <label for="seed-count">Seed artists
+                <input type="number" id="seed-count" min="5" max="50" value="20">
+            </label>
+            <small class="lineup-hint">How many of that window's top artists to build the deep cuts from.</small>
+        </div>
+
+        <div class="seed-preview" id="seed-preview" aria-live="polite"></div>
+
+        {% if similar_available %}
+        <div class="find-related-row">
+            <input type="number" id="add-related-n" value="15" min="1" max="50"
+                   aria-label="How many related artists to find">
+            <button type="button" class="ghost" id="add-related-btn">Find related artists</button>
+        </div>
+        {% else %}
+        <div class="enrich-note" style="border:1px dashed var(--border-strong);border-radius:var(--radius-md);">
+            Connect a similar-artists service (ListenBrainz) to add never-heard new artists.
+            <a href="/connections">Connect →</a>
+        </div>
+        {% endif %}
+
+        <!-- Enrich-discovered new artists render here (read-mostly related groups). -->
+        <div id="lineup-groups"></div>
+    </div>
+
+    {% else %}
     <header>Lineup <small class="lineup-hint">— who's in this playlist. Uncheck an artist to leave them out.</small></header>
 
     <div class="lineup-add">
@@ -61,27 +124,24 @@
 
     <div class="lineup-empty" id="lineup-empty" hidden>No artists yet — add an event or artist above.</div>
     <div id="lineup-groups"></div>
+    {% endif %}
 </article>
 
 <!-- Parameters -->
 <article>
     <header>Parameters</header>
-    {% for name, param in parameters.items() %}
-    <div class="param">
-        <div class="param-head">
-            <strong>{{ param.display_name }}</strong>
-            <small class="lineup-hint">{{ param.description }}</small>
-        </div>
-        <input type="range" data-param="{{ name }}" min="0" max="100"
-               value="{{ parameter_values.get(name, param.default_value) }}"
-               oninput="this.parentElement.querySelector('.val').textContent = this.value">
-        <div class="slider-scale">
-            <small class="lbl-lo">{{ param.labels[0] }}</small>
-            <small class="val">{{ parameter_values.get(name, param.default_value) }}</small>
-            <small class="lbl-hi">{{ param.labels[1] }}</small>
-        </div>
-    </div>
+    {% for name, param in param_sections[0].params %}
+        {{ param_slider(name, param) }}
     {% endfor %}
+
+    {% if param_sections[1].params %}
+    <details class="advanced-params">
+        <summary>Advanced</summary>
+        {% for name, param in param_sections[1].params %}
+            {{ param_slider(name, param) }}
+        {% endfor %}
+    </details>
+    {% endif %}
 
     <div style="max-width: 12rem;">
         <label for="max_tracks">
@@ -91,12 +151,20 @@
     </div>
 </article>
 
+{% if is_rediscovery %}
+<div class="new-stream-hint" id="new-stream-hint" hidden>
+    No new artists found yet — this will be all deep cuts.
+    <button type="button" class="linklike" id="hint-find-related">Find related artists?</button>
+</div>
+{% endif %}
+
 <button type="button" class="primary" id="generate-btn">Generate Playlist</button>
 
 <script id="lineup-data" type="application/json">{{ lineup | tojson }}</script>
 <script>
   window.LINEUP_PROFILE_ID = "{{ profile_id }}";
   window.LINEUP_SIMILAR_AVAILABLE = {{ 'true' if similar_available else 'false' }};
+  window.LINEUP_GENERATOR_TYPE = "{{ generator_type }}";
 </script>
 <script type="module" src="/static/lineup.js"></script>
 {% endblock %}
