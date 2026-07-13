@@ -1,0 +1,35 @@
+{# Rediscovery seed preview (#rediscovery-ui T5). Read-only: the deep-cut seed
+   artists the current window resolves to. Root carries data-empty so the editor
+   can disable Generate on a window with no listening data. Names are
+   Jinja-autoescaped (server-side render), safer than client string-building. #}
+<div id="seed-preview-inner" data-empty="{{ 'true' if empty else 'false' }}">
+  {% if start and end %}
+  <div class="seed-window-echo">
+    {% if start.year == end.year %}
+      {{ start.strftime('%b %-d') }}&ndash;{{ end.strftime('%b %-d, %Y') }}
+    {% else %}
+      {{ start.strftime('%b %-d, %Y') }}&ndash;{{ end.strftime('%b %-d, %Y') }}
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if empty %}
+  <div class="seed-empty">
+    No listening data in this window. Pick a different window
+    {% if start and end %}than {{ start.strftime('%b %-d') }}&ndash;{{ end.strftime('%b %-d') }}{% endif %}
+    to rediscover something.
+  </div>
+  {% else %}
+  <div class="seed-preview-head">You&rsquo;ll rediscover <span class="seed-count">{{ total }}</span> artist{{ '' if total == 1 else 's' }}:</div>
+  <ul class="seed-list">
+    {% for a in artists %}
+    <li class="seed-item">
+      <span class="seed-name">{{ a.name }}</span>{% if a.meta %} <span class="seed-meta">{{ a.meta }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if more > 0 %}
+  <div class="seed-more">+{{ more }} more</div>
+  {% endif %}
+  {% endif %}
+</div>

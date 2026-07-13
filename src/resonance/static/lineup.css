@@ -285,3 +285,91 @@ button.primary {
   padding: 10px 18px; font-family: var(--body-font); font-weight: 500; font-size: 0.95rem; cursor: pointer;
 }
 button.primary:disabled { opacity: 0.6; cursor: default; }
+
+/* ===== Rediscovery window panel (#rediscovery-ui) ===== */
+
+.rediscovery-panel { display: flex; flex-direction: column; gap: var(--space-md); }
+
+/* Preset pills reuse .filter-presets/.preset-btn from filters.css (radius-full,
+ * primary-active). Just give the group breathing room in this context. */
+.window-presets { margin-bottom: 0; }
+
+/* Custom date range */
+.custom-window {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface-alt);
+}
+.custom-window .cw-field {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 0.8rem; color: var(--text-muted);
+}
+.custom-window .cw-field input[type="date"] {
+  margin: 0; height: 38px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); padding: 0 10px; font-size: 0.9rem;
+}
+.custom-window .cw-error {
+  flex-basis: 100%; color: var(--error); font-size: 0.8rem;
+}
+
+/* Seed count */
+.seed-count-field { display: flex; flex-direction: column; gap: 4px; }
+.seed-count-field label { font-weight: 700; font-size: 0.9rem; }
+.seed-count-field input[type="number"] {
+  width: 5rem; margin: 4px 0 0; height: 38px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); padding: 0 10px; font-size: 0.9rem;
+}
+
+/* Seed preview — the emotional payoff, visually distinct from the editable
+ * lineup so the user doesn't try to uncheck a derived seed. */
+.seed-preview {
+  border: 1px solid var(--border); border-left: 3px solid var(--primary);
+  border-radius: var(--radius-md); background: var(--surface-alt);
+  padding: var(--space-sm) var(--space-md); min-height: 3rem;
+  transition: opacity var(--dur-short, 200ms) ease-in-out;
+}
+.seed-preview.loading { opacity: 0.5; }
+.seed-window-echo {
+  font-size: 0.78rem; color: var(--text-muted); font-variant-numeric: tabular-nums;
+  margin-bottom: var(--space-xs);
+}
+.seed-preview-head { font-size: 0.9rem; font-weight: 500; margin-bottom: var(--space-xs); }
+.seed-preview-head .seed-count { font-variant-numeric: tabular-nums; }
+.seed-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: var(--space-2xs) var(--space-sm);
+}
+.seed-item { font-size: 0.85rem; }
+.seed-item .seed-name { font-weight: 500; }
+.seed-item .seed-meta { color: var(--text-muted); font-size: 0.75rem; }
+.seed-item:not(:last-child) .seed-name::after { content: ","; color: var(--text-muted); font-weight: 400; }
+.seed-more { font-size: 0.78rem; color: var(--text-muted); margin-top: var(--space-2xs); }
+.seed-empty { font-size: 0.85rem; color: var(--text-muted); font-style: italic; }
+
+/* Find-related row (rediscovery variant of the add-related control) */
+.find-related-row { display: flex; align-items: center; gap: var(--space-xs); }
+.find-related-row input[type="number"] {
+  width: 4rem; margin: 0; height: 38px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); padding: 0 10px; font-size: 0.9rem;
+}
+
+/* "All deep cuts" hint next to Generate when the new stream is empty */
+.new-stream-hint {
+  font-size: 0.85rem; color: var(--text-muted);
+  margin-bottom: var(--space-sm);
+}
+.new-stream-hint .linklike {
+  border: none; background: none; color: var(--primary); cursor: pointer;
+  font-size: 0.85rem; font-weight: 500; padding: 0; text-decoration: underline;
+}
+
+/* Advanced parameters disclosure */
+.advanced-params > summary {
+  cursor: pointer; font-size: 0.85rem; color: var(--text-muted);
+  margin-bottom: var(--space-sm);
+}
+.advanced-params[open] > summary { margin-bottom: var(--space-md); }

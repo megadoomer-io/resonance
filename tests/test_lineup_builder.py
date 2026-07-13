@@ -343,6 +343,10 @@ class TestLineupDataXSS:
             "similar_available": False,
             "events": [],
             "parameters": {},
+            # edit_playlist_page now passes per-type slider sections + the type
+            # (#rediscovery-ui); the concert_prep path renders no rediscovery panel.
+            "param_sections": [{"params": []}, {"params": []}],
+            "generator_type": "concert_prep",
             "lineup": lineup,
         }
         html = common_ui.templates.get_template("playlists_new.html").render(ctx)

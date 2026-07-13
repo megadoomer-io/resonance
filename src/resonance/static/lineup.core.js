@@ -157,3 +157,124 @@ export function serializeInputReferences(groups) {
   }
   return { sources: sources, exclude_artist_ids: Object.keys(excludeSet) };
 }
+
+/* ===== Rediscovery window (#rediscovery-ui) =====
+ *
+ * The rediscovery editor's recipe is a listening-history window + dials, not a
+ * hand-picked lineup. These pure helpers own the window's client state and its
+ * serialization into the same stored input_references shape the server parses
+ * (a listening_range source, plus any enrich-discovered via_seed artists).
+ */
+
+const DAY_MS = 86400000;
+
+export const SEED_COUNT_MIN = 5;
+export const SEED_COUNT_MAX = 50;
+export const SEED_COUNT_DEFAULT = 20;
+
+/* Window preset pills, in display order. "custom" reveals two date inputs; the
+ * other three are one-tap presets. Only "last_2_weeks" persists its identity
+ * (as a relative window); the two absolute presets round-trip as "custom" (see
+ * presetIdForWindow). */
+export const REDISCOVERY_PRESETS = [
+  { id: "last_2_weeks", label: "Last 2 Weeks" },
+  { id: "a_month_ago", label: "A Month Ago" },
+  { id: "this_time_last_year", label: "This Time Last Year" },
+  { id: "custom", label: "Custom" },
+];
+
+/* Format an epoch-ms instant to a YYYY-MM-DD (UTC) date string. */
+export function isoDate(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/* Build an absolute window from two YYYY-MM-DD strings. The end snaps to
+ * end-of-day so the end date is included (the backend bounds are inclusive), and
+ * so a same-day window (start === end) is still a valid non-empty range. */
+export function absoluteWindow(startDate, endDate) {
+  return {
+    kind: "absolute",
+    start: startDate + "T00:00:00",
+    end: endDate + "T23:59:59",
+  };
+}
+
+/* Resolve a preset id to a stored window object against `now` (epoch ms).
+ * "last_2_weeks" is relative (rolls forward on every generate); the two
+ * "…ago" presets snap to concrete absolute day-bounds at selection time (a
+ * frozen artifact). "custom" returns null — the caller builds it from the date
+ * inputs via absoluteWindow. */
+export function windowFromPreset(presetId, now) {
+  if (presetId === "last_2_weeks") {
+    return { kind: "relative", lookback_days: 14 };
+  }
+  if (presetId === "a_month_ago") {
+    return absoluteWindow(isoDate(now - 44 * DAY_MS), isoDate(now - 16 * DAY_MS));
+  }
+  if (presetId === "this_time_last_year") {
+    return absoluteWindow(isoDate(now - 379 * DAY_MS), isoDate(now - 351 * DAY_MS));
+  }
+  return null;
+}
+
+/* Which pill is active for a stored window. A relative window is the rolling
+ * "Last 2 Weeks" preset; any absolute window reads as "Custom" with its dates —
+ * preset identity for the two absolute presets is intentionally not persisted
+ * (the backend rebuilds the window from typed fields only), matching the design's
+ * relative-vs-custom round-trip contract. A missing window defaults to the
+ * rolling preset. */
+export function presetIdForWindow(window) {
+  if (!window || window.kind === "relative") return "last_2_weeks";
+  return "custom";
+}
+
+/* The YYYY-MM-DD (start, end) pair to prefill the custom date inputs from a
+ * window. A relative window has no stored dates (empty strings); the controller
+ * fills them from the resolved preset when the user switches to Custom. */
+export function windowDates(window) {
+  if (!window || window.kind !== "absolute") return { start: "", end: "" };
+  return {
+    start: (window.start || "").slice(0, 10),
+    end: (window.end || "").slice(0, 10),
+  };
+}
+
+/* Clamp a raw seed-count input to [MIN, MAX], falling back to the default on a
+ * non-numeric value. */
+export function clampSeedCount(n) {
+  const v = parseInt(n, 10);
+  if (!Number.isFinite(v)) return SEED_COUNT_DEFAULT;
+  return Math.max(SEED_COUNT_MIN, Math.min(SEED_COUNT_MAX, v));
+}
+
+/* Is a window valid to preview/generate? Relative needs a positive lookback;
+ * absolute needs start strictly before end. Drives the Generate-disable guard. */
+export function isWindowValid(window) {
+  if (!window) return false;
+  if (window.kind === "relative") return (window.lookback_days || 0) > 0;
+  if (window.kind === "absolute") {
+    return Boolean(window.start && window.end && window.start < window.end);
+  }
+  return false;
+}
+
+/* Serialize the rediscovery recipe into stored input_references. The
+ * listening_range source leads; enrich-discovered via_seed artists (carried as
+ * `related` groups) and their excludes are PRESERVED via serializeInputReferences,
+ * so editing the window never drops the enriched new-artist stream. v1 scores
+ * lifetime-only, so the basis flags are constant. */
+export function serializeRediscovery(window, seedCount, groups) {
+  const base = serializeInputReferences(groups || []);
+  const listeningRange = {
+    kind: "listening_range",
+    enabled: true,
+    window: window,
+    seed_artist_count: seedCount,
+    deep_cut_basis: "lifetime",
+    novelty_basis: "lifetime",
+  };
+  return {
+    sources: [listeningRange, ...base.sources],
+    exclude_artist_ids: base.exclude_artist_ids,
+  };
+}

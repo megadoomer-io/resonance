@@ -7,19 +7,27 @@
  * this module is the DOM + network controller.
  */
 import {
+  absoluteWindow,
   addEventGroup,
   addManualArtist,
   allArtistIds,
   artistMeta,
+  clampSeedCount,
   escapeHtml,
   groupKey,
   hasArtist,
   isEmpty,
+  isoDate,
+  isWindowValid,
+  presetIdForWindow,
   removeArtistFromGroup,
   removeGroup,
   serializeInputReferences,
+  serializeRediscovery,
   setEventArtists,
   toggleArtist,
+  windowDates,
+  windowFromPreset,
 } from "./lineup.core.js";
 
 const dataEl = document.getElementById("lineup-data");
@@ -29,6 +37,33 @@ const similarAvailable = window.LINEUP_SIMILAR_AVAILABLE === true;
 
 const state = { groups: initial.groups || [], version: initial.version || 0 };
 let conflicted = false;
+
+/* ---- rediscovery window mode (#rediscovery-ui) ---- */
+const isRediscovery = window.LINEUP_GENERATOR_TYPE === "rediscovery";
+// Window recipe + seed count. Hydrated from the stored listening_range source, or
+// defaulted to the rolling "Last 2 Weeks" preset for a fresh draft.
+let windowState =
+  (initial.listening_range && initial.listening_range.window) || {
+    kind: "relative",
+    lookback_days: 14,
+  };
+let seedCount =
+  (initial.listening_range && initial.listening_range.seed_artist_count) || 20;
+// Preview drives the Generate-disable guard: an invalid window or a window with
+// no listening data cannot generate. `previewDirty` gates refreshing the preview
+// to persisted-window changes only (the endpoint reads the stored window).
+let windowValid = isWindowValid(windowState);
+let previewEmpty = false;
+let previewDirty = false;
+
+/* The stored input_references for the current mode: rediscovery leads with the
+ * window source (preserving enrich discoveries); concert_prep uses the lineup. */
+function currentInputRefs() {
+  if (isRediscovery) {
+    return serializeRediscovery(windowState, seedCount, state.groups);
+  }
+  return serializeInputReferences(state.groups);
+}
 
 const groupsEl = document.getElementById("lineup-groups");
 const emptyEl = document.getElementById("lineup-empty");
@@ -217,6 +252,19 @@ function render() {
     if (openKeys.has(d.getAttribute("data-group-key"))) d.open = true;
   }
   if (emptyEl) emptyEl.hidden = !isEmpty(state.groups);
+  if (isRediscovery) updateNewStreamHint();
+}
+
+/* Show the "all deep cuts" hint when a rediscovery pool has no enrich-discovered
+ * new artists yet (a silent empty new stream makes new_ratio a no-op). Hint, not
+ * a block — all-deep-cuts is a legitimate output. */
+function updateNewStreamHint() {
+  const hint = document.getElementById("new-stream-hint");
+  if (!hint) return;
+  const hasNew = state.groups.some(
+    (g) => g.kind === "related" && g.artists.length > 0
+  );
+  hint.hidden = hasNew;
 }
 
 /* ---- persistence (PATCH) ---- */
@@ -241,7 +289,7 @@ async function flushSave(extra) {
   pending = false;
   const body = Object.assign(
     {
-      input_references: serializeInputReferences(state.groups),
+      input_references: currentInputRefs(),
       expected_version: state.version,
     },
     extra || {}
@@ -270,6 +318,13 @@ async function flushSave(extra) {
   const data = await resp.json();
   if (typeof data.version === "number") state.version = data.version;
   setSaving(false);
+  // The seed preview reads the PERSISTED window, so refresh it only after a
+  // window/seed-count change has committed (previewDirty), never on a name/param
+  // save.
+  if (isRediscovery && previewDirty) {
+    previewDirty = false;
+    refreshSeedPreview();
+  }
   return data;
 }
 
@@ -494,7 +549,7 @@ if (eventSelect) {
 function isDefaultName() {
   if (!nameInput) return false;
   const v = nameInput.value.trim();
-  return v === "" || v === "New Playlist";
+  return v === "" || v === "New Playlist" || v === "New Rediscovery";
 }
 
 function maybeAutoName(title, venue) {
@@ -601,12 +656,150 @@ if (conflictReload) {
   conflictReload.addEventListener("click", () => window.location.reload());
 }
 
+/* ---- rediscovery window controls (#rediscovery-ui) ---- */
+
+const seedPreviewEl = document.getElementById("seed-preview");
+const customWindowEl = document.getElementById("custom-window");
+const windowStartEl = document.getElementById("window-start");
+const windowEndEl = document.getElementById("window-end");
+const windowErrorEl = document.getElementById("window-error");
+const seedCountEl = document.getElementById("seed-count");
+
+/* Generate is disabled while the window is invalid (custom end < start) or the
+ * window resolves to no listening data — both would crash or no-op generation. */
+function updateGenerateEnabled() {
+  if (!isRediscovery || !generateBtn) return;
+  generateBtn.disabled = !windowValid || previewEmpty;
+}
+
+function setActivePreset(presetId) {
+  for (const btn of document.querySelectorAll("[data-window-preset]")) {
+    btn.classList.toggle(
+      "preset-active",
+      btn.getAttribute("data-window-preset") === presetId
+    );
+  }
+  if (customWindowEl) customWindowEl.hidden = presetId !== "custom";
+}
+
+const DAY_MS = 86400000;
+
+/* Concrete YYYY-MM-DD (start, end) for any window, resolving a relative window to
+ * [now - lookback, now] so switching to Custom pre-fills valid dates. */
+function resolvedDatesForWindow(w, now) {
+  if (!w) return { start: "", end: "" };
+  if (w.kind === "absolute") return windowDates(w);
+  const days = w.lookback_days || 14;
+  return { start: isoDate(now - days * DAY_MS), end: isoDate(now) };
+}
+
+async function refreshSeedPreview() {
+  if (!seedPreviewEl) return;
+  seedPreviewEl.classList.add("loading");
+  let resp;
+  try {
+    resp = await fetch("/playlists/" + profileId + "/seed-preview", {
+      credentials: "same-origin",
+    });
+  } catch (e) {
+    seedPreviewEl.classList.remove("loading");
+    return;
+  }
+  seedPreviewEl.classList.remove("loading");
+  if (!resp.ok) return;
+  seedPreviewEl.innerHTML = await resp.text();
+  const inner = document.getElementById("seed-preview-inner");
+  previewEmpty = inner ? inner.getAttribute("data-empty") === "true" : false;
+  updateGenerateEnabled();
+}
+
+/* Apply a window change: validate, reflect the custom-date error, and (if valid)
+ * persist + mark the preview dirty so it refreshes after the PATCH commits. */
+function applyWindow(newWindow, presetId) {
+  windowState = newWindow;
+  windowValid = isWindowValid(windowState);
+  if (windowErrorEl) {
+    windowErrorEl.hidden = windowValid || presetId !== "custom";
+  }
+  updateGenerateEnabled();
+  if (!windowValid) return; // never PATCH an invalid window (the API 400s it)
+  previewDirty = true;
+  scheduleSave();
+}
+
+function windowFromCustomInputs() {
+  const start = windowStartEl ? windowStartEl.value : "";
+  const end = windowEndEl ? windowEndEl.value : "";
+  if (!start || !end) return null;
+  return absoluteWindow(start, end);
+}
+
+for (const presetBtn of document.querySelectorAll("[data-window-preset]")) {
+  presetBtn.addEventListener("click", () => {
+    const presetId = presetBtn.getAttribute("data-window-preset");
+    setActivePreset(presetId);
+    if (presetId === "custom") {
+      // Pre-fill empty custom inputs from the current window so Custom starts
+      // valid (design decision 4).
+      if (windowStartEl && windowEndEl && (!windowStartEl.value || !windowEndEl.value)) {
+        const d = resolvedDatesForWindow(windowState, Date.now());
+        windowStartEl.value = windowStartEl.value || d.start;
+        windowEndEl.value = windowEndEl.value || d.end;
+      }
+      applyWindow(windowFromCustomInputs(), "custom");
+      return;
+    }
+    const w = windowFromPreset(presetId, Date.now());
+    // Reflect an absolute preset's dates into the custom inputs so a later switch
+    // to Custom is pre-filled + tweakable.
+    const d = windowDates(w);
+    if (windowStartEl) windowStartEl.value = d.start;
+    if (windowEndEl) windowEndEl.value = d.end;
+    applyWindow(w, presetId);
+  });
+}
+
+for (const dateEl of [windowStartEl, windowEndEl]) {
+  if (dateEl) {
+    dateEl.addEventListener("change", () =>
+      applyWindow(windowFromCustomInputs(), "custom")
+    );
+  }
+}
+
+if (seedCountEl) {
+  seedCountEl.addEventListener("change", () => {
+    seedCount = clampSeedCount(seedCountEl.value);
+    seedCountEl.value = String(seedCount);
+    previewDirty = true;
+    scheduleSave();
+  });
+}
+
+const hintFind = document.getElementById("hint-find-related");
+if (hintFind) {
+  hintFind.addEventListener("click", () => runEnrich("lineup", hintFind));
+}
+
+if (isRediscovery) {
+  setActivePreset(presetIdForWindow(windowState));
+  if (seedCountEl) seedCountEl.value = String(seedCount);
+  const initialDates = windowDates(windowState);
+  if (windowStartEl && initialDates.start) windowStartEl.value = initialDates.start;
+  if (windowEndEl && initialDates.end) windowEndEl.value = initialDates.end;
+  updateGenerateEnabled();
+  refreshSeedPreview();
+}
+
 /* Generate: persist, then trigger generation and go to the status page. */
 const generateBtn = document.getElementById("generate-btn");
 if (generateBtn) {
   generateBtn.addEventListener("click", async () => {
     if (conflicted) return;
-    if (isEmpty(state.groups)) {
+    // Rediscovery's pool comes from the window (seeds are derived), so an empty
+    // groups list is fine — the window guard (disabled state) covers validity.
+    // concert_prep needs at least one hand-picked source.
+    if (!isRediscovery && isEmpty(state.groups)) {
       if (emptyEl) {
         emptyEl.textContent = "Add at least one event or artist before generating.";
         emptyEl.hidden = false;
@@ -614,14 +807,20 @@ if (generateBtn) {
       return;
     }
     generateBtn.disabled = true;
-    // Last-resort naming so nothing ever generates as "New Playlist": prefer the
-    // first event, else a dated fallback. (Event-add already auto-names; this
-    // covers an artist-only pool the user never named.)
+    // Last-resort naming so nothing ever generates as a bare default: rediscovery
+    // names from its window, concert_prep from the first event, else a dated
+    // fallback. (Event-add already auto-names; this covers pools the user never
+    // named.)
     if (isDefaultName()) {
-      const ev = state.groups.find((g) => g.kind === "event");
-      const fallback = ev
-        ? "Concert Prep: " + ev.title
-        : "Playlist " + new Date().toISOString().slice(0, 10);
+      let fallback;
+      if (isRediscovery) {
+        fallback = "Rediscovery " + new Date().toISOString().slice(0, 10);
+      } else {
+        const ev = state.groups.find((g) => g.kind === "event");
+        fallback = ev
+          ? "Concert Prep: " + ev.title
+          : "Playlist " + new Date().toISOString().slice(0, 10);
+      }
       nameInput.value = fallback;
       await flushSave({ name: fallback });
     }

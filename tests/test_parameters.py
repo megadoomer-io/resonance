@@ -42,6 +42,41 @@ class TestGeneratorTypeConfig:
         config = params_module.GENERATOR_TYPE_CONFIG[gen_type]
         assert config.default_pool_seed == "event"
 
+    def test_concert_prep_lead_and_no_advanced(self) -> None:
+        # concert_prep leads with its two featured dials and hides nothing behind
+        # Advanced -- and never renders the inert rediscovery dials (#rediscovery-ui).
+        config = params_module.GENERATOR_TYPE_CONFIG[
+            types_module.GeneratorType.CONCERT_PREP
+        ]
+        assert config.ordered_lead() == ("familiarity", "hit_depth")
+        assert config.advanced_parameters == ()
+        rendered = set(config.ordered_lead()) | set(config.advanced_parameters)
+        assert "new_ratio" not in rendered
+        assert "less_heard_percentile" not in rendered
+
+    def test_rediscovery_leads_with_its_defining_dials(self) -> None:
+        # Rediscovery leads with new_ratio/less_heard and tucks familiarity/hit_depth
+        # behind Advanced (design decision 2). Lead + advanced == featured.
+        config = params_module.GENERATOR_TYPE_CONFIG[
+            types_module.GeneratorType.REDISCOVERY
+        ]
+        assert config.ordered_lead() == ("new_ratio", "less_heard_percentile")
+        assert config.advanced_parameters == ("familiarity", "hit_depth")
+        assert set(config.ordered_lead()) | set(config.advanced_parameters) == set(
+            config.featured_parameters
+        )
+
+    def test_ordered_lead_defaults_to_featured_in_registry_order(self) -> None:
+        # A config without explicit lead_parameters falls back to its featured set
+        # in registry order (the documented default behavior).
+        config = params_module.GeneratorTypeConfig(
+            featured_parameters=frozenset({"hit_depth", "familiarity"}),
+            required_inputs=frozenset(),
+            description="test",
+        )
+        # Registry order is familiarity before hit_depth.
+        assert config.ordered_lead() == ("familiarity", "hit_depth")
+
 
 class TestApplyDefaults:
     def test_fills_missing_with_defaults(self) -> None:
