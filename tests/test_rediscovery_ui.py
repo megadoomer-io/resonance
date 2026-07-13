@@ -132,8 +132,8 @@ class TestSeedPreviewPartial:
             }
         )
         assert 'data-empty="false"' in html
-        assert "Boards of Canada" in html
-        assert "Aphex Twin" in html
+        # Flowing comma-separated sentence, not a chip list.
+        assert "Boards of Canada, Aphex Twin" in html
         assert "Jul" in html and "Aug" in html  # date-range echo rendered
 
     def test_more_suffix_when_truncated(self) -> None:
@@ -149,7 +149,7 @@ class TestSeedPreviewPartial:
                 "empty": False,
             }
         )
-        assert "+30 more" in html
+        assert "and 30 more" in html
         # Same-year range collapses to one year label.
         assert html.count("2026") == 1
 

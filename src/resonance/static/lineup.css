@@ -338,15 +338,10 @@ button.primary:disabled { opacity: 0.6; cursor: default; }
 }
 .seed-preview-head { font-size: 0.9rem; font-weight: 500; margin-bottom: var(--space-xs); }
 .seed-preview-head .seed-count { font-variant-numeric: tabular-nums; }
-.seed-list {
-  list-style: none; margin: 0; padding: 0;
-  display: flex; flex-wrap: wrap; gap: var(--space-2xs) var(--space-sm);
-}
-.seed-item { font-size: 0.85rem; }
-.seed-item .seed-name { font-weight: 500; }
-.seed-item .seed-meta { color: var(--text-muted); font-size: 0.75rem; }
-.seed-item:not(:last-child) .seed-name::after { content: ","; color: var(--text-muted); font-weight: 400; }
-.seed-more { font-size: 0.78rem; color: var(--text-muted); margin-top: var(--space-2xs); }
+/* Flowing comma-separated sentence — reads like a magazine blurb and wraps like
+   normal text (an earlier flex-chip + comma-::after hybrid rendered wonky). */
+.seed-list { margin: 0; font-size: 0.85rem; line-height: 1.55; }
+.seed-more { color: var(--text-muted); font-style: italic; }
 .seed-empty { font-size: 0.85rem; color: var(--text-muted); font-style: italic; }
 
 /* Find-related row (rediscovery variant of the add-related control) */
