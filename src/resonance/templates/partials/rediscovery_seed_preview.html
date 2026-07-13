@@ -21,15 +21,6 @@
   </div>
   {% else %}
   <div class="seed-preview-head">You&rsquo;ll rediscover <span class="seed-count">{{ total }}</span> artist{{ '' if total == 1 else 's' }}:</div>
-  <ul class="seed-list">
-    {% for a in artists %}
-    <li class="seed-item">
-      <span class="seed-name">{{ a.name }}</span>{% if a.meta %} <span class="seed-meta">{{ a.meta }}</span>{% endif %}
-    </li>
-    {% endfor %}
-  </ul>
-  {% if more > 0 %}
-  <div class="seed-more">+{{ more }} more</div>
-  {% endif %}
+  <p class="seed-list">{{ artists | map(attribute='name') | join(', ') }}{% if more > 0 %} <span class="seed-more">and {{ more }} more</span>{% endif %}</p>
   {% endif %}
 </div>
