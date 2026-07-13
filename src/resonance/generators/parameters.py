@@ -38,6 +38,9 @@ class GeneratorTypeConfig:
     featured_parameters: frozenset[str]
     required_inputs: frozenset[str]
     description: str
+    # Human-readable name for the type, shown in the new-playlist type selector
+    # (#rediscovery-ui). Falls back to the title-cased enum key when empty.
+    display_name: str = ""
     # Parameter values a new profile of this type starts from (overrides registry
     # defaults). Empty means "use the registry defaults".
     default_param_values: dict[str, int] = dataclasses.field(default_factory=dict)
@@ -110,6 +113,7 @@ PARAMETER_REGISTRY: dict[str, ParameterDefinition] = {
 GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
     types_module.GeneratorType.CONCERT_PREP: GeneratorTypeConfig(
         featured_parameters=frozenset({"familiarity", "hit_depth"}),
+        display_name="Concert Prep",
         # Pool sufficiency is checked structurally now (#128); concert_prep no
         # longer hard-requires the legacy "event_id" key -- it seeds from an event
         # source by default but accepts any non-empty pool.
@@ -122,6 +126,7 @@ GENERATOR_TYPE_CONFIG: dict[types_module.GeneratorType, GeneratorTypeConfig] = {
         featured_parameters=frozenset(
             {"familiarity", "hit_depth", "new_ratio", "less_heard_percentile"}
         ),
+        display_name="Rediscovery",
         required_inputs=frozenset(),
         description=(
             "Rediscover a slice of your listening history: never-heard new artists "

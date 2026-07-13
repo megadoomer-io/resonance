@@ -117,6 +117,8 @@ async def playlists_page(
     if q_value:
         template_active_filters["q"] = q_value
 
+    import resonance.generators.parameters as params_module
+
     ctx = common.base_context(request)
     ctx.update(
         playlists=playlists,
@@ -130,6 +132,10 @@ async def playlists_page(
         list_url="/playlists",
         list_target="#playlist-list",
         filter_qs=filter_qs,
+        # Generator types for the "New Playlist" type selector (#rediscovery-ui):
+        # the eager-draft model needs the type chosen before /playlists/new, so the
+        # entry point offers one link per type.
+        generator_types=params_module.GENERATOR_TYPE_CONFIG,
     )
 
     return htmx.render_fragment(

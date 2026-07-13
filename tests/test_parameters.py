@@ -42,6 +42,15 @@ class TestGeneratorTypeConfig:
         config = params_module.GENERATOR_TYPE_CONFIG[gen_type]
         assert config.default_pool_seed == "event"
 
+    def test_types_have_display_names(self) -> None:
+        # The new-playlist type selector (#rediscovery-ui) renders these.
+        cp = params_module.GENERATOR_TYPE_CONFIG[
+            types_module.GeneratorType.CONCERT_PREP
+        ]
+        rd = params_module.GENERATOR_TYPE_CONFIG[types_module.GeneratorType.REDISCOVERY]
+        assert cp.display_name == "Concert Prep"
+        assert rd.display_name == "Rediscovery"
+
     def test_concert_prep_lead_and_no_advanced(self) -> None:
         # concert_prep leads with its two featured dials and hides nothing behind
         # Advanced -- and never renders the inert rediscovery dials (#rediscovery-ui).
