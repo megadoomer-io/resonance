@@ -1,5 +1,22 @@
 {% from "components/macros.html" import entity_list, confirm_action %}
+{# New-playlist entry point: pick a generator type before creating (the eager-draft
+   model needs the type before /playlists/new). Native <details> menu, one option
+   per type with its description. Falls back to a plain button if types are absent. #}
+{% if generator_types %}
+<details class="new-playlist-menu">
+    <summary role="button">+ New Playlist</summary>
+    <div class="npm-options">
+        {% for gtype, cfg in generator_types.items() %}
+        <a class="npm-option" href="/playlists/new?type={{ gtype.value }}">
+            <span class="npm-name">{{ cfg.display_name or gtype.value }}</span>
+            <span class="npm-desc">{{ cfg.description }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</details>
+{% else %}
 <p><a href="/playlists/new" role="button">New Playlist</a></p>
+{% endif %}
 {% call(playlist) entity_list(
     items=playlists,
     list_id="playlist-list",

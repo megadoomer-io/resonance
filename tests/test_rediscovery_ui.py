@@ -168,3 +168,44 @@ class TestSeedPreviewPartial:
         )
         assert 'data-empty="true"' in html
         assert "No listening data" in html
+
+
+class TestNewPlaylistSelector:
+    """The playlists-list entry point offers one link per generator type
+    (#rediscovery-ui), so the rediscovery editor is reachable — the gap the owner
+    caught after the first ship."""
+
+    def _render_list(self, ctx_extra: dict[str, Any]) -> str:
+        ctx: dict[str, Any] = {
+            "request": SimpleNamespace(url=SimpleNamespace(path="/playlists")),
+            "user_id": "u",
+            "user_tz": "UTC",
+            "user_role": "owner",
+            "actual_role": "owner",
+            "viewing_as": None,
+            "playlists": [],
+            "page": 1,
+            "has_next": False,
+            "has_prev": False,
+            "filter_qs": "",
+        }
+        ctx.update(ctx_extra)
+        return common_ui.templates.get_template("partials/playlist_list.html").render(
+            ctx
+        )
+
+    def test_offers_a_link_per_generator_type(self) -> None:
+        html = self._render_list(
+            {"generator_types": params_module.GENERATOR_TYPE_CONFIG}
+        )
+        assert 'href="/playlists/new?type=concert_prep"' in html
+        assert 'href="/playlists/new?type=rediscovery"' in html
+        assert "Concert Prep" in html
+        assert "Rediscovery" in html
+        # Descriptions render so a user knows what each type does.
+        assert "Rediscover a slice of your listening history" in html
+
+    def test_falls_back_to_plain_button_without_types(self) -> None:
+        html = self._render_list({})
+        assert 'href="/playlists/new"' in html
+        assert "data-window-preset" not in html  # no rediscovery panel on the list

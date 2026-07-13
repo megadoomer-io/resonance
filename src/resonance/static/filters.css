@@ -226,3 +226,48 @@
   opacity: 0.3;
   text-decoration: line-through;
 }
+
+/* New-playlist type selector (#rediscovery-ui) — native <details> menu offering
+   one option per generator type. */
+.new-playlist-menu {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+.new-playlist-menu > summary {
+  display: inline-block;
+  cursor: pointer;
+  list-style: none;
+}
+.new-playlist-menu > summary::-webkit-details-marker { display: none; }
+.new-playlist-menu > summary::marker { content: ""; }
+.new-playlist-menu .npm-options {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  margin-top: 0.25rem;
+  min-width: 20rem;
+  max-width: 26rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+  overflow: hidden;
+}
+.new-playlist-menu .npm-option {
+  display: block;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  text-decoration: none;
+  color: var(--text);
+}
+.new-playlist-menu .npm-option:last-child { border-bottom: none; }
+.new-playlist-menu .npm-option:hover { background: var(--primary-subtle); }
+.new-playlist-menu .npm-name { display: block; font-weight: 600; font-size: 0.9rem; }
+.new-playlist-menu .npm-desc {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
