@@ -666,10 +666,15 @@ const windowErrorEl = document.getElementById("window-error");
 const seedCountEl = document.getElementById("seed-count");
 
 /* Generate is disabled while the window is invalid (custom end < start) or the
- * window resolves to no listening data — both would crash or no-op generation. */
+ * window resolves to no listening data — both would crash or no-op generation.
+ * Looks the button up lazily rather than closing over the `generateBtn` const:
+ * this runs during module init (and on pill clicks) BEFORE that const is
+ * evaluated later in the file, so a closure reference would hit the temporal dead
+ * zone and abort the whole script — leaving the seed preview blank. */
 function updateGenerateEnabled() {
-  if (!isRediscovery || !generateBtn) return;
-  generateBtn.disabled = !windowValid || previewEmpty;
+  if (!isRediscovery) return;
+  const btn = document.getElementById("generate-btn");
+  if (btn) btn.disabled = !windowValid || previewEmpty;
 }
 
 function setActivePreset(presetId) {
