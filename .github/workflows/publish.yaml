@@ -13,7 +13,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.image-tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Generate image tag
         id: image-tag
@@ -52,7 +52,7 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: megadoomer-io/megadoomer-config
           token: ${{ secrets.GH_TOKEN_MEGADOOMER_CONFIG_WRITE }}
