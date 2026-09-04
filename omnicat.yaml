@@ -1,0 +1,53 @@
+schemaVersion: 0.1.0
+description: >-
+  Resonance — personal music-discovery platform aggregating Spotify, Last.fm, and
+  ListenBrainz into a unified profile. Holds its own third-party OAuth tokens.
+
+projects:
+  - id: resonance
+    directory: ./
+    description: Web app + arq background worker doing cross-service listening sync
+    facts:
+      language:
+        value: python
+        provenance: human-authored
+        last_evaluated: 2026-09-04
+      deploy:
+        kind: kustomize
+        config_repo:
+          value: megadoomer-io/megadoomer-config
+          provenance: human-authored
+          last_evaluated: 2026-09-04
+      service:
+        hostname:
+          value: resonance.megadoomer.io
+          provenance: human-authored
+          last_evaluated: 2026-09-04
+        handles_own_auth:
+          value: false
+          provenance: human-authored
+          last_evaluated: 2026-09-04
+          notes: app access via oauth2-proxy; separately holds Spotify/Last.fm/ListenBrainz OAuth
+        integrations:
+          value:
+            - spotify
+            - lastfm
+            - listenbrainz
+          provenance: human-authored
+          last_evaluated: 2026-09-04
+      auth_gap:
+        value: false
+        provenance: human-authored
+        last_evaluated: 2026-09-04
+        notes: fronted by oauth2-proxy web-ingress
+    links:
+      - repository: megadoomer-io/megadoomer-config
+        directory: applications/resonance/resonance/do/
+        kind: config-repo
+        provenance: human-authored
+        last_evaluated: 2026-09-04
+      - repository: megadoomer-io/megadoomer-config
+        directory: applications/infra/oauth2-proxy/do/
+        kind: auth-enforced-at
+        provenance: human-authored
+        last_evaluated: 2026-09-04
