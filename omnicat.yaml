@@ -10,44 +10,44 @@ projects:
     facts:
       language:
         value: python
-        provenance: human-authored
-        last_evaluated: 2026-09-04
+        provenance: agent-asserted
+        last_evaluated: 2026-09-08
       deploy:
         kind: kustomize
         config_repo:
           value: megadoomer-io/megadoomer-config
-          provenance: human-authored
-          last_evaluated: 2026-09-04
+          provenance: agent-asserted
+          last_evaluated: 2026-09-08
       service:
         hostname:
           value: resonance.megadoomer.io
-          provenance: human-authored
-          last_evaluated: 2026-09-04
+          provenance: agent-asserted
+          last_evaluated: 2026-09-08
         handles_own_auth:
           value: false
-          provenance: human-authored
-          last_evaluated: 2026-09-04
+          provenance: agent-asserted
+          last_evaluated: 2026-09-08
           notes: app access via oauth2-proxy; separately holds Spotify/Last.fm/ListenBrainz OAuth
         integrations:
           value:
             - spotify
             - lastfm
             - listenbrainz
-          provenance: human-authored
-          last_evaluated: 2026-09-04
+          provenance: agent-asserted
+          last_evaluated: 2026-09-08
       auth_gap:
         value: false
-        provenance: human-authored
-        last_evaluated: 2026-09-04
+        provenance: agent-asserted
+        last_evaluated: 2026-09-08
         notes: fronted by oauth2-proxy web-ingress
     links:
       - repository: megadoomer-io/megadoomer-config
-        directory: applications/resonance/resonance/do/
+        directory: applications/resonance/resonance/
         kind: config-repo
-        provenance: human-authored
-        last_evaluated: 2026-09-04
+        provenance: agent-asserted
+        last_evaluated: 2026-09-08
       - repository: megadoomer-io/megadoomer-config
-        directory: applications/infra/oauth2-proxy/do/
+        directory: applications/infra/oauth2-proxy/
         kind: auth-enforced-at
-        provenance: human-authored
-        last_evaluated: 2026-09-04
+        provenance: agent-asserted
+        last_evaluated: 2026-09-08
