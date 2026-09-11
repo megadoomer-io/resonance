@@ -1,53 +1,13 @@
 schemaVersion: 0.1.0
-description: >-
-  Resonance — personal music-discovery platform aggregating Spotify, Last.fm, and
-  ListenBrainz into a unified profile. Holds its own third-party OAuth tokens.
-
+description: Resonance event stream processor for megadoomer.io
 projects:
   - id: resonance
     directory: ./
-    description: Web app + arq background worker doing cross-service listening sync
+    description: Resonance worker and API
     facts:
-      language:
-        value: python
+      has_auth:
+        value: true
         provenance: agent-asserted
-        last_evaluated: 2026-09-08
-      deploy:
-        kind: kustomize
-        config_repo:
-          value: megadoomer-io/megadoomer-config
-          provenance: agent-asserted
-          last_evaluated: 2026-09-08
-      service:
-        hostname:
-          value: resonance.megadoomer.io
-          provenance: agent-asserted
-          last_evaluated: 2026-09-08
-        handles_own_auth:
-          value: false
-          provenance: agent-asserted
-          last_evaluated: 2026-09-08
-          notes: app access via oauth2-proxy; separately holds Spotify/Last.fm/ListenBrainz OAuth
-        integrations:
-          value:
-            - spotify
-            - lastfm
-            - listenbrainz
-          provenance: agent-asserted
-          last_evaluated: 2026-09-08
-      auth_gap:
-        value: false
-        provenance: agent-asserted
-        last_evaluated: 2026-09-08
-        notes: fronted by oauth2-proxy web-ingress
     links:
-      - repository: megadoomer-io/megadoomer-config
-        directory: applications/resonance/resonance/
+      - project: resonance-config
         kind: config-repo
-        provenance: agent-asserted
-        last_evaluated: 2026-09-08
-      - repository: megadoomer-io/megadoomer-config
-        directory: applications/infra/oauth2-proxy/
-        kind: auth-enforced-at
-        provenance: agent-asserted
-        last_evaluated: 2026-09-08
