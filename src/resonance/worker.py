@@ -190,6 +190,8 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("plan_sync_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "plan_sync"):
+                return
 
             # Check if this task was cancelled before we start
             if await lifecycle_module.is_cancelled(session, task):
@@ -337,6 +339,10 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             task = await _load_task(session, sync_task_id)
             if task is None:
                 log.error("sync_range_task_not_found")
+                return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "sync_range"
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -489,6 +495,8 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("bulk_job_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "run_bulk_job"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
@@ -582,6 +590,8 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("mbid_backfill_task_not_found")
+                return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_mbids"):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -692,6 +702,8 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("popularity_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_popularity"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
                 await lifecycle_module.cancel_task(
@@ -755,6 +767,8 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("genre_backfill_task_not_found")
+                return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_genres"):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -977,6 +991,8 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("generate_playlist_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "generate_playlist"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
@@ -1176,6 +1192,10 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("discover_tracks_task_not_found")
+                return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "discover_tracks_for_artist"
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -1761,6 +1781,8 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("enrich_related_artists_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "enrich_related_artists"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
                 await lifecycle_module.cancel_task(
@@ -2121,6 +2143,10 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("score_and_build_task_not_found")
+                return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "score_and_build_playlist"
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -2489,6 +2515,8 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             task = await _load_task(session, task_id)
             if task is None:
                 log.error("export_playlist_task_not_found")
+                return
+            if lifecycle_module.is_duplicate_delivery(task, "export_playlist"):
                 return
 
             # Check if this task or its parent was cancelled
@@ -2995,6 +3023,25 @@ async def _check_parent_completion(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _skip_duplicate_child_delivery(
+    session: sa_async.AsyncSession,
+    task: task_module.Task,
+    arq_redis: arq.ArqRedis,
+    log: structlog.stdlib.BoundLogger,
+    job: str,
+) -> bool:
+    """Entry guard for child jobs that drive a sibling pipeline.
+
+    Like ``lifecycle.is_duplicate_delivery``, but a child cancelled on its own
+    still advances its parent, so sequential siblings don't stall behind it.
+    """
+    if not lifecycle_module.is_duplicate_delivery(task, job):
+        return False
+    if task.status == types_module.SyncStatus.CANCELLED:
+        await _check_parent_completion(session, task, arq_redis, log)
+    return True
 
 
 async def _load_task(

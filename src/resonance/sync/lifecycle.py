@@ -66,6 +66,23 @@ def is_terminal(task: task_models.Task) -> bool:
     return task.status in types_module.TERMINAL_STATUSES
 
 
+def is_duplicate_delivery(task: task_models.Task, job: str) -> bool:
+    """Entry guard for arq jobs: True (and logged) when the row is already terminal.
+
+    arq can deliver a job more than once (SIGTERM retry, re-enqueue). A delivery
+    whose task already finished must not run the work again.
+    """
+    if not is_terminal(task):
+        return False
+    logger.info(
+        "duplicate_delivery",
+        job=job,
+        task_id=str(task.id),
+        status=task.status.value,
+    )
+    return True
+
+
 async def is_cancelled(
     session: AsyncSession,
     task: task_models.Task,
