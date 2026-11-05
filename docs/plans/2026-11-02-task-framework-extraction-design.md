@@ -94,6 +94,9 @@ RUNNING-retry resume.
   terminal logs `duplicate_delivery` and exits.
 - Export persists the Spotify playlist id immediately after creating it, so a retry reuses
   the playlist instead of creating a second one.
+- `plan_sync` skips planning when the parent already has children. Today that guard exists
+  only in startup recovery, so an arq re-delivery of `plan_sync` creates duplicate
+  children; the entry guard doesn't catch it because the parent is RUNNING, not terminal.
 - Delete the unused `sync/lifecycle._check_parent_completion` and its tests; the worker's
   version is the only live one.
 - No arq abort yet. Cancelling a RUNNING task through the API, CLI or dashboard still flips
@@ -138,7 +141,9 @@ UI in PR4:
 - **Reaper** (arq cron, `unique=True`): re-delivers PENDING and DEFERRED rows only when
   arq reports their job as not found or complete, and re-reads the row inside its
   transaction before delivering. Siblings and step_mode children that were never enqueued
-  are left alone. Startup recovery calls the same function.
+  are left alone, as are children whose parent is already terminal (today's stale-child
+  cleanup handles only PENDING children, so a DEFERRED orphan would otherwise be
+  re-delivered). Startup recovery calls the same function.
 - **Startup RUNNING recovery** checks `Job.status(arq_job_id)` first. Queued, deferred or
   in-progress jobs are left for arq's own SIGTERM retry; otherwise every deploy would
   double-run interrupted tasks.
