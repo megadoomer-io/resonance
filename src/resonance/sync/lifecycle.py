@@ -46,15 +46,30 @@ async def fail_task(
     task.completed_at = datetime.datetime.now(datetime.UTC)
 
 
+async def cancel_task(
+    session: AsyncSession,
+    task: task_models.Task,
+    reason: str,
+) -> None:
+    """Mark a task cancelled, recording why in ``error_message``."""
+    task.status = types_module.SyncStatus.CANCELLED
+    task.error_message = reason
+    task.completed_at = datetime.datetime.now(datetime.UTC)
+
+
+def is_terminal(task: task_models.Task) -> bool:
+    """Whether the task's row is in a terminal status (will never run again)."""
+    return task.status in types_module.TERMINAL_STATUSES
+
+
 async def is_cancelled(
     session: AsyncSession,
     task: task_models.Task,
 ) -> bool:
     """Check whether this task or any ancestor has been cancelled.
 
-    Cancellation is represented as FAILED with an error_message containing
-    "Cancelled".  Walks up the parent chain so nested children (grandchildren,
-    etc.) also detect cancellation.
+    Walks up the parent chain so nested children (grandchildren, etc.) also
+    detect cancellation.
 
     Args:
         session: Active database session.
@@ -63,11 +78,9 @@ async def is_cancelled(
     Returns:
         True if this task or any ancestor was cancelled.
     """
-    # Check the task itself
-    if _is_cancel_status(task.status, task.error_message):
+    if task.status == types_module.SyncStatus.CANCELLED:
         return True
 
-    # Walk up the parent chain
     current_parent_id = task.parent_id
     visited: set[object] = set()
 
@@ -80,7 +93,7 @@ async def is_cancelled(
         if parent is None:
             break
 
-        if _is_cancel_status(parent.status, parent.error_message):
+        if parent.status == types_module.SyncStatus.CANCELLED:
             logger.info(
                 "cancellation_detected",
                 task_id=str(task.id),
@@ -93,25 +106,15 @@ async def is_cancelled(
     return False
 
 
-def _is_cancel_status(
-    status: types_module.SyncStatus, error_message: str | None
-) -> bool:
-    """Check whether a status + error_message represents cancellation."""
-    return (
-        status == types_module.SyncStatus.FAILED
-        and error_message is not None
-        and "Cancelled" in error_message
-    )
-
-
-async def cancel_pending_children(
+async def cancel_active_children(
     session: AsyncSession,
     parent_id: object,
 ) -> int:
-    """Fail all PENDING children of a cancelled parent.
+    """Cancel every non-terminal child of a cancelled parent.
 
-    When a parent task is cancelled, any children still in PENDING status
-    should be failed immediately so they are never picked up by the worker.
+    PENDING and DEFERRED children are never picked up afterwards. A RUNNING
+    child is marked too, but its in-flight run still overwrites the status
+    when it finishes (no hard abort yet).
 
     Args:
         session: Active database session.
@@ -120,23 +123,19 @@ async def cancel_pending_children(
     Returns:
         Number of children cancelled.
     """
-    now = datetime.datetime.now(datetime.UTC)
-    # Find PENDING children first, then update them
-    pending_result = await session.execute(
+    active_result = await session.execute(
         sa.select(task_models.Task).where(
             task_models.Task.parent_id == parent_id,
-            task_models.Task.status == types_module.SyncStatus.PENDING,
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
-    pending_children = pending_result.scalars().all()
-    for child in pending_children:
-        child.status = types_module.SyncStatus.FAILED
-        child.error_message = "Parent task was cancelled"
-        child.completed_at = now
-    count = len(pending_children)
+    active_children = active_result.scalars().all()
+    for child in active_children:
+        await cancel_task(session, child, "Parent task was cancelled")
+    count = len(active_children)
     if count > 0:
         logger.info(
-            "pending_children_cancelled",
+            "active_children_cancelled",
             parent_id=str(parent_id),
             count=count,
         )

@@ -137,7 +137,7 @@ async def sync_calendar_feed(
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -291,7 +291,7 @@ async def sync_concert_archives(
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -453,7 +453,7 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()

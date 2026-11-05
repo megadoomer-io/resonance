@@ -134,12 +134,7 @@ async def upload_csv(
         task_models.Task.user_id == user_id,
         task_models.Task.service_connection_id == connection.id,
         task_models.Task.task_type == types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-            ]
-        ),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     if running_result.scalar_one_or_none() is not None:

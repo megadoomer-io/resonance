@@ -193,7 +193,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             # Check if this task was cancelled before we start
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -341,7 +341,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -492,7 +492,7 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -585,7 +585,7 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -694,7 +694,7 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -758,7 +758,7 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -980,7 +980,7 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1180,7 +1180,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1763,7 +1763,7 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2125,7 +2125,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2493,7 +2493,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2790,9 +2790,7 @@ async def _check_parent_completion(
     pending_count_result = await session.execute(
         sa.select(sa.func.count()).where(
             task_module.Task.parent_id == task.parent_id,
-            task_module.Task.status.notin_(
-                [types_module.SyncStatus.COMPLETED, types_module.SyncStatus.FAILED]
-            ),
+            task_module.Task.status.notin_(types_module.TERMINAL_STATUSES),
         )
     )
     pending_count: int = pending_count_result.scalar_one()
@@ -2845,6 +2843,14 @@ async def _check_parent_completion(
     if parent is None:
         log.error("parent_task_not_found", parent_id=str(task.parent_id))
         return
+    if lifecycle_module.is_terminal(parent):
+        # Already settled (e.g. cancelled by the user); don't overwrite it.
+        log.info(
+            "parent_already_terminal",
+            parent_id=str(parent.id),
+            status=parent.status.value,
+        )
+        return
 
     # Check if any children failed
     failed_count_result = await session.execute(
@@ -2861,10 +2867,15 @@ async def _check_parent_completion(
     )
     children = children_result.scalars().all()
 
+    cancelled_count = sum(
+        1 for c in children if c.status == types_module.SyncStatus.CANCELLED
+    )
     base_result: dict[str, object] = {
-        "children_completed": len(children) - failed_count,
+        "children_completed": len(children) - failed_count - cancelled_count,
         "children_failed": failed_count,
     }
+    if cancelled_count:
+        base_result["children_cancelled"] = cancelled_count
 
     if parent.task_type == types_module.TaskType.PLAYLIST_GENERATION:
         total_tracks_found = 0
@@ -2915,6 +2926,9 @@ async def _check_parent_completion(
     if failed_count > 0:
         parent.status = types_module.SyncStatus.FAILED
         parent.error_message = f"{failed_count} child task(s) failed"
+    elif cancelled_count > 0:
+        parent.status = types_module.SyncStatus.CANCELLED
+        parent.error_message = f"{cancelled_count} child task(s) cancelled"
     else:
         parent.status = types_module.SyncStatus.COMPLETED
 
@@ -3066,12 +3080,7 @@ async def _reenqueue_orphaned_tasks(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
+                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
                 ),
             )
         )
@@ -3098,12 +3107,7 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
-                parent_alias.status.in_(
-                    [
-                        types_module.SyncStatus.COMPLETED,
-                        types_module.SyncStatus.FAILED,
-                    ]
-                ),
+                parent_alias.status.in_(types_module.TERMINAL_STATUSES),
             )
         )
         stale_tasks = list(stale_result.scalars().all())
@@ -3126,12 +3130,7 @@ async def _reenqueue_orphaned_tasks(
                 task_module.Task.status == types_module.SyncStatus.RUNNING,
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
+                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
                 ),
             )
         )

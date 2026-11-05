@@ -100,13 +100,7 @@ async def trigger_sync(
         task_models.Task.user_id == user_id,
         task_models.Task.service_connection_id == connection.id,
         task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-                types_module.SyncStatus.DEFERRED,
-            ]
-        ),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     existing_job = running_result.scalar_one_or_none()
@@ -264,13 +258,7 @@ async def trigger_sync_by_connection(
     existing = await db.execute(
         sa.select(task_models.Task).where(
             task_models.Task.service_connection_id == connection_id,
-            task_models.Task.status.in_(
-                [
-                    types_module.SyncStatus.PENDING,
-                    types_module.SyncStatus.RUNNING,
-                    types_module.SyncStatus.DEFERRED,
-                ]
-            ),
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
     if existing.scalar_one_or_none() is not None:
@@ -329,19 +317,11 @@ async def cancel_sync(
     if job is None:
         raise fastapi.HTTPException(status_code=404, detail="Sync task not found")
 
-    if job.status not in (
-        types_module.SyncStatus.PENDING,
-        types_module.SyncStatus.RUNNING,
-        types_module.SyncStatus.DEFERRED,
-    ):
+    if job.status not in types_module.ACTIVE_STATUSES:
         raise fastapi.HTTPException(status_code=400, detail="Job is already finished")
 
-    job.status = types_module.SyncStatus.FAILED
-    job.error_message = "Cancelled by user"
-    job.completed_at = datetime.datetime.now(datetime.UTC)
-
-    # Immediately fail any PENDING children so they are never picked up
-    children_cancelled = await lifecycle_module.cancel_pending_children(db, job.id)
+    await lifecycle_module.cancel_task(db, job, "Cancelled by user")
+    children_cancelled = await lifecycle_module.cancel_active_children(db, job.id)
     await db.commit()
 
     return {

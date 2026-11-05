@@ -419,6 +419,79 @@ class TestCheckParentCompletion:
         session.commit.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancelled_parent_is_not_overwritten(self) -> None:
+        """A parent already CANCELLED stays CANCELLED when its last child ends."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id, status=types_module.SyncStatus.CANCELLED)
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.CANCELLED,
+        )
+        parent_task.error_message = "Cancelled by user"
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        session.execute.side_effect = [pending_result, parent_result]
+
+        await worker_module._check_parent_completion(
+            session, task, arq_redis, MagicMock()
+        )
+
+        assert parent_task.status == types_module.SyncStatus.CANCELLED
+        assert parent_task.error_message == "Cancelled by user"
+        arq_redis.enqueue_job.assert_not_called()
+        session.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_children_mark_parent_cancelled(self) -> None:
+        """No failures but a cancelled child: the parent ends CANCELLED, no dedup."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id, status=types_module.SyncStatus.CANCELLED)
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        child1 = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child1, task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(
+            session, task, arq_redis, MagicMock()
+        )
+
+        assert parent_task.status == types_module.SyncStatus.CANCELLED
+        assert parent_task.result["children_cancelled"] == 1
+        assert parent_task.result["children_completed"] == 1
+        arq_redis.enqueue_job.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generation_parent_skips_dedup(self) -> None:
         """PLAYLIST_GENERATION parent should not trigger post-sync dedup."""
         parent_id = uuid.uuid4()

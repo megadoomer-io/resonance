@@ -141,6 +141,112 @@ class TestFailTask:
 
 
 # ---------------------------------------------------------------------------
+# cancellation tests
+# ---------------------------------------------------------------------------
+
+
+def _scalar_result(value: object) -> MagicMock:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
+
+
+def _scalars_result(values: list[task_models.Task]) -> MagicMock:
+    scalars = MagicMock()
+    scalars.all.return_value = values
+    result = MagicMock()
+    result.scalars.return_value = scalars
+    return result
+
+
+class TestCancelTask:
+    async def test_sets_cancelled_state(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        await lifecycle_module.cancel_task(AsyncMock(), task, "Cancelled by user")
+
+        assert task.status == types_module.SyncStatus.CANCELLED
+        assert task.error_message == "Cancelled by user"
+        assert task.completed_at is not None
+
+
+class TestIsTerminal:
+    def test_terminal_statuses(self) -> None:
+        for status in types_module.TERMINAL_STATUSES:
+            assert lifecycle_module.is_terminal(_make_task(status=status))
+
+    def test_active_statuses(self) -> None:
+        for status in types_module.ACTIVE_STATUSES:
+            assert not lifecycle_module.is_terminal(_make_task(status=status))
+
+
+class TestIsCancelled:
+    async def test_cancelled_task(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.CANCELLED)
+        session = AsyncMock()
+        assert await lifecycle_module.is_cancelled(session, task)
+        session.execute.assert_not_called()
+
+    async def test_failed_with_cancelled_message_is_not_cancelled(self) -> None:
+        """The legacy FAILED + 'Cancelled' message convention no longer counts."""
+        task = _make_task(status=types_module.SyncStatus.FAILED)
+        task.error_message = "Cancelled by user"
+        assert not await lifecycle_module.is_cancelled(AsyncMock(), task)
+
+    async def test_cancelled_grandparent(self) -> None:
+        grandparent = _make_task(status=types_module.SyncStatus.CANCELLED)
+        parent = _make_task(
+            parent_id=grandparent.id, status=types_module.SyncStatus.RUNNING
+        )
+        child = _make_task(parent_id=parent.id, status=types_module.SyncStatus.PENDING)
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(parent),
+            _scalar_result(grandparent),
+        ]
+        assert await lifecycle_module.is_cancelled(session, child)
+
+    async def test_running_parent_not_cancelled(self) -> None:
+        parent = _make_task(status=types_module.SyncStatus.RUNNING)
+        child = _make_task(parent_id=parent.id, status=types_module.SyncStatus.PENDING)
+        session = AsyncMock()
+        session.execute.side_effect = [_scalar_result(parent)]
+        assert not await lifecycle_module.is_cancelled(session, child)
+
+
+class TestCancelActiveChildren:
+    async def test_cancels_every_returned_child(self) -> None:
+        parent_id = uuid.uuid4()
+        pending = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.PENDING
+        )
+        deferred = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.DEFERRED
+        )
+        session = AsyncMock()
+        session.execute.return_value = _scalars_result([pending, deferred])
+
+        count = await lifecycle_module.cancel_active_children(session, parent_id)
+
+        assert count == 2
+        for child in (pending, deferred):
+            assert child.status == types_module.SyncStatus.CANCELLED
+            assert child.error_message == "Parent task was cancelled"
+
+    async def test_queries_active_statuses_only(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = _scalars_result([])
+
+        await lifecycle_module.cancel_active_children(session, uuid.uuid4())
+
+        stmt = session.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        for status in types_module.ACTIVE_STATUSES:
+            assert f"'{status.name}'" in compiled
+        for status in types_module.TERMINAL_STATUSES:
+            assert f"'{status.name}'" not in compiled
+
+
+# ---------------------------------------------------------------------------
 # _check_parent_completion tests
 # ---------------------------------------------------------------------------
 

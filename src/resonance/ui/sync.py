@@ -245,24 +245,12 @@ async def sync_status_partial(
     sync_jobs = sync_jobs_result.scalars().all()
 
     for job in sync_jobs:
-        if job.status in (
-            types_module.SyncStatus.PENDING,
-            types_module.SyncStatus.RUNNING,
-            types_module.SyncStatus.DEFERRED,
-        ):
+        if job.status in types_module.ACTIVE_STATUSES:
             child_total = sum(child.progress_current for child in job.children)
             if child_total:
                 job.progress_current = int(child_total)
 
-    has_active_sync = any(
-        j.status
-        in (
-            types_module.SyncStatus.PENDING,
-            types_module.SyncStatus.RUNNING,
-            types_module.SyncStatus.DEFERRED,
-        )
-        for j in sync_jobs
-    )
+    has_active_sync = any(j.status in types_module.ACTIVE_STATUSES for j in sync_jobs)
 
     return common.templates.TemplateResponse(
         request,
