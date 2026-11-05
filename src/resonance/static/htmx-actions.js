@@ -22,6 +22,8 @@ export function planActions(elt, detail) {
 
   const refresh = attr("data-after-request-refresh");
   if (refresh) actions.push({ type: "refresh", selector: refresh });
+  const successRefresh = attr("data-after-success-refresh");
+  if (ok && successRefresh) actions.push({ type: "refresh", selector: successRefresh });
   if (has("data-after-request-disable")) {
     actions.push({ type: "disable", text: attr("data-after-request-disable") || null });
   }
@@ -59,7 +61,9 @@ export function applyActions(actions, elt, env) {
     } else if (action.type === "show-error") {
       const target = env.document.querySelector(action.selector);
       if (!target) continue;
-      (target.querySelector("mark") || target).textContent = action.message;
+      const slot =
+        target.querySelector("mark") || target.querySelector("[data-error-message]") || target;
+      slot.textContent = action.message;
       target.hidden = false;
       target.style.display = "block";
     }
