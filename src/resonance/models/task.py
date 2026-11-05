@@ -40,6 +40,13 @@ class Task(base_module.Base):
             "task_type",
             "status",
         ),
+        # Serves the reaper and startup-recovery scans; built CONCURRENTLY by
+        # its migration.
+        sa.Index(
+            "ix_sync_tasks_reaper_candidates",
+            "status",
+            postgresql_where=sa.text("status IN ('PENDING', 'DEFERRED', 'RUNNING')"),
+        ),
     )
 
     id: orm.Mapped[uuid.UUID] = orm.mapped_column(
@@ -97,6 +104,14 @@ class Task(base_module.Base):
     )
     deferred_until: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         sa.DateTime(timezone=True), nullable=True, default=None
+    )
+    # NULL means no delivery was ever handed to arq (e.g. a sequential sibling
+    # waiting its turn); the reaper never auto-delivers those rows.
+    enqueued_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
+    arq_job_id: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(255), nullable=True, default=None
     )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
