@@ -8,6 +8,37 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: resonance
+          POSTGRES_PASSWORD: resonance
+          POSTGRES_DB: resonance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U resonance"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: resonance
+      PGPASSWORD: resonance
+      PGDATABASE: resonance
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
     steps:
       - uses: actions/checkout@v4
 
