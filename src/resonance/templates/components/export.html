@@ -20,7 +20,6 @@
 <mark>Failed: {{ row.error or "Unknown error" }}</mark>
 {% elif row.status == "running" %}
 <span aria-busy="true">Exporting…</span>
-<small class="text-muted">Can't be stopped once it has started.</small>
 {% elif row.status == "deferred" %}
 <span aria-busy="true">Waiting to retry</span>
 {% elif row.status == "pending" %}
@@ -42,7 +41,7 @@
             hx-target="#export-row-{{ row.task_id }}"
             hx-swap="outerHTML"
             hx-disabled-elt="this"
-            hx-confirm="Stop this export?"
+            hx-confirm="Stop export? Tracks already added stay on Spotify."
             class="outline secondary btn-sm export-stop"
         >Stop</button>
         {% endif %}

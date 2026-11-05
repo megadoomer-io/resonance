@@ -848,9 +848,7 @@ async def export_playlist_submit(
     )
 
 
-_CANCELLABLE_EXPORT_STATUSES = frozenset(
-    {types_module.SyncStatus.PENDING, types_module.SyncStatus.DEFERRED}
-)
+_CANCELLABLE_EXPORT_STATUSES = types_module.ACTIVE_STATUSES
 
 
 def _parse_task_ids(task_ids: str) -> list[uuid.UUID]:
