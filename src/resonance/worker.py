@@ -190,14 +190,23 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("plan_sync_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "plan_sync"):
+                return
 
             # Check if this task was cancelled before we start
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
                 log.info("plan_sync_cancelled")
+                return
+
+            # A re-delivery after planning would create duplicate children; the
+            # entry guard misses it because the parent is RUNNING, not terminal.
+            existing_children = await _child_count(session, task.id)
+            if existing_children > 0:
+                log.info("plan_sync_skipped_has_children", children=existing_children)
                 return
 
             task.status = types_module.SyncStatus.RUNNING
@@ -338,10 +347,14 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("sync_range_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "sync_range"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -489,10 +502,12 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("bulk_job_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "run_bulk_job"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -583,9 +598,11 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("mbid_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_mbids"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -692,9 +709,11 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("popularity_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_popularity"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -756,9 +775,11 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("genre_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_genres"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -977,10 +998,12 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("generate_playlist_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "generate_playlist"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1177,10 +1200,14 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("discover_tracks_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "discover_tracks_for_artist"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1761,9 +1788,11 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("enrich_related_artists_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "enrich_related_artists"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2122,10 +2151,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("score_and_build_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "score_and_build_playlist"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2456,6 +2489,20 @@ _HTTP_ERROR_MESSAGES: dict[int, str] = {
 }
 
 
+def _set_spotify_export_link(
+    playlist: playlist_models.Playlist,
+    connection_id: str,
+    link: dict[str, object],
+) -> None:
+    """Set ``service_links["spotify"][connection_id]`` (copy-on-write for JSON)."""
+    links = dict(playlist.service_links or {})
+    current = links.get("spotify")
+    spotify_section = dict(current) if isinstance(current, dict) else {}
+    spotify_section[connection_id] = link
+    links["spotify"] = spotify_section
+    playlist.service_links = links
+
+
 def _friendly_http_error(exc: httpx.HTTPStatusError, service: str) -> str:
     status = exc.response.status_code
     template = _HTTP_ERROR_MESSAGES.get(status)
@@ -2490,10 +2537,12 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("export_playlist_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "export_playlist"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2688,6 +2737,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     playlist.name,
                     playlist.description or "",
                 )
+                # Persist the id before anything else can fail, so a retry
+                # replaces tracks on this playlist instead of creating another.
+                # No exported_at yet: the page reads it as not yet synced.
+                _set_spotify_export_link(
+                    playlist, connection_id_str, {"playlist_id": spotify_playlist_id}
+                )
+                await session.commit()
                 await connector.add_tracks_to_playlist(
                     access_token, spotify_playlist_id, spotify_uris
                 )
@@ -2696,19 +2752,14 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     spotify_playlist_id=spotify_playlist_id,
                 )
 
-            # Update playlist service_links (copy-on-write)
-            updated_playlist_links = dict(playlist_links)
-            spotify_section = dict(
-                updated_playlist_links.get("spotify", {})
-                if isinstance(updated_playlist_links.get("spotify"), dict)
-                else {}
+            _set_spotify_export_link(
+                playlist,
+                connection_id_str,
+                {
+                    "playlist_id": spotify_playlist_id,
+                    "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                },
             )
-            spotify_section[connection_id_str] = {
-                "playlist_id": spotify_playlist_id,
-                "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            }
-            updated_playlist_links["spotify"] = spotify_section
-            playlist.service_links = updated_playlist_links
 
             # Persist per-track Spotify sync status (#spotify-sync-visibility): the
             # push succeeded, so every matched track is now confirmed on Spotify;
@@ -2790,9 +2841,7 @@ async def _check_parent_completion(
     pending_count_result = await session.execute(
         sa.select(sa.func.count()).where(
             task_module.Task.parent_id == task.parent_id,
-            task_module.Task.status.notin_(
-                [types_module.SyncStatus.COMPLETED, types_module.SyncStatus.FAILED]
-            ),
+            task_module.Task.status.notin_(types_module.TERMINAL_STATUSES),
         )
     )
     pending_count: int = pending_count_result.scalar_one()
@@ -2845,6 +2894,14 @@ async def _check_parent_completion(
     if parent is None:
         log.error("parent_task_not_found", parent_id=str(task.parent_id))
         return
+    if lifecycle_module.is_terminal(parent):
+        # Already settled (e.g. cancelled by the user); don't overwrite it.
+        log.info(
+            "parent_already_terminal",
+            parent_id=str(parent.id),
+            status=parent.status.value,
+        )
+        return
 
     # Check if any children failed
     failed_count_result = await session.execute(
@@ -2861,10 +2918,15 @@ async def _check_parent_completion(
     )
     children = children_result.scalars().all()
 
+    cancelled_count = sum(
+        1 for c in children if c.status == types_module.SyncStatus.CANCELLED
+    )
     base_result: dict[str, object] = {
-        "children_completed": len(children) - failed_count,
+        "children_completed": len(children) - failed_count - cancelled_count,
         "children_failed": failed_count,
     }
+    if cancelled_count:
+        base_result["children_cancelled"] = cancelled_count
 
     if parent.task_type == types_module.TaskType.PLAYLIST_GENERATION:
         total_tracks_found = 0
@@ -2915,6 +2977,9 @@ async def _check_parent_completion(
     if failed_count > 0:
         parent.status = types_module.SyncStatus.FAILED
         parent.error_message = f"{failed_count} child task(s) failed"
+    elif cancelled_count > 0:
+        parent.status = types_module.SyncStatus.CANCELLED
+        parent.error_message = f"{cancelled_count} child task(s) cancelled"
     else:
         parent.status = types_module.SyncStatus.COMPLETED
 
@@ -2981,6 +3046,34 @@ async def _check_parent_completion(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _skip_duplicate_child_delivery(
+    session: sa_async.AsyncSession,
+    task: task_module.Task,
+    arq_redis: arq.ArqRedis,
+    log: structlog.stdlib.BoundLogger,
+    job: str,
+) -> bool:
+    """Entry guard for child jobs that drive a sibling pipeline.
+
+    Like ``lifecycle.is_duplicate_delivery``, but a child cancelled on its own
+    still advances its parent, so sequential siblings don't stall behind it.
+    """
+    if not lifecycle_module.is_duplicate_delivery(task, job):
+        return False
+    if task.status == types_module.SyncStatus.CANCELLED:
+        await _check_parent_completion(session, task, arq_redis, log)
+    return True
+
+
+async def _child_count(session: sa_async.AsyncSession, parent_id: uuid.UUID) -> int:
+    """Number of child tasks (any status) under a parent."""
+    result = await session.execute(
+        sa.select(sa.func.count()).where(task_module.Task.parent_id == parent_id)
+    )
+    count: int = result.scalar_one()
+    return count
 
 
 async def _load_task(
@@ -3066,12 +3159,7 @@ async def _reenqueue_orphaned_tasks(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
+                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
                 ),
             )
         )
@@ -3098,12 +3186,7 @@ async def _reenqueue_orphaned_tasks(
             )
             .where(
                 task_module.Task.status == types_module.SyncStatus.PENDING,
-                parent_alias.status.in_(
-                    [
-                        types_module.SyncStatus.COMPLETED,
-                        types_module.SyncStatus.FAILED,
-                    ]
-                ),
+                parent_alias.status.in_(types_module.TERMINAL_STATUSES),
             )
         )
         stale_tasks = list(stale_result.scalars().all())
@@ -3126,12 +3209,7 @@ async def _reenqueue_orphaned_tasks(
                 task_module.Task.status == types_module.SyncStatus.RUNNING,
                 sa.or_(
                     task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
+                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
                 ),
             )
         )
@@ -3169,24 +3247,22 @@ async def _reenqueue_orphaned_tasks(
 
         enqueued = 0
         for task in all_tasks:
-            if task.task_type in (
-                types_module.TaskType.SYNC_JOB,
-                types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-            ):
-                # Skip parent tasks that already have children — re-planning
-                # would create duplicate child tasks.
-                children_count_result = await session.execute(
-                    sa.select(sa.func.count()).where(
-                        task_module.Task.parent_id == task.id,
-                    )
+            # Skip parent tasks that already have children; re-planning would
+            # create duplicate child tasks.
+            if (
+                task.task_type
+                in (
+                    types_module.TaskType.SYNC_JOB,
+                    types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
                 )
-                if children_count_result.scalar_one() > 0:
-                    logger.info(
-                        "skipped_parent_with_children",
-                        task_id=str(task.id),
-                        task_type=task.task_type.value,
-                    )
-                    continue
+                and await _child_count(session, task.id) > 0
+            ):
+                logger.info(
+                    "skipped_parent_with_children",
+                    task_id=str(task.id),
+                    task_type=task.task_type.value,
+                )
+                continue
 
             dispatch = _TASK_DISPATCH.get(task.task_type)
             if dispatch is None:

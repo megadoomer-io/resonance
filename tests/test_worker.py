@@ -419,6 +419,79 @@ class TestCheckParentCompletion:
         session.commit.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancelled_parent_is_not_overwritten(self) -> None:
+        """A parent already CANCELLED stays CANCELLED when its last child ends."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id, status=types_module.SyncStatus.CANCELLED)
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.CANCELLED,
+        )
+        parent_task.error_message = "Cancelled by user"
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        session.execute.side_effect = [pending_result, parent_result]
+
+        await worker_module._check_parent_completion(
+            session, task, arq_redis, MagicMock()
+        )
+
+        assert parent_task.status == types_module.SyncStatus.CANCELLED
+        assert parent_task.error_message == "Cancelled by user"
+        arq_redis.enqueue_job.assert_not_called()
+        session.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_children_mark_parent_cancelled(self) -> None:
+        """No failures but a cancelled child: the parent ends CANCELLED, no dedup."""
+        parent_id = uuid.uuid4()
+        task = _make_task(parent_id=parent_id, status=types_module.SyncStatus.CANCELLED)
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        parent_task = _make_task(
+            task_id=parent_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        child1 = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
+        )
+
+        pending_result = MagicMock()
+        pending_result.scalar_one.return_value = 0
+        parent_result = MagicMock()
+        parent_result.scalar_one_or_none.return_value = parent_task
+        failed_result = MagicMock()
+        failed_result.scalar_one.return_value = 0
+        children_scalars = MagicMock()
+        children_scalars.all.return_value = [child1, task]
+        children_result = MagicMock()
+        children_result.scalars.return_value = children_scalars
+        session.execute.side_effect = [
+            pending_result,
+            parent_result,
+            failed_result,
+            children_result,
+        ]
+
+        await worker_module._check_parent_completion(
+            session, task, arq_redis, MagicMock()
+        )
+
+        assert parent_task.status == types_module.SyncStatus.CANCELLED
+        assert parent_task.result["children_cancelled"] == 1
+        assert parent_task.result["children_completed"] == 1
+        arq_redis.enqueue_job.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generation_parent_skips_dedup(self) -> None:
         """PLAYLIST_GENERATION parent should not trigger post-sync dedup."""
         parent_id = uuid.uuid4()
@@ -594,6 +667,43 @@ class TestPlanSync:
         # Should not have committed (no task found)
         session.commit.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_redelivery_for_parent_with_children_does_not_replan(self) -> None:
+        """A re-delivered plan_sync for a RUNNING parent with children is a no-op."""
+        task = task_module.Task(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_connection_id=uuid.uuid4(),
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        session = AsyncMock()
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+        children_count = MagicMock()
+        children_count.scalar_one.return_value = 3
+        session.execute.side_effect = [task_result, children_count]
+
+        strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        arq_redis = AsyncMock()
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "strategies": {types_module.ServiceType.SPOTIFY: strategy},
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(worker_module, "logger") as log:
+            log.bind.return_value = log
+            await worker_module.plan_sync(ctx, str(task.id))
+
+        strategy.plan.assert_not_called()
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        arq_redis.enqueue_job.assert_not_called()
+        assert task.status == types_module.SyncStatus.RUNNING
+        log.info.assert_any_call("plan_sync_skipped_has_children", children=3)
+
 
 # ---------------------------------------------------------------------------
 # sync_range tests
@@ -657,11 +767,15 @@ class TestPlanSyncStrategyDispatch:
         task_result = MagicMock()
         task_result.scalar_one_or_none.return_value = task
 
-        # 2. Load connection
+        # 2. No existing children (not a re-delivery)
+        no_children = MagicMock()
+        no_children.scalar_one.return_value = 0
+
+        # 3. Load connection
         conn_result = MagicMock()
         conn_result.scalar_one.return_value = connection
 
-        session.execute.side_effect = [task_result, conn_result]
+        session.execute.side_effect = [task_result, no_children, conn_result]
 
         # Strategy returns empty plan
         mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
@@ -709,11 +823,15 @@ class TestPlanSyncStrategyDispatch:
         task_result = MagicMock()
         task_result.scalar_one_or_none.return_value = task
 
-        # 2. Load connection
+        # 2. No existing children (not a re-delivery)
+        no_children = MagicMock()
+        no_children.scalar_one.return_value = 0
+
+        # 3. Load connection
         conn_result = MagicMock()
         conn_result.scalar_one.return_value = connection
 
-        session.execute.side_effect = [task_result, conn_result]
+        session.execute.side_effect = [task_result, no_children, conn_result]
 
         ctx: dict[str, Any] = {
             "session_factory": _mock_session_factory(session),
@@ -3630,6 +3748,119 @@ class TestExportPlaylist:
         assert unmatched_pt.spotify_synced_at is None
         # The completion payload reports which track ids synced.
         assert task.result["synced_track_ids"] == [str(matched_pt.track_id)]
+
+    @staticmethod
+    def _export_fixture(
+        service_links: dict[str, Any] | None,
+    ) -> tuple[Any, ...]:
+        """Build a minimal export: one cached-match track, mocked Spotify."""
+        import resonance.connectors.spotify as spotify_module
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+
+        connection_id = uuid.uuid4()
+        task = task_module.Task(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            parent_id=None,
+            task_type=types_module.TaskType.PLAYLIST_EXPORT,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "playlist_id": str(uuid.uuid4()),
+                "connection_id": str(connection_id),
+            },
+        )
+        track = MagicMock()
+        track.title = "Song"
+        track.service_links = {"spotify": "abc123"}
+        pt = MagicMock(spec=playlist_models.PlaylistTrack)
+        pt.track = track
+        pt.track_id = uuid.uuid4()
+
+        playlist = MagicMock(spec=playlist_models.Playlist)
+        playlist.name = "PL"
+        playlist.description = ""
+        playlist.service_links = service_links
+        playlist.tracks = [pt]
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.encrypted_access_token = b"enc"
+        connection.encrypted_refresh_token = None
+        connection.token_expires_at = None
+
+        session = AsyncMock()
+        results = []
+        for value in (task, playlist, connection):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = value
+            results.append(res)
+        session.execute.side_effect = results
+
+        spotify_conn = MagicMock(spec=spotify_module.SpotifyConnector)
+        spotify_conn.create_playlist = AsyncMock(return_value="sp_new")
+        spotify_conn.add_tracks_to_playlist = AsyncMock()
+        spotify_conn.replace_playlist_tracks = AsyncMock()
+
+        registry = MagicMock()
+        registry.get_base_connector.side_effect = lambda stype: (
+            spotify_conn if stype == types_module.ServiceType.SPOTIFY else None
+        )
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "settings": MagicMock(),
+            "redis": AsyncMock(),
+        }
+        return task, playlist, session, spotify_conn, ctx, str(connection_id)
+
+    @pytest.mark.asyncio
+    async def test_created_playlist_id_is_committed_before_adding_tracks(
+        self,
+    ) -> None:
+        """If adding tracks fails, the created Spotify id is already persisted."""
+        task, playlist, session, spotify_conn, ctx, conn_id = self._export_fixture(None)
+        committed_links: list[Any] = []
+
+        async def _commit() -> None:
+            committed_links.append(playlist.service_links)
+
+        session.commit.side_effect = _commit
+        spotify_conn.add_tracks_to_playlist.side_effect = RuntimeError("boom")
+        # The failure handler reloads the task row.
+        reload = MagicMock()
+        reload.scalar_one_or_none.return_value = task
+        session.execute.side_effect = [*session.execute.side_effect, reload]
+
+        with patch.object(
+            worker_module.crypto_module, "decrypt_token", lambda *_a, **_k: "access"
+        ):
+            await worker_module.export_playlist(ctx, str(task.id))
+
+        assert {"spotify": {conn_id: {"playlist_id": "sp_new"}}} in committed_links
+        assert task.status == types_module.SyncStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_retry_reuses_persisted_playlist(self) -> None:
+        """A retry after a partial export replaces tracks on the saved playlist."""
+        task, playlist, _session, spotify_conn, ctx, conn_id = self._export_fixture(
+            None
+        )
+        # The state a crashed first attempt leaves behind: id, no exported_at.
+        playlist.service_links = {"spotify": {conn_id: {"playlist_id": "sp_new"}}}
+
+        with patch.object(
+            worker_module.crypto_module, "decrypt_token", lambda *_a, **_k: "access"
+        ):
+            await worker_module.export_playlist(ctx, str(task.id))
+
+        spotify_conn.create_playlist.assert_not_called()
+        spotify_conn.replace_playlist_tracks.assert_awaited_once_with(
+            "access", "sp_new", ["spotify:track:abc123"]
+        )
+        assert task.status == types_module.SyncStatus.COMPLETED
+        link = playlist.service_links["spotify"][conn_id]
+        assert link["playlist_id"] == "sp_new"
+        assert "exported_at" in link
 
 
 class TestArtistsNeedingDiscovery:

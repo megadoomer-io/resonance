@@ -86,6 +86,7 @@ Commands:
   backfill-popularity [opts]   Backfill ListenBrainz popularity
   backfill-genres [opts]       Backfill artist genre tags (#136)
   task <task_id>               Check task status
+  cancel <task_id>             Cancel a task and its unfinished children
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
   generate <profile-id>        Generate a playlist from a profile
@@ -219,6 +220,19 @@ def _cmd_sync() -> None:
     print(json.dumps(resp.json(), indent=2))
 
 
+_ACTIVE_STATUS_VALUES = frozenset(s.value for s in types_module.ACTIVE_STATUSES)
+
+
+def _cmd_cancel() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: resonance-api cancel <task_id>")
+        sys.exit(1)
+    task_id = sys.argv[2]
+    data = _api_request("POST", f"/api/v1/sync/cancel/{task_id}").json()
+    children = data.get("children_cancelled", 0)
+    print(f"Cancelled {task_id} ({children} child task(s) cancelled)")
+
+
 def _poll_task(task_id: str, label: str) -> dict[str, object]:
     """Poll a task until completion, showing progress."""
     is_tty = sys.stdout.isatty()
@@ -229,14 +243,16 @@ def _poll_task(task_id: str, label: str) -> dict[str, object]:
         data = resp.json()
         status = data.get("status", "unknown")
 
-        if status in ("completed", "failed"):
+        # Anything outside the active set is terminal, including statuses this
+        # CLI doesn't know about yet.
+        if status not in _ACTIVE_STATUS_VALUES:
             if is_tty:
                 # Clear the progress line
                 sys.stdout.write("\r" + " " * 60 + "\r")
                 sys.stdout.flush()
-            if status == "failed":
-                error = data.get("error", "Unknown error")
-                print(f"FAILED: {error}")
+            if status != types_module.SyncStatus.COMPLETED.value:
+                error = data.get("error") or "Unknown error"
+                print(f"{status.upper()}: {error}")
                 sys.exit(1)
             result: dict[str, object] = data.get("result") or {}
             return result
@@ -1483,6 +1499,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
         _cmd_backfill_genres,
     ),
     "task": ("Check task status", _cmd_task),
+    "cancel": ("Cancel a task", _cmd_cancel),
     "track": ("Search tracks by title", _cmd_track),
     "taste": ("Genre discovery & taste stats", _cmd_taste),
     "profile": ("Manage generator profiles", _cmd_profile),

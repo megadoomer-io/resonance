@@ -134,10 +134,12 @@ async def sync_calendar_feed(
             if task is None:
                 log.error("calendar_sync_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "sync_calendar_feed"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -289,9 +291,11 @@ async def sync_concert_archives(
             if task is None:
                 log.error("concert_archives_import_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "sync_concert_archives"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -451,9 +455,13 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
             if task is None:
                 log.error("concert_archives_chunk_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(
+                task, "sync_concert_archives_chunk"
+            ):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()

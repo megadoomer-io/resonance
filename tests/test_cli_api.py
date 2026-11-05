@@ -765,3 +765,65 @@ class TestProfileExcludeTrack:
         assert methods[0] == "GET"
         assert "PATCH" in methods
         assert "POST" in methods
+
+
+class TestCancelCommand:
+    """`resonance-api cancel <task_id>` posts to the sync cancel endpoint."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_posts_cancel(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["method"] = method
+            captured["url"] = url
+            return _fake_response(
+                json_body={
+                    "status": "cancelled",
+                    "job_id": "t1",
+                    "children_cancelled": 2,
+                }
+            )
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "cancel", "t1"])
+        cli_module._cmd_cancel()
+
+        assert captured["method"] == "POST"
+        assert captured["url"] == "http://test-host/api/v1/sync/cancel/t1"
+        out = capsys.readouterr().out
+        assert "Cancelled t1" in out
+        assert "2 child task(s)" in out
+
+    def test_missing_task_id_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "cancel"])
+        with pytest.raises(SystemExit) as exc:
+            cli_module._cmd_cancel()
+        assert exc.value.code == 1
+
+    def test_registered(self) -> None:
+        assert "cancel" in cli_module._COMMANDS
+        assert "cancel <task_id>" in cli_module._USAGE
+
+
+class TestPollTaskTerminal:
+    """_poll_task stops on any status outside pending/running/deferred."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    @pytest.mark.parametrize("status", ["cancelled", "mystery"])
+    def test_non_success_terminal_exits_1(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        status: str,
+    ) -> None:
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            return _fake_response(json_body={"status": status, "error": "why"})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        with pytest.raises(SystemExit) as exc:
+            cli_module._poll_task("t1", "Working")
+        assert exc.value.code == 1
+        assert status.upper() in capsys.readouterr().out

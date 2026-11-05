@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import enum
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
@@ -12,6 +14,8 @@ import resonance.models.task as task_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
+    import uuid
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -46,15 +50,47 @@ async def fail_task(
     task.completed_at = datetime.datetime.now(datetime.UTC)
 
 
+async def cancel_task(
+    session: AsyncSession,
+    task: task_models.Task,
+    reason: str,
+) -> None:
+    """Mark a task cancelled, recording why in ``error_message``."""
+    task.status = types_module.SyncStatus.CANCELLED
+    task.error_message = reason
+    task.completed_at = datetime.datetime.now(datetime.UTC)
+
+
+def is_terminal(task: task_models.Task) -> bool:
+    """Whether the task's row is in a terminal status (will never run again)."""
+    return task.status in types_module.TERMINAL_STATUSES
+
+
+def is_duplicate_delivery(task: task_models.Task, job: str) -> bool:
+    """Entry guard for arq jobs: True (and logged) when the row is already terminal.
+
+    arq can deliver a job more than once (SIGTERM retry, re-enqueue). A delivery
+    whose task already finished must not run the work again.
+    """
+    if not is_terminal(task):
+        return False
+    logger.info(
+        "duplicate_delivery",
+        job=job,
+        task_id=str(task.id),
+        status=task.status.value,
+    )
+    return True
+
+
 async def is_cancelled(
     session: AsyncSession,
     task: task_models.Task,
 ) -> bool:
     """Check whether this task or any ancestor has been cancelled.
 
-    Cancellation is represented as FAILED with an error_message containing
-    "Cancelled".  Walks up the parent chain so nested children (grandchildren,
-    etc.) also detect cancellation.
+    Walks up the parent chain so nested children (grandchildren, etc.) also
+    detect cancellation.
 
     Args:
         session: Active database session.
@@ -63,11 +99,9 @@ async def is_cancelled(
     Returns:
         True if this task or any ancestor was cancelled.
     """
-    # Check the task itself
-    if _is_cancel_status(task.status, task.error_message):
+    if task.status == types_module.SyncStatus.CANCELLED:
         return True
 
-    # Walk up the parent chain
     current_parent_id = task.parent_id
     visited: set[object] = set()
 
@@ -80,7 +114,7 @@ async def is_cancelled(
         if parent is None:
             break
 
-        if _is_cancel_status(parent.status, parent.error_message):
+        if parent.status == types_module.SyncStatus.CANCELLED:
             logger.info(
                 "cancellation_detected",
                 task_id=str(task.id),
@@ -93,25 +127,15 @@ async def is_cancelled(
     return False
 
 
-def _is_cancel_status(
-    status: types_module.SyncStatus, error_message: str | None
-) -> bool:
-    """Check whether a status + error_message represents cancellation."""
-    return (
-        status == types_module.SyncStatus.FAILED
-        and error_message is not None
-        and "Cancelled" in error_message
-    )
-
-
-async def cancel_pending_children(
+async def cancel_active_children(
     session: AsyncSession,
     parent_id: object,
 ) -> int:
-    """Fail all PENDING children of a cancelled parent.
+    """Cancel every non-terminal child of a cancelled parent.
 
-    When a parent task is cancelled, any children still in PENDING status
-    should be failed immediately so they are never picked up by the worker.
+    PENDING and DEFERRED children are never picked up afterwards. A RUNNING
+    child is marked too, but its in-flight run still overwrites the status
+    when it finishes (no hard abort yet).
 
     Args:
         session: Active database session.
@@ -120,62 +144,83 @@ async def cancel_pending_children(
     Returns:
         Number of children cancelled.
     """
-    now = datetime.datetime.now(datetime.UTC)
-    # Find PENDING children first, then update them
-    pending_result = await session.execute(
+    active_result = await session.execute(
         sa.select(task_models.Task).where(
             task_models.Task.parent_id == parent_id,
-            task_models.Task.status == types_module.SyncStatus.PENDING,
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
-    pending_children = pending_result.scalars().all()
-    for child in pending_children:
-        child.status = types_module.SyncStatus.FAILED
-        child.error_message = "Parent task was cancelled"
-        child.completed_at = now
-    count = len(pending_children)
+    active_children = active_result.scalars().all()
+    for child in active_children:
+        await cancel_task(session, child, "Parent task was cancelled")
+    count = len(active_children)
     if count > 0:
         logger.info(
-            "pending_children_cancelled",
+            "active_children_cancelled",
             parent_id=str(parent_id),
             count=count,
         )
     return count
 
 
-async def _check_parent_completion(
-    session: AsyncSession,
-    parent_id: object,
-) -> None:
-    """Check if all children of a parent are done; if so, complete the parent."""
-    parent_result = await session.execute(
-        sa.select(task_models.Task).where(task_models.Task.id == parent_id)
-    )
-    parent = parent_result.scalar_one_or_none()
-    if parent is None:
-        return
+class CancelOutcome(enum.StrEnum):
+    """Result of a cancel request."""
 
-    children_result = await session.execute(
+    CANCELLED = "cancelled"
+    ALREADY_TERMINAL = "already_terminal"
+    NOT_FOUND = "not_found"
+
+
+@dataclasses.dataclass(frozen=True)
+class CancelResult:
+    """Outcome of ``request_cancel`` plus the task (when found)."""
+
+    outcome: CancelOutcome
+    task: task_models.Task | None = None
+    children_cancelled: int = 0
+
+
+async def request_cancel(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    user_id: uuid.UUID,
+    reason: str = "Cancelled by user",
+) -> CancelResult:
+    """Cancel a user's task and its non-terminal children, then commit.
+
+    Shared by the API and UI cancel routes. Only the owning user's tasks are
+    visible; another user's task reads as not found.
+
+    Args:
+        session: Active database session.
+        task_id: The task to cancel.
+        user_id: The requesting user (ownership scope).
+        reason: Stored in ``error_message`` on the cancelled task.
+
+    Returns:
+        A ``CancelResult``: CANCELLED, ALREADY_TERMINAL (task untouched), or
+        NOT_FOUND.
+    """
+    result = await session.execute(
         sa.select(task_models.Task).where(
-            task_models.Task.parent_id == parent_id,
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
         )
     )
-    children = children_result.scalars().all()
+    task = result.scalar_one_or_none()
+    if task is None:
+        return CancelResult(CancelOutcome.NOT_FOUND)
+    if is_terminal(task):
+        return CancelResult(CancelOutcome.ALREADY_TERMINAL, task=task)
 
-    completed = sum(
-        1
-        for c in children
-        if c.status
-        in (types_module.SyncStatus.COMPLETED, types_module.SyncStatus.FAILED)
+    await cancel_task(session, task, reason)
+    children_cancelled = await cancel_active_children(session, task.id)
+    await session.commit()
+    logger.info(
+        "task_cancelled",
+        task_id=str(task.id),
+        children_cancelled=children_cancelled,
     )
-
-    if completed == len(children):
-        failed = sum(1 for c in children if c.status == types_module.SyncStatus.FAILED)
-        children_completed = completed - failed
-
-        parent.status = types_module.SyncStatus.COMPLETED
-        parent.completed_at = datetime.datetime.now(datetime.UTC)
-        parent.result = {
-            "children_completed": children_completed,
-            "children_failed": failed,
-        }
+    return CancelResult(
+        CancelOutcome.CANCELLED, task=task, children_cancelled=children_cancelled
+    )

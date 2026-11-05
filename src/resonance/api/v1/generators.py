@@ -25,13 +25,6 @@ router = fastapi.APIRouter(
     prefix="/generator-profiles", tags=["generators"], redirect_slashes=False
 )
 
-# Task statuses that count as "in flight" for the mutual-exclusion guard.
-_ACTIVE_TASK_STATUSES = (
-    types_module.SyncStatus.PENDING,
-    types_module.SyncStatus.RUNNING,
-    types_module.SyncStatus.DEFERRED,
-)
-
 # Both task types mutate the profile's pool (generation re-resolves it; enrichment
 # rewrites input_references). They are mutually exclusive per profile so a
 # generation never runs against a pool that an enrich task is mid-rewrite on.
@@ -150,7 +143,7 @@ async def _trigger_profile_task(
         task_models.Task.user_id == user_id,
         task_models.Task.task_type.in_(_PROFILE_MUTATING_TASK_TYPES),
         task_models.Task.params["profile_id"].as_string() == str(profile_id),
-        task_models.Task.status.in_(_ACTIVE_TASK_STATUSES),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     if running_result.scalar_one_or_none() is not None:

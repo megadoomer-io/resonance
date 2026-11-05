@@ -141,125 +141,172 @@ class TestFailTask:
 
 
 # ---------------------------------------------------------------------------
-# _check_parent_completion tests
+# cancellation tests
 # ---------------------------------------------------------------------------
 
 
-class TestCheckParentCompletion:
-    """Tests for _check_parent_completion."""
+def _scalar_result(value: object) -> MagicMock:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
 
-    async def test_parent_not_found_is_noop(self) -> None:
-        """Gracefully handles parent_id pointing to a nonexistent record."""
+
+def _scalars_result(values: list[task_models.Task]) -> MagicMock:
+    scalars = MagicMock()
+    scalars.all.return_value = values
+    result = MagicMock()
+    result.scalars.return_value = scalars
+    return result
+
+
+class TestCancelTask:
+    async def test_sets_cancelled_state(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        await lifecycle_module.cancel_task(AsyncMock(), task, "Cancelled by user")
+
+        assert task.status == types_module.SyncStatus.CANCELLED
+        assert task.error_message == "Cancelled by user"
+        assert task.completed_at is not None
+
+
+class TestIsTerminal:
+    def test_terminal_statuses(self) -> None:
+        for status in types_module.TERMINAL_STATUSES:
+            assert lifecycle_module.is_terminal(_make_task(status=status))
+
+    def test_active_statuses(self) -> None:
+        for status in types_module.ACTIVE_STATUSES:
+            assert not lifecycle_module.is_terminal(_make_task(status=status))
+
+
+class TestIsCancelled:
+    async def test_cancelled_task(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.CANCELLED)
         session = AsyncMock()
-        parent_id = uuid.uuid4()
+        assert await lifecycle_module.is_cancelled(session, task)
+        session.execute.assert_not_called()
 
-        # Parent lookup returns None
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = None
-        session.execute.return_value = parent_result
+    async def test_failed_with_cancelled_message_is_not_cancelled(self) -> None:
+        """The legacy FAILED + 'Cancelled' message convention no longer counts."""
+        task = _make_task(status=types_module.SyncStatus.FAILED)
+        task.error_message = "Cancelled by user"
+        assert not await lifecycle_module.is_cancelled(AsyncMock(), task)
 
-        # Should not raise
-        await lifecycle_module._check_parent_completion(session, parent_id)
-
-    async def test_all_children_completed(self) -> None:
-        """When all children are completed, parent is marked completed."""
-        parent_id = uuid.uuid4()
+    async def test_cancelled_grandparent(self) -> None:
+        grandparent = _make_task(status=types_module.SyncStatus.CANCELLED)
         parent = _make_task(
-            task_id=parent_id,
-            task_type=types_module.TaskType.SYNC_JOB,
-            status=types_module.SyncStatus.RUNNING,
+            parent_id=grandparent.id, status=types_module.SyncStatus.RUNNING
         )
-
+        child = _make_task(parent_id=parent.id, status=types_module.SyncStatus.PENDING)
         session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(parent),
+            _scalar_result(grandparent),
+        ]
+        assert await lifecycle_module.is_cancelled(session, child)
 
-        # 1. Load parent
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = parent
+    async def test_running_parent_not_cancelled(self) -> None:
+        parent = _make_task(status=types_module.SyncStatus.RUNNING)
+        child = _make_task(parent_id=parent.id, status=types_module.SyncStatus.PENDING)
+        session = AsyncMock()
+        session.execute.side_effect = [_scalar_result(parent)]
+        assert not await lifecycle_module.is_cancelled(session, child)
 
-        # 2. Load children — all completed
-        child1 = _make_task(
-            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
-        )
-        child2 = _make_task(
-            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
-        )
-        children_scalars = MagicMock()
-        children_scalars.all.return_value = [child1, child2]
-        children_result = MagicMock()
-        children_result.scalars.return_value = children_scalars
 
-        session.execute.side_effect = [parent_result, children_result]
-
-        await lifecycle_module._check_parent_completion(session, parent_id)
-
-        assert parent.status == types_module.SyncStatus.COMPLETED
-        assert parent.completed_at is not None
-        assert parent.result == {"children_completed": 2, "children_failed": 0}
-
-    async def test_mixed_completed_and_failed_children(self) -> None:
-        """Parent completes with correct failed/completed counts."""
+class TestCancelActiveChildren:
+    async def test_cancels_every_returned_child(self) -> None:
         parent_id = uuid.uuid4()
-        parent = _make_task(
-            task_id=parent_id,
-            task_type=types_module.TaskType.SYNC_JOB,
-            status=types_module.SyncStatus.RUNNING,
+        pending = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.PENDING
         )
-
+        deferred = _make_task(
+            parent_id=parent_id, status=types_module.SyncStatus.DEFERRED
+        )
         session = AsyncMock()
+        session.execute.return_value = _scalars_result([pending, deferred])
 
-        # 1. Load parent
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = parent
+        count = await lifecycle_module.cancel_active_children(session, parent_id)
 
-        # 2. Load children — 2 completed, 1 failed
-        child1 = _make_task(
-            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
-        )
-        child2 = _make_task(
-            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
-        )
-        child3 = _make_task(parent_id=parent_id, status=types_module.SyncStatus.FAILED)
-        children_scalars = MagicMock()
-        children_scalars.all.return_value = [child1, child2, child3]
-        children_result = MagicMock()
-        children_result.scalars.return_value = children_scalars
+        assert count == 2
+        for child in (pending, deferred):
+            assert child.status == types_module.SyncStatus.CANCELLED
+            assert child.error_message == "Parent task was cancelled"
 
-        session.execute.side_effect = [parent_result, children_result]
-
-        await lifecycle_module._check_parent_completion(session, parent_id)
-
-        assert parent.status == types_module.SyncStatus.COMPLETED
-        assert parent.completed_at is not None
-        assert parent.result == {"children_completed": 2, "children_failed": 1}
-
-    async def test_running_children_prevent_parent_completion(self) -> None:
-        """Parent stays running when some children are still in progress."""
-        parent_id = uuid.uuid4()
-        parent = _make_task(
-            task_id=parent_id,
-            task_type=types_module.TaskType.SYNC_JOB,
-            status=types_module.SyncStatus.RUNNING,
-        )
-
+    async def test_queries_active_statuses_only(self) -> None:
         session = AsyncMock()
+        session.execute.return_value = _scalars_result([])
 
-        # 1. Load parent
-        parent_result = MagicMock()
-        parent_result.scalar_one_or_none.return_value = parent
+        await lifecycle_module.cancel_active_children(session, uuid.uuid4())
 
-        # 2. Load children — one completed, one running
-        child1 = _make_task(
-            parent_id=parent_id, status=types_module.SyncStatus.COMPLETED
+        stmt = session.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        for status in types_module.ACTIVE_STATUSES:
+            assert f"'{status.name}'" in compiled
+        for status in types_module.TERMINAL_STATUSES:
+            assert f"'{status.name}'" not in compiled
+
+
+class TestRequestCancel:
+    """Tests for request_cancel, the shared API/UI cancel logic."""
+
+    async def test_not_found(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = _scalar_result(None)
+
+        result = await lifecycle_module.request_cancel(
+            session, uuid.uuid4(), uuid.uuid4()
         )
-        child2 = _make_task(parent_id=parent_id, status=types_module.SyncStatus.RUNNING)
-        children_scalars = MagicMock()
-        children_scalars.all.return_value = [child1, child2]
-        children_result = MagicMock()
-        children_result.scalars.return_value = children_scalars
 
-        session.execute.side_effect = [parent_result, children_result]
+        assert result.outcome == lifecycle_module.CancelOutcome.NOT_FOUND
+        assert result.task is None
+        session.commit.assert_not_called()
 
-        await lifecycle_module._check_parent_completion(session, parent_id)
+    async def test_already_terminal_is_untouched(self) -> None:
+        for status in types_module.TERMINAL_STATUSES:
+            task = _make_task(status=status)
+            session = AsyncMock()
+            session.execute.return_value = _scalar_result(task)
 
-        assert parent.status == types_module.SyncStatus.RUNNING
-        assert parent.completed_at is None
+            result = await lifecycle_module.request_cancel(
+                session, task.id, task.user_id
+            )
+
+            assert result.outcome == lifecycle_module.CancelOutcome.ALREADY_TERMINAL
+            assert result.task is task
+            assert task.status == status
+            session.commit.assert_not_called()
+
+    async def test_cancels_active_task_and_children(self) -> None:
+        for status in types_module.ACTIVE_STATUSES:
+            task = _make_task(status=status)
+            child = _make_task(
+                parent_id=task.id, status=types_module.SyncStatus.PENDING
+            )
+            session = AsyncMock()
+            session.execute.side_effect = [
+                _scalar_result(task),
+                _scalars_result([child]),
+            ]
+
+            result = await lifecycle_module.request_cancel(
+                session, task.id, task.user_id
+            )
+
+            assert result.outcome == lifecycle_module.CancelOutcome.CANCELLED
+            assert result.children_cancelled == 1
+            assert task.status == types_module.SyncStatus.CANCELLED
+            assert task.error_message == "Cancelled by user"
+            assert child.status == types_module.SyncStatus.CANCELLED
+            session.commit.assert_awaited_once()
+
+    async def test_scopes_lookup_to_user(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = _scalar_result(None)
+        user_id = uuid.uuid4()
+
+        await lifecycle_module.request_cancel(session, uuid.uuid4(), user_id)
+
+        stmt = session.execute.call_args.args[0]
+        compiled = stmt.compile()
+        assert "sync_tasks.user_id" in str(compiled)
+        assert user_id in compiled.params.values()

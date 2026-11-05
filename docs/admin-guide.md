@@ -165,6 +165,14 @@ uv run resonance-api task <task_id>
 
 Returns the full status of a task including progress counters, result data, error messages, and timestamps. Useful for checking on tasks started with `--no-wait`.
 
+#### `cancel` -- Cancel a Task
+
+```bash
+uv run resonance-api cancel <task_id>
+```
+
+Marks a pending, deferred or running task `cancelled` and cancels its unfinished children (`POST /api/v1/sync/cancel/{task_id}`, scoped to the caller's own tasks). A task that already finished returns HTTP 400. A running task is not interrupted: its in-flight run can overwrite the cancelled status when it finishes.
+
 #### `track` -- Search Tracks
 
 ```bash

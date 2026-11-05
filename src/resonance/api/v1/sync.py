@@ -100,13 +100,7 @@ async def trigger_sync(
         task_models.Task.user_id == user_id,
         task_models.Task.service_connection_id == connection.id,
         task_models.Task.task_type == types_module.TaskType.SYNC_JOB,
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-                types_module.SyncStatus.DEFERRED,
-            ]
-        ),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     existing_job = running_result.scalar_one_or_none()
@@ -264,13 +258,7 @@ async def trigger_sync_by_connection(
     existing = await db.execute(
         sa.select(task_models.Task).where(
             task_models.Task.service_connection_id == connection_id,
-            task_models.Task.status.in_(
-                [
-                    types_module.SyncStatus.PENDING,
-                    types_module.SyncStatus.RUNNING,
-                    types_module.SyncStatus.DEFERRED,
-                ]
-            ),
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
     if existing.scalar_one_or_none() is not None:
@@ -310,7 +298,9 @@ async def trigger_sync_by_connection(
     "/cancel/{job_id}",
     summary="Cancel sync",
     description=(
-        "Cancel a pending or running sync task. Requires session authentication."
+        "Cancel one of your pending, deferred or running tasks and its unfinished"
+        " children. A running task is not interrupted: its in-flight run can still"
+        " overwrite the cancelled status when it finishes."
     ),
 )
 async def cancel_sync(
@@ -318,36 +308,18 @@ async def cancel_sync(
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, Any]:
-    """Cancel a pending or running sync task."""
-    stmt = sa.select(task_models.Task).where(
-        task_models.Task.id == job_id,
-        task_models.Task.user_id == user_id,
-    )
-    result = await db.execute(stmt)
-    job = result.scalar_one_or_none()
+    """Cancel a task (any type) owned by the caller."""
+    result = await lifecycle_module.request_cancel(db, job_id, user_id)
 
-    if job is None:
+    if result.outcome == lifecycle_module.CancelOutcome.NOT_FOUND:
         raise fastapi.HTTPException(status_code=404, detail="Sync task not found")
-
-    if job.status not in (
-        types_module.SyncStatus.PENDING,
-        types_module.SyncStatus.RUNNING,
-        types_module.SyncStatus.DEFERRED,
-    ):
+    if result.outcome == lifecycle_module.CancelOutcome.ALREADY_TERMINAL:
         raise fastapi.HTTPException(status_code=400, detail="Job is already finished")
-
-    job.status = types_module.SyncStatus.FAILED
-    job.error_message = "Cancelled by user"
-    job.completed_at = datetime.datetime.now(datetime.UTC)
-
-    # Immediately fail any PENDING children so they are never picked up
-    children_cancelled = await lifecycle_module.cancel_pending_children(db, job.id)
-    await db.commit()
 
     return {
         "status": "cancelled",
         "job_id": str(job_id),
-        "children_cancelled": children_cancelled,
+        "children_cancelled": result.children_cancelled,
     }
 
 

@@ -47,6 +47,12 @@ describe("planActions", () => {
     expect(planActions(node, failed())).toEqual([{ type: "refresh", selector: "#sync-status" }]);
   });
 
+  it("refreshes the selector only on success with data-after-success-refresh", () => {
+    const node = el({ "data-after-success-refresh": "#sync-status" });
+    expect(planActions(node, ok)).toEqual([{ type: "refresh", selector: "#sync-status" }]);
+    expect(planActions(node, failed())).toEqual([]);
+  });
+
   it("disables with optional replacement text after any request", () => {
     expect(planActions(el({ "data-after-request-disable": "Syncing..." }), failed())).toEqual([
       { type: "disable", text: "Syncing..." },
@@ -160,6 +166,16 @@ describe("applyActions", () => {
     applyActions([{ type: "show-error", selector: "#err", message: "Oops" }], el({}), env());
     const target = document.getElementById("err");
     expect(target.textContent).toBe("Oops");
+    expect(target.hidden).toBe(false);
+  });
+
+  it("writes into a [data-error-message] slot, keeping the alert wrapper", () => {
+    document.body.innerHTML =
+      '<div id="err" hidden><div role="alert"><small data-error-message>old</small></div></div>';
+    applyActions([{ type: "show-error", selector: "#err", message: "Nope" }], el({}), env());
+    const target = document.getElementById("err");
+    expect(target.querySelector("[data-error-message]").textContent).toBe("Nope");
+    expect(target.querySelector('[role="alert"]')).not.toBeNull();
     expect(target.hidden).toBe(false);
   });
 });

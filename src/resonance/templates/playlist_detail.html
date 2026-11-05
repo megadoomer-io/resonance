@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "components/macros.html" import detail_section %}
+{% from "components/export.html" import export_row %}
 {% block title %}{{ playlist.name }} — resonance{% endblock %}
 {% block content %}
 <p><a href="/playlists">&larr; Back to Playlists</a></p>
@@ -85,10 +86,12 @@
     {% if export_in_progress %}
     {# An export is already running -- show progress, not another Export button,
        so a re-click can't spawn a duplicate Spotify playlist. #}
-    <p aria-busy="true" style="margin: 0;">
-        Exporting to Spotify…
-        <a href="/playlists/exporting/{{ playlist.id }}?task_ids={{ export_task_ids }}" style="font-size: 0.8rem;">View progress</a>
-    </p>
+    <div class="export-rows" aria-live="polite" aria-atomic="false">
+        {% for row in export_rows %}
+        {{ export_row(row, playlist.id) }}
+        {% endfor %}
+    </div>
+    <a href="/playlists/exporting/{{ playlist.id }}?task_ids={{ export_task_ids }}" style="font-size: 0.8rem;">View progress</a>
     {% else %}
     {% for conn in spotify_connections %}
     {% set conn_id = conn.id | string %}
