@@ -935,6 +935,66 @@ class TestSyncRangeWatermarkResume:
         assert "max_ts" not in captured_params
 
 
+class TestSyncRangeStepMode:
+    """Characterization: step_mode pauses a sequential sync after each child."""
+
+    @pytest.mark.asyncio
+    async def test_completed_step_mode_child_does_not_advance_to_next_sibling(
+        self,
+    ) -> None:
+        """A COMPLETED step_mode child skips parent completion and enqueues nothing."""
+        task_id = uuid.uuid4()
+        conn_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=uuid.uuid4(),
+            service_connection_id=conn_id,
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TIME_RANGE,
+            status=types_module.SyncStatus.PENDING,
+            params={"data_type": "followed_artists", "step_mode": True},
+        )
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.service_type = types_module.ServiceType.SPOTIFY
+        connection.id = conn_id
+        connection.sync_watermark = {}
+
+        session = AsyncMock()
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+        conn_result = MagicMock()
+        conn_result.scalar_one.return_value = connection
+        session.execute.side_effect = [
+            task_result,
+            _not_cancelled_result(parent_id),
+            conn_result,
+        ]
+
+        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        mock_strategy.concurrency = "sequential"
+        mock_strategy.execute.return_value = {"items_created": 1, "items_updated": 0}
+
+        arq_redis = AsyncMock()
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": MagicMock(),
+            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
+            "redis": arq_redis,
+        }
+
+        with patch.object(
+            worker_module, "_check_parent_completion", new=AsyncMock()
+        ) as check_parent:
+            await worker_module.sync_range(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        check_parent.assert_not_called()
+        arq_redis.enqueue_job.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Deferral tests
 # ---------------------------------------------------------------------------
@@ -2011,6 +2071,99 @@ class TestReenqueueOrphanedTasks:
             str(task.id),
             _job_id=f"run_bulk_job:{task.id}",
         )
+
+    @pytest.mark.asyncio
+    async def test_marks_pending_children_of_terminal_parent_failed(self) -> None:
+        """PENDING children of a COMPLETED/FAILED parent are failed, not re-enqueued."""
+        stale_child = _make_task(
+            parent_id=uuid.uuid4(),
+            status=types_module.SyncStatus.PENDING,
+        )
+
+        session = AsyncMock()
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = [stale_child]
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = []
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        assert stale_child.status == types_module.SyncStatus.FAILED
+        assert stale_child.error_message == "Parent task already terminal"
+        assert stale_child.completed_at is not None
+        session.commit.assert_called()
+        arq_redis.enqueue_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_running_sync_job_with_children_reset_but_not_replanned(
+        self,
+    ) -> None:
+        """A RUNNING SYNC_JOB with children is reset to PENDING but not re-planned."""
+        parent = _make_task(status=types_module.SyncStatus.RUNNING)
+        parent.task_type = types_module.TaskType.SYNC_JOB
+        parent.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+
+        session = AsyncMock()
+        pending_scalars = MagicMock()
+        pending_scalars.all.return_value = []
+        pending_result = MagicMock()
+        pending_result.scalars.return_value = pending_scalars
+        deferred_scalars = MagicMock()
+        deferred_scalars.all.return_value = []
+        deferred_result = MagicMock()
+        deferred_result.scalars.return_value = deferred_scalars
+        stale_scalars = MagicMock()
+        stale_scalars.all.return_value = []
+        stale_result = MagicMock()
+        stale_result.scalars.return_value = stale_scalars
+        running_scalars = MagicMock()
+        running_scalars.all.return_value = [parent]
+        running_result = MagicMock()
+        running_result.scalars.return_value = running_scalars
+        # No connection lookup: watermark resume applies only to TIME_RANGE.
+        children_count_result = MagicMock()
+        children_count_result.scalar_one.return_value = 3
+
+        session.execute.side_effect = [
+            pending_result,
+            deferred_result,
+            stale_result,
+            running_result,
+            children_count_result,
+        ]
+
+        arq_redis = AsyncMock()
+
+        await worker_module._reenqueue_orphaned_tasks(
+            _mock_session_factory(session), arq_redis
+        )
+
+        assert parent.status == types_module.SyncStatus.PENDING
+        assert parent.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        arq_redis.enqueue_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_orphans_does_nothing(self) -> None:
