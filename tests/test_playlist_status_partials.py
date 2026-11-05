@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any
+from unittest import mock
 
 import fastapi
 import httpx
@@ -741,3 +742,52 @@ class TestPlaylistDetailExportSection:
         assert html.count(">Stop</button>") == 1
         assert "Can't be stopped once it has started." in html
         assert "View progress" in html
+
+
+class TestGeneratingTerminalRule:
+    async def _partial(self, user_id: uuid.UUID, status: Any) -> str:
+        task = _task(user_id, task_type=types_module.TaskType.PLAYLIST_GENERATION)
+        # Any: the unknown-status case passes a stand-in with only ``.value``.
+        task.status = status
+        resp = await _get(
+            TaskStoreSession([task]), user_id, f"/partials/generating-status/{task.id}"
+        )
+        return resp.text
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            types_module.SyncStatus.PENDING,
+            types_module.SyncStatus.RUNNING,
+            types_module.SyncStatus.DEFERRED,
+        ],
+    )
+    async def test_active_statuses_keep_polling(
+        self, user_id: uuid.UUID, status: types_module.SyncStatus
+    ) -> None:
+        assert _keeps_polling(await self._partial(user_id, status))
+
+    async def test_cancelled_stops_with_start_over(self, user_id: uuid.UUID) -> None:
+        html = await self._partial(user_id, types_module.SyncStatus.CANCELLED)
+        assert "Generation was cancelled." in html
+        assert (
+            '<a href="/playlists/new" role="button" class="secondary">Start over</a>'
+            in html
+        )
+        assert "<mark>" not in html
+        assert not _keeps_polling(html)
+
+    async def test_unknown_status_renders_like_failed(self, user_id: uuid.UUID) -> None:
+        status = mock.Mock(value="exploded")
+        html = await self._partial(user_id, status)
+        assert (
+            "<mark>Generation failed: Unknown error (status: exploded)</mark>" in html
+        )
+        assert not _keeps_polling(html)
+
+    async def test_page_has_stable_live_region(self, user_id: uuid.UUID) -> None:
+        task = _task(user_id, task_type=types_module.TaskType.PLAYLIST_GENERATION)
+        resp = await _get(
+            TaskStoreSession([task]), user_id, f"/playlists/generating/{task.id}"
+        )
+        assert '<div aria-live="polite">' in resp.text

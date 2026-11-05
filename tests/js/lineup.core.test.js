@@ -7,10 +7,13 @@ import {
   allArtistIds,
   artistMeta,
   clampSeedCount,
+  enrichFailureMessage,
+  enrichOutcome,
   escapeHtml,
   groupKey,
   hasArtist,
   isEmpty,
+  isTaskActive,
   isWindowValid,
   presetIdForWindow,
   pruneEmpty,
@@ -334,5 +337,33 @@ describe("serializeRediscovery", () => {
     expect(out.sources[0].kind).toBe("listening_range");
     expect(out.sources[0].seed_artist_count).toBe(30);
     expect(out.exclude_artist_ids).toEqual([]);
+  });
+});
+
+describe("enrichOutcome", () => {
+  it.each(["pending", "running", "deferred"])("keeps polling while %s", (s) => {
+    expect(enrichOutcome(s)).toBe("active");
+    expect(isTaskActive(s)).toBe(true);
+  });
+  it("returns completed or cancelled for those terminal statuses", () => {
+    expect(enrichOutcome("completed")).toBe("completed");
+    expect(enrichOutcome("cancelled")).toBe("cancelled");
+  });
+  it("treats failed and unknown statuses as failed, which is terminal", () => {
+    expect(enrichOutcome("failed")).toBe("failed");
+    expect(enrichOutcome("exploded")).toBe("failed");
+    expect(enrichOutcome(undefined)).toBe("failed");
+    expect(isTaskActive("exploded")).toBe(false);
+  });
+});
+
+describe("enrichFailureMessage", () => {
+  it("shows the error for a plain failure", () => {
+    expect(enrichFailureMessage("failed", "boom")).toBe("Enrichment failed. boom");
+  });
+  it("appends the escaped raw status for an unknown terminal status", () => {
+    expect(enrichFailureMessage("<x>", null)).toBe(
+      "Enrichment failed. (status: &lt;x&gt;)"
+    );
   });
 });
