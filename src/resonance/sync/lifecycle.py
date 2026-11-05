@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import enum
 import uuid
 from typing import TYPE_CHECKING
 
+import arq.jobs as arq_jobs
 import sqlalchemy as sa
 import structlog
 
@@ -224,19 +226,18 @@ async def is_cancelled(
 async def cancel_active_children(
     session: AsyncSession,
     parent_id: object,
-) -> int:
+) -> list[tuple[task_models.Task, types_module.SyncStatus]]:
     """Cancel every non-terminal child of a cancelled parent.
 
     PENDING and DEFERRED children are never picked up afterwards. A RUNNING
-    child is marked too, but its in-flight run still overwrites the status
-    when it finishes (no hard abort yet).
+    child is marked too; ``request_cancel`` aborts its arq job.
 
     Args:
         session: Active database session.
         parent_id: The parent task ID whose children should be cancelled.
 
     Returns:
-        Number of children cancelled.
+        Each cancelled child with the status it had before.
     """
     active_result = await session.execute(
         sa.select(task_models.Task).where(
@@ -244,17 +245,16 @@ async def cancel_active_children(
             task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
-    active_children = active_result.scalars().all()
-    for child in active_children:
+    cancelled = [(child, child.status) for child in active_result.scalars().all()]
+    for child, _ in cancelled:
         await cancel_task(session, child, "Parent task was cancelled")
-    count = len(active_children)
-    if count > 0:
+    if cancelled:
         logger.info(
             "active_children_cancelled",
             parent_id=str(parent_id),
-            count=count,
+            count=len(cancelled),
         )
-    return count
+    return cancelled
 
 
 class CancelOutcome(enum.StrEnum):
@@ -279,17 +279,20 @@ async def request_cancel(
     task_id: uuid.UUID,
     user_id: uuid.UUID,
     reason: str = "Cancelled by user",
+    arq_redis: arq.ArqRedis | None = None,
 ) -> CancelResult:
     """Cancel a user's task and its non-terminal children, then commit.
 
     Shared by the API and UI cancel routes. Only the owning user's tasks are
-    visible; another user's task reads as not found.
+    visible; another user's task reads as not found. After the commit, the
+    arq jobs of anything that was RUNNING are aborted (bounded wait).
 
     Args:
         session: Active database session.
         task_id: The task to cancel.
         user_id: The requesting user (ownership scope).
         reason: Stored in ``error_message`` on the cancelled task.
+        arq_redis: arq pool used to abort running jobs; ``None`` skips aborts.
 
     Returns:
         A ``CancelResult``: CANCELLED, ALREADY_TERMINAL (task untouched), or
@@ -307,14 +310,60 @@ async def request_cancel(
     if is_terminal(task):
         return CancelResult(CancelOutcome.ALREADY_TERMINAL, task=task)
 
+    was_running = task.status == types_module.SyncStatus.RUNNING
     await cancel_task(session, task, reason)
-    children_cancelled = await cancel_active_children(session, task.id)
+    children = await cancel_active_children(session, task.id)
     await session.commit()
     logger.info(
         "task_cancelled",
         task_id=str(task.id),
-        children_cancelled=children_cancelled,
+        children_cancelled=len(children),
+    )
+
+    running = [task] if was_running else []
+    running += [c for c, prior in children if prior == types_module.SyncStatus.RUNNING]
+    await asyncio.gather(
+        *(
+            abort_job(arq_redis, row.id, row.arq_job_id)
+            for row in running
+            if row.arq_job_id is not None
+        )
     )
     return CancelResult(
-        CancelOutcome.CANCELLED, task=task, children_cancelled=children_cancelled
+        CancelOutcome.CANCELLED, task=task, children_cancelled=len(children)
     )
+
+
+# arq's abort waits for the job's result unless bounded; a cancel request must
+# return promptly. The row is already CANCELLED, so a slow abort only delays
+# when the job notices.
+ABORT_TIMEOUT_SECONDS = 2.0
+_ABORT_POLL_SECONDS = 0.25
+
+
+async def abort_job(
+    arq_redis: arq.ArqRedis | None, task_id: uuid.UUID, job_id: str
+) -> bool:
+    """Ask arq to abort a running job; never raises.
+
+    Returns:
+        True if arq confirmed the abort within the timeout.
+    """
+    log = logger.bind(task_id=str(task_id), job_id=job_id)
+    if arq_redis is None:
+        log.warning("task_abort_skipped_no_redis")
+        return False
+    job = arq_jobs.Job(job_id, arq_redis, _queue_name=arq_redis.default_queue_name)
+    try:
+        aborted = await asyncio.wait_for(
+            job.abort(timeout=ABORT_TIMEOUT_SECONDS, poll_delay=_ABORT_POLL_SECONDS),
+            timeout=ABORT_TIMEOUT_SECONDS + 1,
+        )
+    except TimeoutError:
+        log.info("task_abort_pending")
+        return False
+    except Exception:
+        log.exception("task_abort_failed")
+        return False
+    log.info("task_abort_requested", confirmed=aborted)
+    return aborted

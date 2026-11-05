@@ -171,7 +171,7 @@ Returns the full status of a task including progress counters, result data, erro
 uv run resonance-api cancel <task_id>
 ```
 
-Marks a pending, deferred or running task `cancelled` and cancels its unfinished children (`POST /api/v1/sync/cancel/{task_id}`, scoped to the caller's own tasks). A task that already finished returns HTTP 400. A running task is not interrupted: its in-flight run can overwrite the cancelled status when it finishes.
+Marks a pending, deferred or running task `cancelled` and cancels its unfinished children (`POST /api/v1/sync/cancel/{task_id}`, scoped to the caller's own tasks). A task that already finished returns HTTP 400. A running task's arq job is aborted and the task stays `cancelled` even if its run reaches the end before the abort lands; work it already did is kept (an export's tracks already added stay on Spotify).
 
 #### `track` -- Search Tracks
 

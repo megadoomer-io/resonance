@@ -290,17 +290,24 @@ async def trigger_sync_by_connection(
     summary="Cancel sync",
     description=(
         "Cancel one of your pending, deferred or running tasks and its unfinished"
-        " children. A running task is not interrupted: its in-flight run can still"
-        " overwrite the cancelled status when it finishes."
+        " children. A running task's job is aborted and the task stays cancelled;"
+        " work it already finished is not rolled back (for example, tracks an"
+        " export already added stay on Spotify)."
     ),
 )
 async def cancel_sync(
     job_id: uuid.UUID,
+    request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, Any]:
     """Cancel a task (any type) owned by the caller."""
-    result = await lifecycle_module.request_cancel(db, job_id, user_id)
+    result = await lifecycle_module.request_cancel(
+        db,
+        job_id,
+        user_id,
+        arq_redis=getattr(request.app.state, "arq_redis", None),
+    )
 
     if result.outcome == lifecycle_module.CancelOutcome.NOT_FOUND:
         raise fastapi.HTTPException(status_code=404, detail="Sync task not found")

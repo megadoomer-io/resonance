@@ -15,6 +15,7 @@ import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -683,14 +684,24 @@ class TestSyncCancel:
         assert response.status_code == 400
         assert response.json()["detail"] == "Job is already finished"
 
-    async def test_running_task_is_cancelled_with_children(self) -> None:
-        """RUNNING is still accepted (no hard abort yet)."""
+    async def test_running_task_is_cancelled_with_children(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RUNNING is cancelled and its recorded arq job is aborted."""
+        aborted: list[str] = []
+
+        async def _abort(_redis: object, _task_id: uuid.UUID, job_id: str) -> bool:
+            aborted.append(job_id)
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "abort_job", _abort)
         user_id = uuid.uuid4()
         task = task_models.Task(
             id=uuid.uuid4(),
             user_id=user_id,
             task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
+            arq_job_id="plan_sync:running:1",
         )
         child = task_models.Task(
             id=uuid.uuid4(),
@@ -714,3 +725,4 @@ class TestSyncCancel:
         }
         assert task.status == types_module.SyncStatus.CANCELLED
         assert child.status == types_module.SyncStatus.CANCELLED
+        assert aborted == ["plan_sync:running:1"]

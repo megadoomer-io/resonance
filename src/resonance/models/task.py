@@ -131,3 +131,41 @@ def _set_python_defaults(
         if attr not in kwargs:
             value = default() if callable(default) else default
             setattr(target, attr, value)
+
+
+@sa.event.listens_for(orm.Session, "before_flush")
+def _keep_cancelled(
+    session: orm.Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """A cancel wins over a run that was already in flight.
+
+    Cancel commits CANCELLED from another session while a job may still hold
+    the row in memory (the abort hasn't landed yet, or missed). When that job
+    flushes a move out of the active statuses, the stored CANCELLED (and its
+    reason) is kept.
+    """
+    changed = [
+        obj
+        for obj in session.dirty
+        if isinstance(obj, Task)
+        and obj.status not in types_module.ACTIVE_STATUSES
+        and obj.status != types_module.SyncStatus.CANCELLED
+        and sa.inspect(obj).attrs.status.history.has_changes()
+    ]
+    if not changed:
+        return
+    cancelled = {
+        row.id: row.error_message
+        for row in session.connection().execute(
+            sa.select(Task.id, Task.error_message).where(
+                Task.id.in_([obj.id for obj in changed]),
+                Task.status == types_module.SyncStatus.CANCELLED,
+            )
+        )
+    }
+    for obj in changed:
+        if obj.id in cancelled:
+            obj.status = types_module.SyncStatus.CANCELLED
+            obj.error_message = cancelled[obj.id]

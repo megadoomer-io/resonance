@@ -3351,6 +3351,7 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
+    allow_abort_jobs = True
     max_jobs = 10
     job_timeout = 300  # default for future leaf tasks (e.g., page_fetch)
     # arq reads redis_settings as a class attribute (not a method call).

@@ -95,6 +95,9 @@ class TestWorkerSettings:
 
         reap.assert_awaited_once_with(ctx["session_factory"], ctx["redis"])
 
+    def test_abort_jobs_allowed(self) -> None:
+        assert worker_module.WorkerSettings.allow_abort_jobs is True
+
     def test_max_jobs(self) -> None:
         assert worker_module.WorkerSettings.max_jobs == 10
 

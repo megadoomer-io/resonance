@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import uuid
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 import resonance.models.task as task_models
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
+
+if TYPE_CHECKING:
+    from tests.conftest import TaskDB
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,9 +233,12 @@ class TestCancelActiveChildren:
         session = AsyncMock()
         session.execute.return_value = _scalars_result([pending, deferred])
 
-        count = await lifecycle_module.cancel_active_children(session, parent_id)
+        cancelled = await lifecycle_module.cancel_active_children(session, parent_id)
 
-        assert count == 2
+        assert cancelled == [
+            (pending, types_module.SyncStatus.PENDING),
+            (deferred, types_module.SyncStatus.DEFERRED),
+        ]
         for child in (pending, deferred):
             assert child.status == types_module.SyncStatus.CANCELLED
             assert child.error_message == "Parent task was cancelled"
@@ -395,3 +405,177 @@ class TestEnqueueTask:
         )
         assert delivered is False
         assert task.arq_job_id is not None
+
+
+class TestHardCancel:
+    """Cancel aborts the running job and the cancel survives the run's exit."""
+
+    async def test_aborts_running_task_and_running_children(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task = _make_task(status=types_module.SyncStatus.RUNNING)
+        task.arq_job_id = "plan_sync:t:1"
+        running_child = _make_task(
+            parent_id=task.id, status=types_module.SyncStatus.RUNNING
+        )
+        running_child.arq_job_id = "sync_range:c:1"
+        pending_child = _make_task(
+            parent_id=task.id, status=types_module.SyncStatus.PENDING
+        )
+        pending_child.arq_job_id = "sync_range:c:2"
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(task),
+            _scalars_result([running_child, pending_child]),
+        ]
+        aborted: list[str] = []
+
+        async def _abort(_redis: object, _task_id: uuid.UUID, job_id: str) -> bool:
+            aborted.append(job_id)
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "abort_job", _abort)
+
+        await lifecycle_module.request_cancel(
+            session, task.id, task.user_id, arq_redis=MagicMock()
+        )
+
+        assert sorted(aborted) == ["plan_sync:t:1", "sync_range:c:1"]
+
+    async def test_pending_task_is_not_aborted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        task.arq_job_id = "export_playlist:t:1"
+        session = AsyncMock()
+        session.execute.side_effect = [_scalar_result(task), _scalars_result([])]
+        abort = AsyncMock()
+        monkeypatch.setattr(lifecycle_module, "abort_job", abort)
+
+        await lifecycle_module.request_cancel(
+            session, task.id, task.user_id, arq_redis=MagicMock()
+        )
+
+        abort.assert_not_awaited()
+
+    async def test_abort_is_bounded_and_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(lifecycle_module, "ABORT_TIMEOUT_SECONDS", 0.01)
+
+        class _HangingJob:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def abort(self, **_: object) -> bool:
+                await asyncio.sleep(10)
+                return True
+
+        monkeypatch.setattr(lifecycle_module.arq_jobs, "Job", _HangingJob)
+
+        started = asyncio.get_running_loop().time()
+        confirmed = await lifecycle_module.abort_job(
+            MagicMock(default_queue_name="q"), uuid.uuid4(), "j"
+        )
+
+        assert confirmed is False
+        assert asyncio.get_running_loop().time() - started < 2
+
+    async def test_abort_error_is_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _BrokenJob:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def abort(self, **_: object) -> bool:
+                raise ConnectionError("redis down")
+
+        monkeypatch.setattr(lifecycle_module.arq_jobs, "Job", _BrokenJob)
+
+        assert not await lifecycle_module.abort_job(
+            MagicMock(default_queue_name="q"), uuid.uuid4(), "j"
+        )
+
+    async def test_abort_passes_short_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        class _Job:
+            def __init__(self, job_id: str, *_: object, **__: object) -> None:
+                seen["job_id"] = job_id
+
+            async def abort(self, **kwargs: object) -> bool:
+                seen.update(kwargs)
+                return True
+
+        monkeypatch.setattr(lifecycle_module.arq_jobs, "Job", _Job)
+
+        assert await lifecycle_module.abort_job(
+            MagicMock(default_queue_name="q"), uuid.uuid4(), "export_playlist:x:1"
+        )
+        assert seen["job_id"] == "export_playlist:x:1"
+        assert seen["timeout"] == lifecycle_module.ABORT_TIMEOUT_SECONDS
+
+    async def test_no_redis_skips_abort(self) -> None:
+        assert not await lifecycle_module.abort_job(None, uuid.uuid4(), "j")
+
+
+class TestCancelSurvivesInFlightRun:
+    """A job holding the row in memory can't overwrite a committed cancel."""
+
+    @pytest.mark.parametrize(
+        "finish",
+        [
+            lambda s, t: lifecycle_module.complete_task(s, t, {"items_created": 3}),
+            lambda s, t: lifecycle_module.fail_task(s, t, "Traceback ..."),
+        ],
+        ids=["complete", "fail"],
+    )
+    async def test_finishing_run_keeps_cancelled(
+        self, task_db: TaskDB, finish: Any
+    ) -> None:
+        task = await task_db.add(status=types_module.SyncStatus.RUNNING)
+        async with task_db.factory() as worker_session:
+            row = await worker_session.get(task_models.Task, task.id)
+            assert row is not None
+
+            await task_db.update(
+                task.id,
+                status=types_module.SyncStatus.CANCELLED,
+                error_message="Cancelled by user",
+            )
+
+            await finish(worker_session, row)
+            await worker_session.commit()
+
+        stored = await task_db.get(task.id)
+        assert stored.status == types_module.SyncStatus.CANCELLED
+        assert stored.error_message == "Cancelled by user"
+
+    async def test_finishing_uncancelled_run_is_unaffected(
+        self, task_db: TaskDB
+    ) -> None:
+        task = await task_db.add(status=types_module.SyncStatus.RUNNING)
+        async with task_db.factory() as session:
+            row = await session.get(task_models.Task, task.id)
+            assert row is not None
+            await lifecycle_module.complete_task(session, row, {})
+            await session.commit()
+
+        assert (await task_db.get(task.id)).status == (
+            types_module.SyncStatus.COMPLETED
+        )
+
+    async def test_cancel_itself_is_not_blocked(self, task_db: TaskDB) -> None:
+        task = await task_db.add(status=types_module.SyncStatus.RUNNING)
+        async with task_db.factory() as session:
+            row = await session.get(task_models.Task, task.id)
+            assert row is not None
+            await lifecycle_module.cancel_task(session, row, "Cancelled by user")
+            await session.commit()
+
+        assert (await task_db.get(task.id)).status == (
+            types_module.SyncStatus.CANCELLED
+        )

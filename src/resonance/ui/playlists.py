@@ -1012,7 +1012,12 @@ async def cancel_export(
     task: task_models.Task | None = None
     try:
         if await _load_export_task(db, user_id, playlist_id, task_id) is not None:
-            cancel = await lifecycle_module.request_cancel(db, task_id, user_id)
+            cancel = await lifecycle_module.request_cancel(
+                db,
+                task_id,
+                user_id,
+                arq_redis=getattr(request.app.state, "arq_redis", None),
+            )
             outcome, task = cancel.outcome, cancel.task
     except Exception:
         logger.exception("export_cancel_failed", task_id=str(task_id))
