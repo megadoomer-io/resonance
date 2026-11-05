@@ -16,6 +16,7 @@ import pytest
 
 import resonance.config as config_module
 import resonance.middleware.session as session_middleware
+import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.types as types_module
 import resonance.ui.playlists as playlists_ui
@@ -32,24 +33,27 @@ class FakeResult:
 
 
 class TaskStoreSession:
-    """Resolves Task selects by the bound ``id`` and (if present) ``user_id``.
+    """Resolves selects by the bound ``id`` and (if present) ``user_id``.
 
-    A query without a ``user_id`` filter matches any owner, so an unscoped
-    lookup leaks other users' tasks just as it would against a real database.
+    Rows are matched against the selected entity type. A query without a
+    ``user_id`` filter matches any owner, so an unscoped lookup leaks other
+    users' rows just as it would against a real database.
     """
 
-    def __init__(self, tasks: list[task_models.Task]) -> None:
-        self._tasks = tasks
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
 
     async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> FakeResult:
+        entity = stmt.column_descriptions[0]["entity"]
         params = stmt.compile().params
-        task_id = params.get("id_1")
+        row_id = params.get("id_1")
         has_user_filter = "user_id_1" in params
         matches = [
-            t
-            for t in self._tasks
-            if t.id == task_id
-            and (not has_user_filter or t.user_id == params["user_id_1"])
+            r
+            for r in self._rows
+            if isinstance(r, entity)
+            and r.id == row_id
+            and (not has_user_filter or r.user_id == params["user_id_1"])
         ]
         return FakeResult(matches)
 
@@ -266,3 +270,59 @@ class TestExportStatusPartial:
         )
         assert resp.status_code == 200
         assert 'id="export-status"' in resp.text
+
+
+def _playlist(owner: uuid.UUID, name: str) -> playlist_models.Playlist:
+    return playlist_models.Playlist(id=uuid.uuid4(), user_id=owner, name=name)
+
+
+class TestGeneratingPage:
+    async def test_own_task_renders(self, user_id: uuid.UUID) -> None:
+        task = _task(
+            user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            description="My Mix",
+        )
+        resp = await _get(
+            TaskStoreSession([task]), user_id, f"/playlists/generating/{task.id}"
+        )
+        assert resp.status_code == 200
+        assert "My Mix" in resp.text
+
+    async def test_other_users_task_is_404(
+        self, user_id: uuid.UUID, other_user_id: uuid.UUID
+    ) -> None:
+        task = _task(
+            other_user_id,
+            task_type=types_module.TaskType.PLAYLIST_GENERATION,
+            description="Secret Mix",
+        )
+        db = TaskStoreSession([task])
+        theirs = await _get(db, user_id, f"/playlists/generating/{task.id}")
+        missing = await _get(db, user_id, f"/playlists/generating/{uuid.uuid4()}")
+        assert theirs.status_code == missing.status_code == 404
+        assert theirs.text == missing.text
+        assert "Secret Mix" not in theirs.text
+
+
+class TestExportStatusPage:
+    async def test_own_playlist_renders_name(self, user_id: uuid.UUID) -> None:
+        playlist = _playlist(user_id, "My Playlist")
+        resp = await _get(
+            TaskStoreSession([playlist]),
+            user_id,
+            f"/playlists/exporting/{playlist.id}?task_ids=",
+        )
+        assert resp.status_code == 200
+        assert "My Playlist" in resp.text
+
+    async def test_other_users_playlist_is_404(
+        self, user_id: uuid.UUID, other_user_id: uuid.UUID
+    ) -> None:
+        playlist = _playlist(other_user_id, "Secret Playlist")
+        db = TaskStoreSession([playlist])
+        theirs = await _get(db, user_id, f"/playlists/exporting/{playlist.id}")
+        missing = await _get(db, user_id, f"/playlists/exporting/{uuid.uuid4()}")
+        assert theirs.status_code == missing.status_code == 404
+        assert theirs.text == missing.text
+        assert "Secret Playlist" not in theirs.text

@@ -668,7 +668,10 @@ async def generating_page(
 ) -> fastapi.responses.HTMLResponse:
     """Render the playlist generation status page."""
     result = await db.execute(
-        sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
     )
     task = result.scalar_one_or_none()
 
@@ -854,17 +857,18 @@ async def export_status_page(
     """Render the playlist export status page."""
     result = await db.execute(
         sa.select(playlist_models.Playlist).where(
-            playlist_models.Playlist.id == playlist_id
+            playlist_models.Playlist.id == playlist_id,
+            playlist_models.Playlist.user_id == user_id,
         )
     )
     playlist = result.scalar_one_or_none()
-
-    playlist_name = playlist.name if playlist else "Playlist"
+    if playlist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
     ctx = common.base_context(request)
     ctx.update(
         playlist_id=str(playlist_id),
-        playlist_name=playlist_name,
+        playlist_name=playlist.name,
         task_ids=task_ids,
     )
 
