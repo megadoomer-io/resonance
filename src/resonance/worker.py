@@ -75,6 +75,7 @@ import resonance.sync.dispatch as dispatch_module
 import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
+import resonance.sync.reaper as reaper_module
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
 import resonance.types as types_module
@@ -3042,151 +3043,169 @@ async def _reenqueue_orphaned_tasks(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     arq_redis: arq.ArqRedis,
 ) -> None:
-    """Re-enqueue orphaned tasks on worker startup.
+    """Recover tasks whose arq delivery was lost, on worker startup.
 
-    Finds tasks stuck in PENDING, expired DEFERRED, or RUNNING status
-    (from crashes or ungraceful shutdowns) and re-enqueues them. arq jobs
-    in Redis expire after ~1 day, so if the worker was down during that
-    window the Task row remains but the arq job is gone.
+    Cleans up stale PENDING children of terminal parents, resets RUNNING rows
+    whose job arq no longer holds, delivers legacy (never-stamped) top-level
+    rows once, then runs the reaper for every stamped PENDING/DEFERRED row.
     """
     async with session_factory() as session:
         now = datetime.datetime.now(datetime.UTC)
+        parent_alias = sa_orm.aliased(task_module.Task)
+        await _fail_stale_children(session, parent_alias, now)
+        await _recover_running(session, arq_redis, parent_alias)
+        await _deliver_legacy_unstamped(session, arq_redis, now)
 
-        # Find PENDING tasks (orphaned — their arq job likely expired).
-        # Exclude children whose parent already completed or failed —
-        # those are stale leftovers, not actionable orphans.
-        parent_alias = sa.orm.aliased(task_module.Task)
-        pending_result = await session.execute(
-            sa.select(task_module.Task)
-            .outerjoin(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.PENDING,
-                sa.or_(
-                    task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
-                ),
-            )
+    await reaper_module.reap(session_factory, arq_redis)
+
+
+async def _fail_stale_children(
+    session: sa_async.AsyncSession,
+    parent_alias: type[task_module.Task],
+    now: datetime.datetime,
+) -> None:
+    stale_result = await session.execute(
+        sa.select(task_module.Task)
+        .join(parent_alias, task_module.Task.parent_id == parent_alias.id)
+        .where(
+            task_module.Task.status == types_module.SyncStatus.PENDING,
+            parent_alias.status.in_(types_module.TERMINAL_STATUSES),
         )
-        pending_tasks = list(pending_result.scalars().all())
+    )
+    stale_tasks = list(stale_result.scalars().all())
+    for task in stale_tasks:
+        task.status = types_module.SyncStatus.FAILED
+        task.error_message = "Parent task already terminal"
+        task.completed_at = now
+    if stale_tasks:
+        await session.commit()
+        logger.info("cleaned_stale_orphans", count=len(stale_tasks))
 
-        # Find DEFERRED tasks whose deferred_until has passed
-        deferred_result = await session.execute(
-            sa.select(task_module.Task).where(
-                task_module.Task.status == types_module.SyncStatus.DEFERRED,
-                sa.or_(
-                    task_module.Task.deferred_until <= now,
-                    task_module.Task.deferred_until.is_(None),
-                ),
-            )
+
+async def _recover_running(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    parent_alias: type[task_module.Task],
+) -> None:
+    """Reset RUNNING rows whose job arq no longer holds, and re-deliver them.
+
+    A job arq still holds (queued, deferred, in progress) is left alone: on
+    SIGTERM arq keeps the interrupted job queued and runs it again, so a
+    second delivery here would run the task twice. Rows from before delivery
+    tracking (no ``arq_job_id``) take the reset path.
+    """
+    running_result = await session.execute(
+        sa.select(task_module.Task)
+        .outerjoin(parent_alias, task_module.Task.parent_id == parent_alias.id)
+        .where(
+            task_module.Task.status == types_module.SyncStatus.RUNNING,
+            sa.or_(
+                task_module.Task.parent_id.is_(None),
+                parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
+            ),
         )
-        deferred_tasks = list(deferred_result.scalars().all())
+    )
+    reset: list[task_module.Task] = []
+    for task in running_result.scalars().all():
+        log = logger.bind(task_id=str(task.id), job_id=task.arq_job_id)
+        if task.arq_job_id is not None:
+            try:
+                status = await reaper_module.job_status(arq_redis, task.arq_job_id)
+            except Exception:
+                log.exception("running_recovery_status_check_failed")
+                continue
+            if status in reaper_module.ARQ_HOLDS_JOB:
+                log.info("running_left_to_arq", arq_status=status.value)
+                continue
+            log.info("running_job_gone", arq_status=status.value)
 
-        # Mark stale children of terminal parents as FAILED
-        stale_result = await session.execute(
-            sa.select(task_module.Task)
-            .join(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.PENDING,
-                parent_alias.status.in_(types_module.TERMINAL_STATUSES),
-            )
-        )
-        stale_tasks = list(stale_result.scalars().all())
-        for task in stale_tasks:
-            task.status = types_module.SyncStatus.FAILED
-            task.error_message = "Parent task already terminal"
-            task.completed_at = now
-        if stale_tasks:
-            await session.commit()
-            logger.info("cleaned_stale_orphans", count=len(stale_tasks))
-
-        # Find RUNNING tasks (interrupted by crash/restart)
-        running_result = await session.execute(
-            sa.select(task_module.Task)
-            .outerjoin(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.RUNNING,
-                sa.or_(
-                    task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
-                ),
-            )
-        )
-        running_tasks = list(running_result.scalars().all())
-
-        # Reset deferred tasks back to PENDING before re-enqueueing
-        for task in deferred_tasks:
-            task.status = types_module.SyncStatus.PENDING
-        if deferred_tasks:
-            await session.commit()
-
-        # Reset RUNNING tasks back to PENDING, with watermark resume.
         # Preserve started_at so the UI shows continuous elapsed time.
-        for task in running_tasks:
-            task.status = types_module.SyncStatus.PENDING
-
-            # Attempt watermark-based resume for TIME_RANGE tasks
-            if task.task_type == types_module.TaskType.TIME_RANGE:
-                conn_result = await session.execute(
-                    sa.select(user_models.ServiceConnection).where(
-                        user_models.ServiceConnection.id == task.service_connection_id
-                    )
+        task.status = types_module.SyncStatus.PENDING
+        if task.task_type == types_module.TaskType.TIME_RANGE:
+            conn_result = await session.execute(
+                sa.select(user_models.ServiceConnection).where(
+                    user_models.ServiceConnection.id == task.service_connection_id
                 )
-                connection = conn_result.scalar_one_or_none()
-                if connection is not None:
-                    _apply_watermark_resume(task, connection)
-
-        if running_tasks:
-            await session.commit()
-            logger.info("reset_running_orphans", count=len(running_tasks))
-
-        all_tasks = pending_tasks + deferred_tasks + running_tasks
-        if not all_tasks:
-            return
-
-        enqueued = 0
-        for task in all_tasks:
-            # Skip parent tasks that already have children; re-planning would
-            # create duplicate child tasks.
-            if (
-                task.task_type
-                in (
-                    types_module.TaskType.SYNC_JOB,
-                    types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-                )
-                and await _child_count(session, task.id) > 0
-            ):
-                logger.info(
-                    "skipped_parent_with_children",
-                    task_id=str(task.id),
-                    task_type=task.task_type.value,
-                )
-                continue
-
-            job = dispatch_module.job_for(task)
-            if job is None:
-                logger.warning(
-                    "no_dispatch_for_task_type",
-                    task_id=str(task.id),
-                    task_type=task.task_type.value,
-                )
-                continue
-
-            await lifecycle_module.enqueue_task(
-                session, arq_redis, task, job[0], *job[1]
             )
-            enqueued += 1
+            connection = conn_result.scalar_one_or_none()
+            if connection is not None:
+                _apply_watermark_resume(task, connection)
+        reset.append(task)
 
-        if enqueued:
-            logger.info("reenqueued_orphaned_tasks", count=enqueued)
+    if not reset:
+        return
+    await session.commit()
+    logger.info("reset_running_orphans", count=len(reset))
+
+    for task in reset:
+        await _deliver_unless_planned(session, arq_redis, task)
+
+
+async def _deliver_legacy_unstamped(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    now: datetime.datetime,
+) -> None:
+    """Deliver top-level rows created before delivery tracking, once.
+
+    Unstamped children are sequential siblings or step-mode steps that were
+    never handed to arq, so only rows without a parent qualify.
+    """
+    legacy_result = await session.execute(
+        sa.select(task_module.Task).where(
+            task_module.Task.parent_id.is_(None),
+            task_module.Task.enqueued_at.is_(None),
+            sa.or_(
+                task_module.Task.status == types_module.SyncStatus.PENDING,
+                sa.and_(
+                    task_module.Task.status == types_module.SyncStatus.DEFERRED,
+                    sa.or_(
+                        task_module.Task.deferred_until.is_(None),
+                        task_module.Task.deferred_until <= now,
+                    ),
+                ),
+            ),
+        )
+    )
+    legacy = list(legacy_result.scalars().all())
+    for task in legacy:
+        task.status = types_module.SyncStatus.PENDING
+    if legacy:
+        logger.info("legacy_unstamped_tasks", count=len(legacy))
+    for task in legacy:
+        await _deliver_unless_planned(session, arq_redis, task)
+
+
+async def _deliver_unless_planned(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    task: task_module.Task,
+) -> None:
+    # Re-planning a parent that already has children would duplicate them.
+    if await _child_count(session, task.id) > 0:
+        logger.info(
+            "skipped_parent_with_children",
+            task_id=str(task.id),
+            task_type=task.task_type.value,
+        )
+        await session.commit()
+        return
+    job = dispatch_module.job_for(task)
+    if job is None:
+        logger.warning(
+            "no_dispatch_for_task_type",
+            task_id=str(task.id),
+            task_type=task.task_type.value,
+        )
+        await session.commit()
+        return
+    await lifecycle_module.enqueue_task(session, arq_redis, task, job[0], *job[1])
+
+
+async def reap_tasks(ctx: dict[str, Any]) -> None:
+    """arq cron entry: re-deliver PENDING/DEFERRED tasks whose job was lost."""
+    wctx = typing.cast("WorkerContext", ctx)
+    await reaper_module.reap(wctx["session_factory"], wctx["redis"])
 
 
 # ---------------------------------------------------------------------------
@@ -3321,6 +3340,14 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(backfill_popularity), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(enrich_related_artists), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(backfill_genres), timeout=3600),
+    ]
+    cron_jobs: typing.ClassVar[list[typing.Any]] = [
+        arq.cron(
+            reap_tasks,
+            second=0,
+            unique=True,
+            timeout=int(reaper_module.INTERVAL.total_seconds()),
+        ),
     ]
     on_startup = startup
     on_shutdown = shutdown

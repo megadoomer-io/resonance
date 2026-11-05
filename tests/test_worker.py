@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import arq.jobs as arq_jobs
 import pytest
 
 import resonance.connectors.base as base_module
@@ -19,6 +20,7 @@ import resonance.sync.base as sync_base
 import resonance.sync.dispatch as dispatch_module
 import resonance.types as types_module
 import resonance.worker as worker_module
+from tests.conftest import TaskDB, minutes_ago
 
 # ---------------------------------------------------------------------------
 # WorkerContext TypedDict tests
@@ -73,6 +75,25 @@ class TestWorkerSettings:
     def test_lifecycle_hooks(self) -> None:
         assert worker_module.WorkerSettings.on_startup is worker_module.startup
         assert worker_module.WorkerSettings.on_shutdown is worker_module.shutdown
+
+    def test_reaper_cron_is_unique_and_every_minute(self) -> None:
+        (cron,) = worker_module.WorkerSettings.cron_jobs
+        assert cron.coroutine is worker_module.reap_tasks
+        assert cron.unique is True
+        assert cron.second == 0
+        assert cron.minute is None
+        assert worker_module.reaper_module.INTERVAL.total_seconds() == 60
+
+    async def test_reap_tasks_runs_reaper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reap = AsyncMock()
+        monkeypatch.setattr(worker_module.reaper_module, "reap", reap)
+        ctx: dict[str, Any] = {"session_factory": MagicMock(), "redis": MagicMock()}
+
+        await worker_module.reap_tasks(ctx)
+
+        reap.assert_awaited_once_with(ctx["session_factory"], ctx["redis"])
 
     def test_max_jobs(self) -> None:
         assert worker_module.WorkerSettings.max_jobs == 10
@@ -1576,754 +1597,353 @@ class TestSyncRangeWatermarkWrite:
 # ---------------------------------------------------------------------------
 
 
+class _FakeArq:
+    """Stands in for arq: per-job statuses and a record of enqueues."""
+
+    def __init__(self) -> None:
+        self.statuses: dict[str, str] = {}
+        self.enqueued: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.default_queue_name = "arq:queue"
+
+    async def enqueue_job(self, *args: Any, **kwargs: Any) -> object:
+        self.enqueued.append((args, kwargs))
+        return object()
+
+    def pipeline(self, transaction: bool = True) -> _NullPipeline:
+        return _NullPipeline()
+
+
+class _NullPipeline:
+    async def __aenter__(self) -> _NullPipeline:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return lambda *a, **k: None
+
+    async def execute(self) -> list[Any]:
+        return []
+
+
+@pytest.fixture
+def fake_arq(monkeypatch: pytest.MonkeyPatch) -> _FakeArq:
+    fake = _FakeArq()
+
+    async def _status(_redis: Any, job_id: str) -> arq_jobs.JobStatus:
+        return arq_jobs.JobStatus(fake.statuses.get(job_id, "not_found"))
+
+    monkeypatch.setattr(worker_module.reaper_module, "job_status", _status)
+    return fake
+
+
+def _enqueued_jobs(fake: _FakeArq) -> list[tuple[Any, ...]]:
+    return [args for args, _ in fake.enqueued]
+
+
 class TestReenqueueOrphanedTasks:
-    """Tests for _reenqueue_orphaned_tasks."""
+    """Startup recovery (_reenqueue_orphaned_tasks) against a real task table."""
 
-    @pytest.mark.asyncio
-    async def test_reenqueues_pending_sync_job(self) -> None:
-        """PENDING SYNC_JOB is re-enqueued as plan_sync."""
-        task = _make_task(
-            status=types_module.SyncStatus.PENDING,
-        )
-        task.task_type = types_module.TaskType.SYNC_JOB
+    async def test_reenqueues_pending_sync_job(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """A legacy (unstamped) PENDING SYNC_JOB is delivered as plan_sync."""
+        task = await task_db.add(task_type=types_module.TaskType.SYNC_JOB)
 
-        session = AsyncMock()
-        # 1. PENDING tasks query
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = [task]
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        # 2. DEFERRED tasks query
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-        # 3. Stale tasks query (children of terminal parents)
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
+        assert _enqueued_jobs(fake_arq) == [("plan_sync", str(task.id))]
+        row = await task_db.get(task.id)
+        assert row.arq_job_id is not None
+        assert row.arq_job_id.startswith(f"plan_sync:{task.id}:")
+        assert row.enqueued_at is not None
 
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # 5. Children count for SYNC_JOB -> 0 (no children yet)
-        children_count_result = MagicMock()
-        children_count_result.scalar_one.return_value = 0
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            children_count_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
+    async def test_reenqueues_pending_time_range(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """A stamped PENDING row whose job arq lost is re-delivered once."""
+        task = await task_db.add(
+            enqueued_at=minutes_ago(10), arq_job_id="sync_range:lost"
         )
 
-        _assert_delivered_once(arq_redis, "plan_sync", str(task.id), task_id=task.id)
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-    @pytest.mark.asyncio
-    async def test_reenqueues_pending_time_range(self) -> None:
-        """PENDING TIME_RANGE is re-enqueued as sync_range."""
-        task = _make_task(
-            status=types_module.SyncStatus.PENDING,
-        )
-        # _make_task already sets task_type to TIME_RANGE
+        assert _enqueued_jobs(fake_arq) == [("sync_range", str(task.id))]
+        assert (await task_db.get(task.id)).arq_job_id != "sync_range:lost"
 
-        session = AsyncMock()
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = [task]
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query (children of terminal parents)
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
-
-    @pytest.mark.asyncio
-    async def test_reenqueues_expired_deferred_task(self) -> None:
-        """DEFERRED task with past deferred_until is reset and re-enqueued."""
-        task = _make_task(
+    async def test_reenqueues_expired_deferred_task(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """DEFERRED past deferred_until, job gone: reset to PENDING and delivered."""
+        task = await task_db.add(
             status=types_module.SyncStatus.DEFERRED,
-        )
-        task.deferred_until = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
-
-        session = AsyncMock()
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = [task]
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query (children of terminal parents)
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
+            deferred_until=datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC),
+            enqueued_at=minutes_ago(10),
+            arq_job_id="sync_range:gone",
         )
 
-        assert task.status == types_module.SyncStatus.PENDING
-        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
-        session.commit.assert_called()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-    @pytest.mark.asyncio
-    async def test_skips_sync_job_that_already_has_children(self) -> None:
-        """PENDING SYNC_JOB with existing children is not re-enqueued."""
-        parent = _make_task(status=types_module.SyncStatus.PENDING)
-        parent.task_type = types_module.TaskType.SYNC_JOB
+        assert (await task_db.get(task.id)).status == types_module.SyncStatus.PENDING
+        assert _enqueued_jobs(fake_arq) == [("sync_range", str(task.id))]
 
-        session = AsyncMock()
+    async def test_skips_sync_job_that_already_has_children(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """PENDING SYNC_JOB with existing children is not re-planned."""
+        parent = await task_db.add(task_type=types_module.TaskType.SYNC_JOB)
+        await task_db.add(parent_id=parent.id, status=types_module.SyncStatus.COMPLETED)
 
-        # 1. PENDING tasks query — returns the parent SYNC_JOB
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = [parent]
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-        # 2. DEFERRED tasks query — none
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
+        assert fake_arq.enqueued == []
 
-        # 3. Stale tasks query — none
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # 5. Children check for the SYNC_JOB — returns count=1
-        children_count_result = MagicMock()
-        children_count_result.scalar_one.return_value = 1
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            children_count_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
+    async def test_reenqueues_running_task(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """RUNNING with no recorded job (legacy): reset to PENDING, re-delivered."""
+        started = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task = await task_db.add(
+            status=types_module.SyncStatus.RUNNING, started_at=started
         )
 
-        # Should NOT re-enqueue the parent (it already has children)
-        arq_redis.enqueue_job.assert_not_called()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-    @pytest.mark.asyncio
-    async def test_reenqueues_running_task(self) -> None:
-        """RUNNING tasks should be reset to PENDING and re-enqueued."""
-        task = _make_task(
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.started_at is not None
+        assert row.started_at.replace(tzinfo=datetime.UTC) == started
+        assert _enqueued_jobs(fake_arq) == [("sync_range", str(task.id))]
+
+    @pytest.mark.parametrize("arq_status", ["queued", "deferred", "in_progress"])
+    async def test_running_task_left_when_arq_holds_its_job(
+        self, task_db: TaskDB, fake_arq: _FakeArq, arq_status: str
+    ) -> None:
+        """arq still owns the delivery (SIGTERM retry): no reset, no second job."""
+        task = await task_db.add(
             status=types_module.SyncStatus.RUNNING,
+            enqueued_at=minutes_ago(10),
+            arq_job_id="sync_range:held",
         )
-        # _make_task sets task_type to TIME_RANGE by default
-        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        fake_arq.statuses["sync_range:held"] = arq_status
 
-        session = AsyncMock()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-        # 1. PENDING tasks query — none
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.RUNNING
+        assert row.arq_job_id == "sync_range:held"
+        assert fake_arq.enqueued == []
 
-        # 2. DEFERRED tasks query — none
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query — none
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — returns the stuck task
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [task]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # 5. Connection query for watermark resume — no watermark
-        connection = MagicMock(spec=user_models.ServiceConnection)
-        connection.service_type = types_module.ServiceType.SPOTIFY
-        connection.sync_watermark = {}
-        conn_result = MagicMock()
-        conn_result.scalar_one_or_none.return_value = connection
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            conn_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        # Task should be reset to PENDING with started_at preserved
-        assert task.status == types_module.SyncStatus.PENDING
-        assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        # Should be re-enqueued as sync_range (TIME_RANGE task)
-        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
-        session.commit.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_running_listenbrainz_task_resumes_from_watermark(self) -> None:
-        """RUNNING ListenBrainz task gets max_ts and items_so_far injected."""
-        conn_id = uuid.uuid4()
-        task = _make_task(
+    @pytest.mark.parametrize("arq_status", ["not_found", "complete"])
+    async def test_running_task_reset_when_job_gone(
+        self, task_db: TaskDB, fake_arq: _FakeArq, arq_status: str
+    ) -> None:
+        task = await task_db.add(
             status=types_module.SyncStatus.RUNNING,
+            enqueued_at=minutes_ago(10),
+            arq_job_id="sync_range:old",
         )
-        task.service_connection_id = conn_id
-        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        task.progress_current = 29000
-        task.params = {"username": "testuser", "min_ts": 1700000000}
+        fake_arq.statuses["sync_range:old"] = arq_status
 
-        session = AsyncMock()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-        # 1-3: empty queries for PENDING, DEFERRED, stale
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.arq_job_id != "sync_range:old"
+        assert _enqueued_jobs(fake_arq) == [("sync_range", str(task.id))]
 
-        # 4. RUNNING tasks query — returns the stuck task
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [task]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # 5. Connection query — ListenBrainz with watermark showing page 29
-        connection = MagicMock(spec=user_models.ServiceConnection)
-        connection.service_type = types_module.ServiceType.LISTENBRAINZ
-        connection.sync_watermark = {
-            "listens": {
-                "newest_synced_at": 1712000000,
-                "oldest_synced_at": 1700500000,
-            }
-        }
-        conn_result = MagicMock()
-        conn_result.scalar_one_or_none.return_value = connection
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            conn_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        # max_ts should be injected from watermark's oldest_synced_at
-        assert task.params["max_ts"] == 1700500000
-        # items_so_far should be injected from progress_current
-        assert task.params["items_so_far"] == 29000
-        # Original params preserved
-        assert task.params["username"] == "testuser"
-        assert task.params["min_ts"] == 1700000000
-        assert task.status == types_module.SyncStatus.PENDING
-        # started_at preserved for UI continuity
-        assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-
-    @pytest.mark.asyncio
-    async def test_running_listenbrainz_task_without_watermark_unchanged(self) -> None:
-        """RUNNING ListenBrainz task with no watermark keeps original params."""
-        conn_id = uuid.uuid4()
-        task = _make_task(
-            status=types_module.SyncStatus.RUNNING,
-        )
-        task.service_connection_id = conn_id
-        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        task.params = {"username": "testuser", "min_ts": None}
-
-        session = AsyncMock()
-
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [task]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # Connection with empty watermark
-        connection = MagicMock(spec=user_models.ServiceConnection)
-        connection.service_type = types_module.ServiceType.LISTENBRAINZ
-        connection.sync_watermark = {}
-        conn_result = MagicMock()
-        conn_result.scalar_one_or_none.return_value = connection
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            conn_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        # Params should be unchanged — no watermark to inject
-        assert "max_ts" not in task.params
-        assert task.params == {"username": "testuser", "min_ts": None}
-
-    @pytest.mark.asyncio
-    async def test_running_task_connection_not_found_still_reenqueues(self) -> None:
-        """Connection not found still re-enqueues without watermark."""
-        task = _make_task(
-            status=types_module.SyncStatus.RUNNING,
-        )
-        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        task.params = {"username": "testuser", "min_ts": None}
-
-        session = AsyncMock()
-
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [task]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # Connection not found
-        conn_result = MagicMock()
-        conn_result.scalar_one_or_none.return_value = None
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            conn_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        # Should still be re-enqueued, just without watermark injection
-        assert task.status == types_module.SyncStatus.PENDING
-        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
-
-    @pytest.mark.asyncio
-    async def test_pending_calendar_sync_reenqueued(self) -> None:
-        """PENDING CALENDAR_SYNC task is re-enqueued as sync_calendar_feed."""
-        connection_id = uuid.uuid4()
-        task = _make_task(
-            status=types_module.SyncStatus.PENDING,
-        )
-        task.task_type = types_module.TaskType.CALENDAR_SYNC
-        task.service_connection_id = connection_id
-        task.params = {}
-
-        session = AsyncMock()
-
-        # 1. PENDING tasks query — returns the calendar sync task
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = [task]
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-
-        # 2. DEFERRED tasks query — none
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query — none
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        _assert_delivered_once(
-            arq_redis,
-            "sync_calendar_feed",
-            str(connection_id),
-            str(task.id),
-            task_id=task.id,
-        )
-
-    @pytest.mark.asyncio
-    async def test_running_calendar_sync_reset_and_reenqueued(self) -> None:
-        """RUNNING CALENDAR_SYNC task is reset to PENDING and re-enqueued."""
-        connection_id = uuid.uuid4()
-        task = _make_task(
-            status=types_module.SyncStatus.RUNNING,
-        )
-        task.task_type = types_module.TaskType.CALENDAR_SYNC
-        task.service_connection_id = connection_id
-        task.params = {}
-        task.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-
-        session = AsyncMock()
-
-        # 1. PENDING tasks query — none
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-
-        # 2. DEFERRED tasks query — none
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query — none
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — returns the stuck CALENDAR_SYNC task
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [task]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        # No watermark resume needed for CALENDAR_SYNC (not TIME_RANGE)
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        # Task should be reset to PENDING
-        assert task.status == types_module.SyncStatus.PENDING
-        # started_at preserved for UI continuity
-        assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        # Should be re-enqueued with correct args
-        _assert_delivered_once(
-            arq_redis,
-            "sync_calendar_feed",
-            str(connection_id),
-            str(task.id),
-            task_id=task.id,
-        )
-        session.commit.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_pending_bulk_job_reenqueued(self) -> None:
-        """PENDING BULK_JOB task is re-enqueued as run_bulk_job."""
-        task = _make_task(
-            status=types_module.SyncStatus.PENDING,
-        )
-        task.task_type = types_module.TaskType.BULK_JOB
-        task.params = {"operation": "dedup_all"}
-
-        session = AsyncMock()
-
-        # 1. PENDING tasks query — returns the bulk job task
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = [task]
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-
-        # 2. DEFERRED tasks query — none
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-
-        # 3. Stale tasks query — none
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        _assert_delivered_once(arq_redis, "run_bulk_job", str(task.id), task_id=task.id)
-
-    @pytest.mark.asyncio
-    async def test_marks_pending_children_of_terminal_parent_failed(self) -> None:
-        """PENDING children of a COMPLETED/FAILED parent are failed, not re-enqueued."""
-        stale_child = _make_task(
-            parent_id=uuid.uuid4(),
-            status=types_module.SyncStatus.PENDING,
-        )
-
-        session = AsyncMock()
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = [stale_child]
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
-        )
-
-        assert stale_child.status == types_module.SyncStatus.FAILED
-        assert stale_child.error_message == "Parent task already terminal"
-        assert stale_child.completed_at is not None
-        session.commit.assert_called()
-        arq_redis.enqueue_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_running_sync_job_with_children_reset_but_not_replanned(
+    async def test_running_task_status_error_leaves_row(
         self,
+        task_db: TaskDB,
+        fake_arq: _FakeArq,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task = await task_db.add(
+            status=types_module.SyncStatus.RUNNING,
+            enqueued_at=minutes_ago(10),
+            arq_job_id="sync_range:unknown",
+        )
+
+        async def _boom(*_: Any) -> Any:
+            raise ConnectionError("redis down")
+
+        monkeypatch.setattr(worker_module.reaper_module, "job_status", _boom)
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        assert (await task_db.get(task.id)).status == types_module.SyncStatus.RUNNING
+        assert fake_arq.enqueued == []
+
+    async def test_running_listenbrainz_task_resumes_from_watermark(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """RUNNING ListenBrainz task gets max_ts and items_so_far injected."""
+        user = user_models.User(id=uuid.uuid4(), display_name="u")
+        connection = user_models.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            service_type=types_module.ServiceType.LISTENBRAINZ,
+            external_user_id="testuser",
+            sync_watermark={
+                "listens": {
+                    "newest_synced_at": 1712000000,
+                    "oldest_synced_at": 1700500000,
+                }
+            },
+        )
+        async with task_db.factory() as session:
+            session.add_all([user, connection])
+            await session.commit()
+        task = await task_db.add(
+            status=types_module.SyncStatus.RUNNING,
+            service_connection_id=connection.id,
+            started_at=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC),
+            progress_current=29000,
+            params={"username": "testuser", "min_ts": 1700000000},
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        row = await task_db.get(task.id)
+        assert row.params == {
+            "username": "testuser",
+            "min_ts": 1700000000,
+            "max_ts": 1700500000,
+            "items_so_far": 29000,
+        }
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.started_at is not None
+
+    async def test_running_task_connection_not_found_still_reenqueues(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        task = await task_db.add(
+            status=types_module.SyncStatus.RUNNING,
+            params={"username": "testuser", "min_ts": None},
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.params == {"username": "testuser", "min_ts": None}
+        assert _enqueued_jobs(fake_arq) == [("sync_range", str(task.id))]
+
+    async def test_pending_calendar_sync_reenqueued(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        connection_id = uuid.uuid4()
+        task = await task_db.add(
+            task_type=types_module.TaskType.CALENDAR_SYNC,
+            service_connection_id=connection_id,
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        assert _enqueued_jobs(fake_arq) == [
+            ("sync_calendar_feed", str(connection_id), str(task.id))
+        ]
+
+    async def test_running_calendar_sync_reset_and_reenqueued(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        connection_id = uuid.uuid4()
+        task = await task_db.add(
+            task_type=types_module.TaskType.CALENDAR_SYNC,
+            status=types_module.SyncStatus.RUNNING,
+            service_connection_id=connection_id,
+            started_at=datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC),
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.started_at is not None
+        assert _enqueued_jobs(fake_arq) == [
+            ("sync_calendar_feed", str(connection_id), str(task.id))
+        ]
+
+    async def test_pending_bulk_job_reenqueued(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        task = await task_db.add(
+            task_type=types_module.TaskType.BULK_JOB,
+            params={"operation": "dedup_artists"},
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        assert _enqueued_jobs(fake_arq) == [("run_bulk_job", str(task.id))]
+
+    async def test_marks_pending_children_of_terminal_parent_failed(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """PENDING children of a terminal parent are failed, not re-enqueued."""
+        parent = await task_db.add(
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.COMPLETED,
+        )
+        stale_child = await task_db.add(
+            parent_id=parent.id,
+            enqueued_at=minutes_ago(10),
+            arq_job_id="sync_range:stale",
+        )
+
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        row = await task_db.get(stale_child.id)
+        assert row.status == types_module.SyncStatus.FAILED
+        assert row.error_message == "Parent task already terminal"
+        assert row.completed_at is not None
+        assert fake_arq.enqueued == []
+
+    async def test_running_sync_job_with_children_reset_but_not_replanned(
+        self, task_db: TaskDB, fake_arq: _FakeArq
     ) -> None:
         """A RUNNING SYNC_JOB with children is reset to PENDING but not re-planned."""
-        parent = _make_task(status=types_module.SyncStatus.RUNNING)
-        parent.task_type = types_module.TaskType.SYNC_JOB
-        parent.started_at = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-
-        session = AsyncMock()
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = [parent]
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-        # No connection lookup: watermark resume applies only to TIME_RANGE.
-        children_count_result = MagicMock()
-        children_count_result.scalar_one.return_value = 3
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-            children_count_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
+        started = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        parent = await task_db.add(
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+            started_at=started,
         )
+        for _ in range(3):
+            await task_db.add(
+                parent_id=parent.id, status=types_module.SyncStatus.COMPLETED
+            )
 
-        assert parent.status == types_module.SyncStatus.PENDING
-        assert parent.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
-        arq_redis.enqueue_job.assert_not_called()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
-    @pytest.mark.asyncio
-    async def test_no_orphans_does_nothing(self) -> None:
-        """No orphaned tasks means no enqueue calls."""
-        session = AsyncMock()
-        pending_scalars = MagicMock()
-        pending_scalars.all.return_value = []
-        pending_result = MagicMock()
-        pending_result.scalars.return_value = pending_scalars
-        deferred_scalars = MagicMock()
-        deferred_scalars.all.return_value = []
-        deferred_result = MagicMock()
-        deferred_result.scalars.return_value = deferred_scalars
+        row = await task_db.get(parent.id)
+        assert row.status == types_module.SyncStatus.PENDING
+        assert row.started_at is not None
+        assert row.started_at.replace(tzinfo=datetime.UTC) == started
+        assert fake_arq.enqueued == []
 
-        # 3. Stale tasks query (children of terminal parents)
-        stale_scalars = MagicMock()
-        stale_scalars.all.return_value = []
-        stale_result = MagicMock()
-        stale_result.scalars.return_value = stale_scalars
-
-        # 4. RUNNING tasks query — none
-        running_scalars = MagicMock()
-        running_scalars.all.return_value = []
-        running_result = MagicMock()
-        running_result.scalars.return_value = running_scalars
-
-        session.execute.side_effect = [
-            pending_result,
-            deferred_result,
-            stale_result,
-            running_result,
-        ]
-
-        arq_redis = AsyncMock()
-
-        await worker_module._reenqueue_orphaned_tasks(
-            _mock_session_factory(session), arq_redis
+    async def test_unstamped_sequential_sibling_not_delivered(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        """A sibling never handed to arq waits for its turn, even on startup."""
+        parent = await task_db.add(
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+            enqueued_at=minutes_ago(10),
+            arq_job_id="plan_sync:held",
         )
+        fake_arq.statuses["plan_sync:held"] = "in_progress"
+        await task_db.add(parent_id=parent.id)
 
-        arq_redis.enqueue_job.assert_not_called()
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+
+        assert fake_arq.enqueued == []
+
+    async def test_no_orphans_does_nothing(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
+        assert fake_arq.enqueued == []
 
 
 # ---------------------------------------------------------------------------
