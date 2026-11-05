@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import resonance.connectors.base as base_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_module
@@ -1016,13 +1017,17 @@ class TestSyncRangeDeferral:
         assert task.status == types_module.SyncStatus.DEFERRED
         assert task.deferred_until is not None
         assert task.params["offset"] == 50
-        # Should have enqueued a deferred re-run
-        arq_redis.enqueue_job.assert_any_call(
-            "sync_range",
-            str(task_id),
-            _job_id=f"sync_range:{task_id}",
-            _defer_by=datetime.timedelta(seconds=120.0),
-        )
+        defer_calls = [
+            c for c in arq_redis.enqueue_job.call_args_list if "_defer_by" in c.kwargs
+        ]
+        assert len(defer_calls) == 1
+        call = defer_calls[0]
+        assert call.args == ("sync_range", str(task_id))
+        assert call.kwargs["_defer_by"] == datetime.timedelta(seconds=120.0)
+        # Reusing the running job's id makes arq silently drop the re-enqueue.
+        job_id = call.kwargs["_job_id"]
+        assert job_id.startswith(f"sync_range:{task_id}:")
+        assert job_id != f"sync_range:{task_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -2534,6 +2539,62 @@ class TestDiscoverTracksForArtist:
             {"listenbrainz": "mb-id-1"},
             limit=120,
         )
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_defers_with_unique_job_id(self) -> None:
+        """A rate-limited discovery defers under a fresh job id."""
+        task_id = uuid.uuid4()
+        parent_id = uuid.uuid4()
+
+        task = task_module.Task(
+            id=task_id,
+            user_id=uuid.uuid4(),
+            parent_id=parent_id,
+            task_type=types_module.TaskType.TRACK_DISCOVERY,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "artist_id": str(uuid.uuid4()),
+                "artist_name": "Test Artist",
+                "service_links": {"listenbrainz": "mb-id-1"},
+            },
+        )
+
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+
+        mock_connector = AsyncMock()
+        mock_connector.discover_tracks = AsyncMock(
+            side_effect=base_module.RateLimitExceededError(90.0, 60.0)
+        )
+
+        mock_registry = MagicMock()
+        mock_registry.get_by_capability.return_value = [mock_connector]
+
+        session.execute.side_effect = [
+            task_result,
+            _not_cancelled_result(parent_id),
+        ]
+
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": mock_registry,
+            "redis": arq_redis,
+        }
+
+        await worker_module.discover_tracks_for_artist(ctx, str(task_id))
+
+        assert task.status == types_module.SyncStatus.DEFERRED
+        assert task.deferred_until is not None
+        arq_redis.enqueue_job.assert_awaited_once()
+        call = arq_redis.enqueue_job.call_args
+        assert call.args == ("discover_tracks_for_artist", str(task_id))
+        assert call.kwargs["_defer_by"] == datetime.timedelta(seconds=90.0)
+        job_id = call.kwargs["_job_id"]
+        assert job_id.startswith(f"discover_tracks_for_artist:{task_id}:")
+        assert job_id != f"discover_tracks_for_artist:{task_id}"
 
     @pytest.mark.asyncio
     async def test_marks_completed_with_result(self) -> None:

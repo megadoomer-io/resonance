@@ -45,6 +45,9 @@ packages = ["src/resonance"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs real Redis/PostgreSQL; skips locally when unavailable, fails in CI",
+]
 
 [tool.ruff]
 target-version = "py314"
