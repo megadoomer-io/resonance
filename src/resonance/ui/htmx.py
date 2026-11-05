@@ -52,3 +52,20 @@ def trigger_event[R: fastapi.responses.Response](
     else:
         response.headers["HX-Trigger"] = event
     return response
+
+
+def retarget[R: fastapi.responses.Response](
+    response: R,
+    target: str,
+    swap: str = "innerHTML",
+) -> R:
+    """Redirect where HTMX swaps this response (HX-Retarget + HX-Reswap).
+
+    Args:
+        response: The response to add the headers to.
+        target: CSS selector of the element to swap into instead.
+        swap: The swap style to use there.
+    """
+    response.headers["HX-Retarget"] = target
+    response.headers["HX-Reswap"] = swap
+    return response
