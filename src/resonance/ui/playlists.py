@@ -668,7 +668,10 @@ async def generating_page(
 ) -> fastapi.responses.HTMLResponse:
     """Render the playlist generation status page."""
     result = await db.execute(
-        sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
     )
     task = result.scalar_one_or_none()
 
@@ -687,12 +690,16 @@ async def generating_page(
 @router.get("/partials/generating-status/{task_id}", response_model=None)
 async def generating_status_partial(
     request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     task_id: uuid.UUID,
 ) -> fastapi.responses.HTMLResponse:
     """Polled partial for playlist generation progress."""
     result = await db.execute(
-        sa.select(task_models.Task).where(task_models.Task.id == task_id)
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
     )
     task = result.scalar_one_or_none()
 
@@ -850,17 +857,18 @@ async def export_status_page(
     """Render the playlist export status page."""
     result = await db.execute(
         sa.select(playlist_models.Playlist).where(
-            playlist_models.Playlist.id == playlist_id
+            playlist_models.Playlist.id == playlist_id,
+            playlist_models.Playlist.user_id == user_id,
         )
     )
     playlist = result.scalar_one_or_none()
-
-    playlist_name = playlist.name if playlist else "Playlist"
+    if playlist is None:
+        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
     ctx = common.base_context(request)
     ctx.update(
         playlist_id=str(playlist_id),
-        playlist_name=playlist_name,
+        playlist_name=playlist.name,
         task_ids=task_ids,
     )
 
@@ -870,12 +878,17 @@ async def export_status_page(
 @router.get("/partials/export-status/{playlist_id}", response_model=None)
 async def export_status_partial(
     request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     playlist_id: uuid.UUID,
     task_ids: str = "",
 ) -> fastapi.responses.HTMLResponse:
     """Polled partial for playlist export progress."""
-    task_id_list = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    task_id_list = [
+        uuid.UUID(tid)
+        for tid in (raw.strip() for raw in task_ids.split(","))
+        if tid and _is_uuid(tid)
+    ]
 
     task_results: list[dict[str, object]] = []
     all_completed = True
@@ -883,7 +896,10 @@ async def export_status_partial(
 
     for tid in task_id_list:
         result = await db.execute(
-            sa.select(task_models.Task).where(task_models.Task.id == uuid.UUID(tid))
+            sa.select(task_models.Task).where(
+                task_models.Task.id == tid,
+                task_models.Task.user_id == user_id,
+            )
         )
         task = result.scalar_one_or_none()
         if task is None:
