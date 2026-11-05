@@ -2489,6 +2489,20 @@ _HTTP_ERROR_MESSAGES: dict[int, str] = {
 }
 
 
+def _set_spotify_export_link(
+    playlist: playlist_models.Playlist,
+    connection_id: str,
+    link: dict[str, object],
+) -> None:
+    """Set ``service_links["spotify"][connection_id]`` (copy-on-write for JSON)."""
+    links = dict(playlist.service_links or {})
+    current = links.get("spotify")
+    spotify_section = dict(current) if isinstance(current, dict) else {}
+    spotify_section[connection_id] = link
+    links["spotify"] = spotify_section
+    playlist.service_links = links
+
+
 def _friendly_http_error(exc: httpx.HTTPStatusError, service: str) -> str:
     status = exc.response.status_code
     template = _HTTP_ERROR_MESSAGES.get(status)
@@ -2723,6 +2737,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     playlist.name,
                     playlist.description or "",
                 )
+                # Persist the id before anything else can fail, so a retry
+                # replaces tracks on this playlist instead of creating another.
+                # No exported_at yet: the page reads it as not yet synced.
+                _set_spotify_export_link(
+                    playlist, connection_id_str, {"playlist_id": spotify_playlist_id}
+                )
+                await session.commit()
                 await connector.add_tracks_to_playlist(
                     access_token, spotify_playlist_id, spotify_uris
                 )
@@ -2731,19 +2752,14 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     spotify_playlist_id=spotify_playlist_id,
                 )
 
-            # Update playlist service_links (copy-on-write)
-            updated_playlist_links = dict(playlist_links)
-            spotify_section = dict(
-                updated_playlist_links.get("spotify", {})
-                if isinstance(updated_playlist_links.get("spotify"), dict)
-                else {}
+            _set_spotify_export_link(
+                playlist,
+                connection_id_str,
+                {
+                    "playlist_id": spotify_playlist_id,
+                    "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                },
             )
-            spotify_section[connection_id_str] = {
-                "playlist_id": spotify_playlist_id,
-                "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            }
-            updated_playlist_links["spotify"] = spotify_section
-            playlist.service_links = updated_playlist_links
 
             # Persist per-track Spotify sync status (#spotify-sync-visibility): the
             # push succeeded, so every matched track is now confirmed on Spotify;
