@@ -816,6 +816,7 @@ async def export_playlist_submit(
     existing_task_ids = [str(t.id) for t in active_tasks]
 
     new_task_ids: list[str] = []
+    deliveries: list[lifecycle_module.Delivery] = []
     for conn in new_connections:
         task = task_models.Task(
             id=uuid.uuid4(),
@@ -830,15 +831,13 @@ async def export_playlist_submit(
         )
         db.add(task)
         new_task_ids.append(str(task.id))
+        deliveries.append(
+            lifecycle_module.stamp_delivery(task, "export_playlist", str(task.id))
+        )
     await db.commit()
 
-    arq_redis = request.app.state.arq_redis
-    for tid in new_task_ids:
-        await arq_redis.enqueue_job(
-            "export_playlist",
-            tid,
-            _job_id=f"export_playlist:{tid}",
-        )
+    for delivery in deliveries:
+        await lifecycle_module.deliver(request.app.state.arq_redis, delivery)
 
     # Track both the newly-started and already-running tasks so the progress
     # page reflects everything in flight for this playlist.

@@ -505,7 +505,7 @@ Each `SyncStrategy` declares a `concurrency` mode:
 
 On worker startup, `_reenqueue_orphaned_tasks()` finds tasks stuck in
 PENDING (lost arq job), RUNNING (interrupted by crash), or expired DEFERRED
-status and re-enqueues them. Recovery is type-agnostic — the `_TASK_DISPATCH`
+status and re-enqueues them. Recovery is type-agnostic — the `sync/dispatch.TASK_DISPATCH`
 map determines the arq job name and arguments for each task type. For
 ListenBrainz TIME_RANGE tasks, watermark-based resume is applied so the task
 picks up where it left off rather than re-processing from the beginning.

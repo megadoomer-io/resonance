@@ -16,6 +16,7 @@ import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.services.artist_tags as artist_tags_module
 import resonance.sync.base as sync_base
+import resonance.sync.dispatch as dispatch_module
 import resonance.types as types_module
 import resonance.worker as worker_module
 
@@ -108,6 +109,17 @@ class TestFunctionsCallable:
 # ---------------------------------------------------------------------------
 
 
+def _assert_delivered_once(
+    arq_redis: AsyncMock, job_name: str, *args: str, task_id: uuid.UUID
+) -> None:
+    """One enqueue of *job_name* with a fresh per-delivery job id for the task."""
+    arq_redis.enqueue_job.assert_called_once()
+    call = arq_redis.enqueue_job.call_args
+    assert call.args == (job_name, *args)
+    assert call.kwargs["_job_id"].startswith(f"{job_name}:{task_id}:")
+    assert call.kwargs["_defer_by"] is None
+
+
 def _make_task(
     *,
     task_id: uuid.UUID | None = None,
@@ -170,10 +182,12 @@ class TestCheckParentCompletion:
         await worker_module._check_parent_completion(session, task, arq_redis, log)
 
         # Should enqueue the next sibling, not update parent
-        arq_redis.enqueue_job.assert_called_once_with(
-            "sync_range", str(next_task.id), _job_id=f"sync_range:{next_task.id}"
+        _assert_delivered_once(
+            arq_redis, "sync_range", str(next_task.id), task_id=next_task.id
         )
-        session.commit.assert_not_called()
+        assert next_task.arq_job_id is not None
+        assert next_task.status == types_module.SyncStatus.PENDING
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_all_children_completed_marks_parent_completed(self) -> None:
@@ -1615,9 +1629,7 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with(
-            "plan_sync", str(task.id), _job_id=f"plan_sync:{task.id}"
-        )
+        _assert_delivered_once(arq_redis, "plan_sync", str(task.id), task_id=task.id)
 
     @pytest.mark.asyncio
     async def test_reenqueues_pending_time_range(self) -> None:
@@ -1662,9 +1674,7 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with(
-            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
-        )
+        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
 
     @pytest.mark.asyncio
     async def test_reenqueues_expired_deferred_task(self) -> None:
@@ -1710,9 +1720,7 @@ class TestReenqueueOrphanedTasks:
         )
 
         assert task.status == types_module.SyncStatus.PENDING
-        arq_redis.enqueue_job.assert_called_once_with(
-            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
-        )
+        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
         session.commit.assert_called()
 
     @pytest.mark.asyncio
@@ -1828,9 +1836,7 @@ class TestReenqueueOrphanedTasks:
         assert task.status == types_module.SyncStatus.PENDING
         assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
         # Should be re-enqueued as sync_range (TIME_RANGE task)
-        arq_redis.enqueue_job.assert_called_once_with(
-            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
-        )
+        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
         session.commit.assert_called()
 
     @pytest.mark.asyncio
@@ -2009,9 +2015,7 @@ class TestReenqueueOrphanedTasks:
 
         # Should still be re-enqueued, just without watermark injection
         assert task.status == types_module.SyncStatus.PENDING
-        arq_redis.enqueue_job.assert_called_once_with(
-            "sync_range", str(task.id), _job_id=f"sync_range:{task.id}"
-        )
+        _assert_delivered_once(arq_redis, "sync_range", str(task.id), task_id=task.id)
 
     @pytest.mark.asyncio
     async def test_pending_calendar_sync_reenqueued(self) -> None:
@@ -2063,11 +2067,12 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with(
+        _assert_delivered_once(
+            arq_redis,
             "sync_calendar_feed",
             str(connection_id),
             str(task.id),
-            _job_id=f"sync_calendar_feed:{task.id}",
+            task_id=task.id,
         )
 
     @pytest.mark.asyncio
@@ -2128,11 +2133,12 @@ class TestReenqueueOrphanedTasks:
         # started_at preserved for UI continuity
         assert task.started_at == datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
         # Should be re-enqueued with correct args
-        arq_redis.enqueue_job.assert_called_once_with(
+        _assert_delivered_once(
+            arq_redis,
             "sync_calendar_feed",
             str(connection_id),
             str(task.id),
-            _job_id=f"sync_calendar_feed:{task.id}",
+            task_id=task.id,
         )
         session.commit.assert_called()
 
@@ -2184,11 +2190,7 @@ class TestReenqueueOrphanedTasks:
             _mock_session_factory(session), arq_redis
         )
 
-        arq_redis.enqueue_job.assert_called_once_with(
-            "run_bulk_job",
-            str(task.id),
-            _job_id=f"run_bulk_job:{task.id}",
-        )
+        _assert_delivered_once(arq_redis, "run_bulk_job", str(task.id), task_id=task.id)
 
     @pytest.mark.asyncio
     async def test_marks_pending_children_of_terminal_parent_failed(self) -> None:
@@ -3647,8 +3649,8 @@ class TestExportPlaylist:
 
     def test_dispatch_entry_exists(self) -> None:
         """PLAYLIST_EXPORT is registered in _TASK_DISPATCH."""
-        assert types_module.TaskType.PLAYLIST_EXPORT in worker_module._TASK_DISPATCH
-        job_name, _ = worker_module._TASK_DISPATCH[
+        assert types_module.TaskType.PLAYLIST_EXPORT in dispatch_module.TASK_DISPATCH
+        job_name, _ = dispatch_module.TASK_DISPATCH[
             types_module.TaskType.PLAYLIST_EXPORT
         ]
         assert job_name == "export_playlist"

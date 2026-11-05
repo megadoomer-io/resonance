@@ -16,6 +16,7 @@ import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 router = fastapi.APIRouter(
@@ -284,15 +285,10 @@ async def enqueue_dedup(
         description=operation.replace("_", " ").title(),
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "run_bulk_job",
-        task_id,
-        _job_id=f"bulk:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "run_bulk_job", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -390,15 +386,10 @@ async def admin_backfill_mbids_endpoint(
         description="MBID Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_mbids",
-        task_id,
-        _job_id=f"mbid-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_mbids", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -458,15 +449,10 @@ async def admin_backfill_popularity_endpoint(
         description="Popularity Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_popularity",
-        task_id,
-        _job_id=f"popularity-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_popularity", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -540,15 +526,10 @@ async def admin_backfill_genres_endpoint(
         description="Genre Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_genres",
-        task_id,
-        _job_id=f"genre-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_genres", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 

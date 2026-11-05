@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
+import uuid
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
@@ -14,11 +15,104 @@ import resonance.models.task as task_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
-    import uuid
-
+    import arq
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Delivery: handing a task row to arq
+# ---------------------------------------------------------------------------
+
+
+def new_job_id(job_name: str, task_id: uuid.UUID) -> str:
+    """A fresh arq job id for one delivery of a task.
+
+    arq silently drops ``enqueue_job`` while a job with the same id (or its
+    result key) exists, so every delivery gets its own id.
+    """
+    return f"{job_name}:{task_id}:{uuid.uuid4().hex}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Delivery:
+    """One arq job for a task, stamped on the row and enqueued after commit."""
+
+    task_id: uuid.UUID
+    job_name: str
+    args: tuple[object, ...]
+    job_id: str
+    defer_by: datetime.timedelta | None = None
+
+
+def stamp_delivery(
+    task: task_models.Task,
+    job_name: str,
+    *args: object,
+    defer_by: datetime.timedelta | None = None,
+    job_id: str | None = None,
+) -> Delivery:
+    """Record a delivery on the row; the caller commits, then calls ``deliver``.
+
+    Stamping in the same transaction that inserts or advances the row means a
+    crash between commit and enqueue leaves a row whose job arq doesn't know,
+    which the reaper re-delivers.
+    """
+    if task.id is None:
+        # The column default only fires at flush; the job id needs it now.
+        task.id = uuid.uuid4()
+    delivery = Delivery(
+        task_id=task.id,
+        job_name=job_name,
+        args=args,
+        job_id=job_id or new_job_id(job_name, task.id),
+        defer_by=defer_by,
+    )
+    task.enqueued_at = datetime.datetime.now(datetime.UTC)
+    task.arq_job_id = delivery.job_id
+    return delivery
+
+
+async def deliver(arq_redis: arq.ArqRedis | None, delivery: Delivery) -> bool:
+    """Enqueue a stamped delivery. Never raises: the reaper covers a failure."""
+    log = logger.bind(
+        task_id=str(delivery.task_id),
+        job=delivery.job_name,
+        job_id=delivery.job_id,
+    )
+    if arq_redis is None:
+        log.warning("task_enqueue_skipped_no_redis")
+        return False
+    try:
+        job = await arq_redis.enqueue_job(
+            delivery.job_name,
+            *delivery.args,
+            _job_id=delivery.job_id,
+            _defer_by=delivery.defer_by,
+        )
+    except Exception:
+        log.exception("task_enqueue_failed")
+        return False
+    if job is None:
+        log.warning("task_enqueue_dropped")
+        return False
+    return True
+
+
+async def enqueue_task(
+    session: AsyncSession,
+    arq_redis: arq.ArqRedis | None,
+    task: task_models.Task,
+    job_name: str,
+    *args: object,
+    defer_by: datetime.timedelta | None = None,
+) -> Delivery:
+    """Stamp a delivery on *task*, commit the session, then enqueue the job."""
+    delivery = stamp_delivery(task, job_name, *args, defer_by=defer_by)
+    await session.commit()
+    await deliver(arq_redis, delivery)
+    return delivery
 
 
 async def complete_task(

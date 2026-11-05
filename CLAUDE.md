@@ -218,7 +218,8 @@ uv run resonance-api --as-user <user_id> api POST /api/v1/generator-profiles/ -d
 - OAuth tokens encrypted at rest via Fernet
 - All connections (OAuth, username-based, URL-based, file-upload) use the unified `ServiceConnection` model — there is no separate calendar feed or import model
 - Task lifecycle helpers (`sync/lifecycle.py`) provide `complete_task`/`fail_task` — use these instead of setting task status inline
-- Orphan recovery in the worker is type-agnostic — new task types are handled by adding an entry to `_TASK_DISPATCH`
+- Orphan recovery in the worker is type-agnostic — new task types are handled by adding an entry to `sync/dispatch.TASK_DISPATCH`
+- **Every enqueue goes through `lifecycle.enqueue_task`** (or `stamp_delivery` + `deliver` for batches): it stamps `enqueued_at` and a fresh per-delivery `arq_job_id` (`job:task_id:uuidhex`) on the row in the caller's transaction, commits, then enqueues. Never call `arq_redis.enqueue_job` directly; arq silently drops a reused job id, and an unstamped row is invisible to the reaper
 - Playlist export uses `PLAYLIST_WRITE` capability — connectors declare it to enable export. Export creates a background `PLAYLIST_EXPORT` task per connection, tracked via `playlist.service_links`
 - Track matching: export uses two-pass resolution. First, tracks with MusicBrainz recording MBIDs are resolved via MB URL relations (authoritative, community-curated). Second, unresolved tracks fall back to Spotify text search. Matches from both passes are persisted in `service_links["spotify"]` for future reuse.
 - Sync staleness: compare `playlist.updated_at` vs `service_links[connection].exported_at` — no external API calls needed

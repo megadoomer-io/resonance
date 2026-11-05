@@ -17,6 +17,7 @@ import resonance.generators.parameters as params_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -161,13 +162,7 @@ async def _trigger_profile_task(
         params=params,
     )
     db.add(task)
-    await db.commit()
-
-    await arq_redis.enqueue_job(
-        job_name,
-        str(task.id),
-        _job_id=f"{job_name}:{task.id}",
-    )
+    await lifecycle_module.enqueue_task(db, arq_redis, task, job_name, str(task.id))
     return str(task.id)
 
 

@@ -71,6 +71,7 @@ import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
 import resonance.sync.backfill as backfill_module
 import resonance.sync.base as sync_base
+import resonance.sync.dispatch as dispatch_module
 import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
@@ -79,75 +80,6 @@ import resonance.sync.test as test_sync
 import resonance.types as types_module
 
 logger = structlog.get_logger()
-
-
-def _defer_job_id(function: str, task_id: uuid.UUID) -> str:
-    """Return a fresh arq job id for an in-job deferral re-enqueue.
-
-    arq silently drops ``enqueue_job`` while a job with the same id (or its
-    result key) exists, which is always true for the running job's own id.
-    """
-    return f"{function}:{task_id}:{uuid.uuid4().hex}"
-
-
-# ---------------------------------------------------------------------------
-# Orphan recovery dispatch map
-# ---------------------------------------------------------------------------
-# Maps each TaskType to (arq_job_name, args_builder). The args_builder
-# receives a Task and returns the positional args tuple for enqueue_job.
-
-_TASK_DISPATCH: dict[
-    types_module.TaskType,
-    tuple[str, collections.abc.Callable[[task_module.Task], tuple[str, ...]]],
-] = {
-    types_module.TaskType.SYNC_JOB: ("plan_sync", lambda t: (str(t.id),)),
-    types_module.TaskType.TIME_RANGE: ("sync_range", lambda t: (str(t.id),)),
-    types_module.TaskType.CALENDAR_SYNC: (
-        "sync_calendar_feed",
-        lambda t: (str(t.service_connection_id), str(t.id)),
-    ),
-    types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
-    types_module.TaskType.PLAYLIST_GENERATION: (
-        "generate_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.TRACK_DISCOVERY: (
-        "discover_tracks_for_artist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.TRACK_SCORING: (
-        "score_and_build_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.CONCERT_ARCHIVES_IMPORT: (
-        "sync_concert_archives",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.CONCERT_ARCHIVES_CHUNK: (
-        "sync_concert_archives_chunk",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.PLAYLIST_EXPORT: (
-        "export_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.MBID_BACKFILL: (
-        "backfill_mbids",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.POPULARITY_BACKFILL: (
-        "backfill_popularity",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.RELATED_ARTIST_ENRICHMENT: (
-        "enrich_related_artists",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.GENRE_BACKFILL: (
-        "backfill_genres",
-        lambda t: (str(t.id),),
-    ),
-}
 
 
 class WorkerContext(typing.TypedDict):
@@ -284,28 +216,21 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 )
                 session.add(child)
                 children.append(child)
-            await session.commit()
 
-            # Enqueue based on concurrency policy
-            if strategy.concurrency == "parallel":
-                for child in children:
-                    await arq_redis.enqueue_job(
-                        "sync_range",
-                        str(child.id),
-                        _job_id=f"sync_range:{child.id}",
-                    )
-                    log.info("child_enqueued", child_id=str(child.id))
-            else:
-                # Sequential: enqueue only the first
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(children[0].id),
-                    _job_id=f"sync_range:{children[0].id}",
-                )
+            # Sequential: only the first child is delivered now; the rest stay
+            # unstamped until _check_parent_completion advances to them.
+            parallel = strategy.concurrency == "parallel"
+            deliveries = [
+                lifecycle_module.stamp_delivery(child, "sync_range", str(child.id))
+                for child in (children if parallel else children[:1])
+            ]
+            await session.commit()
+            for delivery in deliveries:
+                await lifecycle_module.deliver(arq_redis, delivery)
                 log.info(
                     "child_enqueued",
-                    child_id=str(children[0].id),
-                    mode="sequential",
+                    child_id=str(delivery.task_id),
+                    mode=strategy.concurrency,
                 )
 
         except Exception:
@@ -420,13 +345,13 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 task.deferred_until = datetime.datetime.now(
                     datetime.UTC
                 ) + datetime.timedelta(seconds=defer.retry_after)
-                await session.commit()
-                arq_redis_defer = wctx["redis"]
-                await arq_redis_defer.enqueue_job(
+                await lifecycle_module.enqueue_task(
+                    session,
+                    wctx["redis"],
+                    task,
                     "sync_range",
                     str(task.id),
-                    _job_id=_defer_job_id("sync_range", task.id),
-                    _defer_by=datetime.timedelta(seconds=defer.retry_after),
+                    defer_by=datetime.timedelta(seconds=defer.retry_after),
                 )
                 log.info(
                     "sync_range_deferred",
@@ -1147,19 +1072,16 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
             session.add(scoring_child)
             children.append(scoring_child)
-            await session.commit()
 
-            # Enqueue the first child (sequential dispatch)
+            # Sequential dispatch: only the first child is delivered now.
             first_child = children[0]
-            dispatch = _TASK_DISPATCH.get(first_child.task_type)
-            if dispatch is not None:
-                job_name, args_builder = dispatch
-                args = args_builder(first_child)
-                await arq_redis.enqueue_job(
-                    job_name,
-                    *args,
-                    _job_id=f"{job_name}:{first_child.id}",
+            job = dispatch_module.job_for(first_child)
+            if job is not None:
+                await lifecycle_module.enqueue_task(
+                    session, arq_redis, first_child, job[0], *job[1]
                 )
+            else:
+                await session.commit()
             log.info(
                 "generate_playlist_planned",
                 discovery_tasks=len(discovery_artist_ids),
@@ -1269,13 +1191,13 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 task.deferred_until = datetime.datetime.now(
                     datetime.UTC
                 ) + datetime.timedelta(seconds=exc.retry_after)
-                await session.commit()
-                arq_redis_defer = wctx["redis"]
-                await arq_redis_defer.enqueue_job(
+                await lifecycle_module.enqueue_task(
+                    session,
+                    wctx["redis"],
+                    task,
                     "discover_tracks_for_artist",
                     str(task.id),
-                    _job_id=_defer_job_id("discover_tracks_for_artist", task.id),
-                    _defer_by=datetime.timedelta(seconds=exc.retry_after),
+                    defer_by=datetime.timedelta(seconds=exc.retry_after),
                 )
                 log.info(
                     "discover_tracks_deferred",
@@ -2859,22 +2781,13 @@ async def _check_parent_completion(
         )
         next_pending = next_pending_result.scalar_one_or_none()
         if next_pending is not None:
-            dispatch = _TASK_DISPATCH.get(next_pending.task_type)
-            if dispatch is not None:
-                job_name, args_builder = dispatch
-                args = args_builder(next_pending)
-                await arq_redis.enqueue_job(
-                    job_name,
-                    *args,
-                    _job_id=f"{job_name}:{next_pending.id}",
-                )
-            else:
-                # Fallback for unknown task types
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(next_pending.id),
-                    _job_id=f"sync_range:{next_pending.id}",
-                )
+            job = dispatch_module.job_for(next_pending) or (
+                "sync_range",
+                (str(next_pending.id),),
+            )
+            await lifecycle_module.enqueue_task(
+                session, arq_redis, next_pending, job[0], *job[1]
+            )
             log.info(
                 "next_sibling_enqueued",
                 next_task_id=str(next_pending.id),
@@ -3011,11 +2924,8 @@ async def _check_parent_completion(
             description="Post-sync entity resolution",
         )
         session.add(dedup_task)
-        await session.commit()
-        await arq_redis.enqueue_job(
-            "run_bulk_job",
-            str(dedup_task.id),
-            _job_id=f"bulk:{dedup_task.id}",
+        await lifecycle_module.enqueue_task(
+            session, arq_redis, dedup_task, "run_bulk_job", str(dedup_task.id)
         )
         log.info("post_sync_dedup_enqueued", task_id=str(dedup_task.id))
 
@@ -3031,11 +2941,8 @@ async def _check_parent_completion(
             description="Post-sync event artist reconciliation",
         )
         session.add(reconcile_task)
-        await session.commit()
-        await arq_redis.enqueue_job(
-            "run_bulk_job",
-            str(reconcile_task.id),
-            _job_id=f"bulk:{reconcile_task.id}",
+        await lifecycle_module.enqueue_task(
+            session, arq_redis, reconcile_task, "run_bulk_job", str(reconcile_task.id)
         )
         log.info(
             "post_sync_reconcile_enqueued",
@@ -3264,8 +3171,8 @@ async def _reenqueue_orphaned_tasks(
                 )
                 continue
 
-            dispatch = _TASK_DISPATCH.get(task.task_type)
-            if dispatch is None:
+            job = dispatch_module.job_for(task)
+            if job is None:
                 logger.warning(
                     "no_dispatch_for_task_type",
                     task_id=str(task.id),
@@ -3273,10 +3180,8 @@ async def _reenqueue_orphaned_tasks(
                 )
                 continue
 
-            job_name, args_builder = dispatch
-            args = args_builder(task)
-            await arq_redis.enqueue_job(
-                job_name, *args, _job_id=f"{job_name}:{task.id}"
+            await lifecycle_module.enqueue_task(
+                session, arq_redis, task, job[0], *job[1]
             )
             enqueued += 1
 

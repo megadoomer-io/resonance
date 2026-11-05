@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -310,3 +311,87 @@ class TestRequestCancel:
         compiled = stmt.compile()
         assert "sync_tasks.user_id" in str(compiled)
         assert user_id in compiled.params.values()
+
+
+class TestEnqueueTask:
+    """Delivery stamping: the row records the job before arq ever sees it."""
+
+    async def test_stamps_row_commits_then_enqueues(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        order: list[str] = []
+        session = AsyncMock()
+        session.commit.side_effect = lambda: order.append("commit")
+        arq_redis = AsyncMock()
+
+        async def _enqueue(*args: object, **kwargs: object) -> object:
+            order.append("enqueue")
+            assert task.arq_job_id == kwargs["_job_id"]
+            return object()
+
+        arq_redis.enqueue_job.side_effect = _enqueue
+
+        delivery = await lifecycle_module.enqueue_task(
+            session, arq_redis, task, "sync_range", str(task.id)
+        )
+
+        assert order == ["commit", "enqueue"]
+        assert task.enqueued_at is not None
+        assert task.arq_job_id == delivery.job_id
+        assert delivery.job_id.startswith(f"sync_range:{task.id}:")
+        arq_redis.enqueue_job.assert_awaited_once_with(
+            "sync_range", str(task.id), _job_id=delivery.job_id, _defer_by=None
+        )
+
+    async def test_each_delivery_gets_a_new_job_id(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        first = lifecycle_module.stamp_delivery(task, "sync_range", str(task.id))
+        second = lifecycle_module.stamp_delivery(task, "sync_range", str(task.id))
+        assert first.job_id != second.job_id
+        assert task.arq_job_id == second.job_id
+
+    async def test_assigns_id_before_flush(self) -> None:
+        task = task_models.Task(
+            task_type=types_module.TaskType.BULK_JOB,
+            status=types_module.SyncStatus.PENDING,
+        )
+        delivery = lifecycle_module.stamp_delivery(task, "run_bulk_job")
+        assert task.id is not None
+        assert delivery.job_id.startswith(f"run_bulk_job:{task.id}:")
+
+    async def test_passes_defer_by(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.DEFERRED)
+        arq_redis = AsyncMock()
+        await lifecycle_module.enqueue_task(
+            AsyncMock(),
+            arq_redis,
+            task,
+            "sync_range",
+            str(task.id),
+            defer_by=datetime.timedelta(seconds=30),
+        )
+        assert arq_redis.enqueue_job.call_args.kwargs["_defer_by"] == (
+            datetime.timedelta(seconds=30)
+        )
+
+    async def test_enqueue_failure_after_commit_leaves_row_stamped(self) -> None:
+        """Redis down at submit: the row stays stamped so the reaper re-delivers."""
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        session = AsyncMock()
+        arq_redis = AsyncMock()
+        arq_redis.enqueue_job.side_effect = ConnectionError("redis down")
+
+        await lifecycle_module.enqueue_task(
+            session, arq_redis, task, "sync_range", str(task.id)
+        )
+
+        session.commit.assert_awaited_once()
+        assert task.enqueued_at is not None
+        assert task.arq_job_id is not None
+
+    async def test_no_redis_still_stamps(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        delivered = await lifecycle_module.deliver(
+            None, lifecycle_module.stamp_delivery(task, "sync_range")
+        )
+        assert delivered is False
+        assert task.arq_job_id is not None

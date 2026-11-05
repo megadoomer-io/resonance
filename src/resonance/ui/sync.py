@@ -16,6 +16,7 @@ import sqlalchemy.orm as sa_orm
 import resonance.dependencies as deps_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 import resonance.ui.common as common
 
@@ -166,16 +167,14 @@ async def songkick_sync_trigger(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.flush()
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
+    await lifecycle_module.enqueue_task(
+        db,
+        request.app.state.arq_redis,
+        task,
         "sync_calendar_feed",
         str(connection.id),
         str(task.id),
-        _job_id=f"sync_calendar_feed:{task.id}",
     )
-    await db.commit()
 
     return fastapi.responses.HTMLResponse("")
 

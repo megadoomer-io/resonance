@@ -123,12 +123,8 @@ async def trigger_sync(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.commit()
-
-    # Enqueue arq job for background processing
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "plan_sync", str(task.id), _job_id=f"plan_sync:{task.id}"
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "plan_sync", str(task.id)
     )
 
     return {"status": "started", "sync_task_id": str(task.id)}
@@ -266,6 +262,7 @@ async def trigger_sync_by_connection(
 
     # 4. Create task
     task = task_models.Task(
+        id=uuid.uuid4(),
         user_id=user_id,
         service_connection_id=connection.id,
         task_type=(
@@ -276,21 +273,15 @@ async def trigger_sync_by_connection(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.flush()
 
     # 5. Enqueue — plan_sync takes (task_id,), others take (connection_id, task_id)
-    arq_redis = request.app.state.arq_redis
     if config.sync_function == "plan_sync":
         args: tuple[str, ...] = (str(task.id),)
     else:
         args = (str(connection.id), str(task.id))
-    await arq_redis.enqueue_job(
-        config.sync_function,
-        *args,
-        _job_id=f"{config.sync_function}:{task.id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, config.sync_function, *args
     )
-
-    await db.commit()
     return {"status": "started", "task_id": str(task.id)}
 
 
