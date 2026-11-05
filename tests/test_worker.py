@@ -667,6 +667,43 @@ class TestPlanSync:
         # Should not have committed (no task found)
         session.commit.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_redelivery_for_parent_with_children_does_not_replan(self) -> None:
+        """A re-delivered plan_sync for a RUNNING parent with children is a no-op."""
+        task = task_module.Task(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            service_connection_id=uuid.uuid4(),
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        session = AsyncMock()
+        task_result = MagicMock()
+        task_result.scalar_one_or_none.return_value = task
+        children_count = MagicMock()
+        children_count.scalar_one.return_value = 3
+        session.execute.side_effect = [task_result, children_count]
+
+        strategy = AsyncMock(spec=sync_base.SyncStrategy)
+        arq_redis = AsyncMock()
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "strategies": {types_module.ServiceType.SPOTIFY: strategy},
+            "connector_registry": MagicMock(),
+            "redis": arq_redis,
+        }
+
+        with patch.object(worker_module, "logger") as log:
+            log.bind.return_value = log
+            await worker_module.plan_sync(ctx, str(task.id))
+
+        strategy.plan.assert_not_called()
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        arq_redis.enqueue_job.assert_not_called()
+        assert task.status == types_module.SyncStatus.RUNNING
+        log.info.assert_any_call("plan_sync_skipped_has_children", children=3)
+
 
 # ---------------------------------------------------------------------------
 # sync_range tests
@@ -730,11 +767,15 @@ class TestPlanSyncStrategyDispatch:
         task_result = MagicMock()
         task_result.scalar_one_or_none.return_value = task
 
-        # 2. Load connection
+        # 2. No existing children (not a re-delivery)
+        no_children = MagicMock()
+        no_children.scalar_one.return_value = 0
+
+        # 3. Load connection
         conn_result = MagicMock()
         conn_result.scalar_one.return_value = connection
 
-        session.execute.side_effect = [task_result, conn_result]
+        session.execute.side_effect = [task_result, no_children, conn_result]
 
         # Strategy returns empty plan
         mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
@@ -782,11 +823,15 @@ class TestPlanSyncStrategyDispatch:
         task_result = MagicMock()
         task_result.scalar_one_or_none.return_value = task
 
-        # 2. Load connection
+        # 2. No existing children (not a re-delivery)
+        no_children = MagicMock()
+        no_children.scalar_one.return_value = 0
+
+        # 3. Load connection
         conn_result = MagicMock()
         conn_result.scalar_one.return_value = connection
 
-        session.execute.side_effect = [task_result, conn_result]
+        session.execute.side_effect = [task_result, no_children, conn_result]
 
         ctx: dict[str, Any] = {
             "session_factory": _mock_session_factory(session),

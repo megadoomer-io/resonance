@@ -202,6 +202,13 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 log.info("plan_sync_cancelled")
                 return
 
+            # A re-delivery after planning would create duplicate children; the
+            # entry guard misses it because the parent is RUNNING, not terminal.
+            existing_children = await _child_count(session, task.id)
+            if existing_children > 0:
+                log.info("plan_sync_skipped_has_children", children=existing_children)
+                return
+
             task.status = types_module.SyncStatus.RUNNING
             task.started_at = datetime.datetime.now(datetime.UTC)
             await session.commit()
@@ -3044,6 +3051,15 @@ async def _skip_duplicate_child_delivery(
     return True
 
 
+async def _child_count(session: sa_async.AsyncSession, parent_id: uuid.UUID) -> int:
+    """Number of child tasks (any status) under a parent."""
+    result = await session.execute(
+        sa.select(sa.func.count()).where(task_module.Task.parent_id == parent_id)
+    )
+    count: int = result.scalar_one()
+    return count
+
+
 async def _load_task(
     session: sa_async.AsyncSession, sync_task_id: str
 ) -> task_module.Task | None:
@@ -3215,24 +3231,22 @@ async def _reenqueue_orphaned_tasks(
 
         enqueued = 0
         for task in all_tasks:
-            if task.task_type in (
-                types_module.TaskType.SYNC_JOB,
-                types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-            ):
-                # Skip parent tasks that already have children — re-planning
-                # would create duplicate child tasks.
-                children_count_result = await session.execute(
-                    sa.select(sa.func.count()).where(
-                        task_module.Task.parent_id == task.id,
-                    )
+            # Skip parent tasks that already have children; re-planning would
+            # create duplicate child tasks.
+            if (
+                task.task_type
+                in (
+                    types_module.TaskType.SYNC_JOB,
+                    types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
                 )
-                if children_count_result.scalar_one() > 0:
-                    logger.info(
-                        "skipped_parent_with_children",
-                        task_id=str(task.id),
-                        task_type=task.task_type.value,
-                    )
-                    continue
+                and await _child_count(session, task.id) > 0
+            ):
+                logger.info(
+                    "skipped_parent_with_children",
+                    task_id=str(task.id),
+                    task_type=task.task_type.value,
+                )
+                continue
 
             dispatch = _TASK_DISPATCH.get(task.task_type)
             if dispatch is None:
