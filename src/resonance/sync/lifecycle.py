@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import enum
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
@@ -12,6 +14,8 @@ import resonance.models.task as task_models
 import resonance.types as types_module
 
 if TYPE_CHECKING:
+    import uuid
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -140,6 +144,69 @@ async def cancel_active_children(
             count=count,
         )
     return count
+
+
+class CancelOutcome(enum.StrEnum):
+    """Result of a cancel request."""
+
+    CANCELLED = "cancelled"
+    ALREADY_TERMINAL = "already_terminal"
+    NOT_FOUND = "not_found"
+
+
+@dataclasses.dataclass(frozen=True)
+class CancelResult:
+    """Outcome of ``request_cancel`` plus the task (when found)."""
+
+    outcome: CancelOutcome
+    task: task_models.Task | None = None
+    children_cancelled: int = 0
+
+
+async def request_cancel(
+    session: AsyncSession,
+    task_id: uuid.UUID,
+    user_id: uuid.UUID,
+    reason: str = "Cancelled by user",
+) -> CancelResult:
+    """Cancel a user's task and its non-terminal children, then commit.
+
+    Shared by the API and UI cancel routes. Only the owning user's tasks are
+    visible; another user's task reads as not found.
+
+    Args:
+        session: Active database session.
+        task_id: The task to cancel.
+        user_id: The requesting user (ownership scope).
+        reason: Stored in ``error_message`` on the cancelled task.
+
+    Returns:
+        A ``CancelResult``: CANCELLED, ALREADY_TERMINAL (task untouched), or
+        NOT_FOUND.
+    """
+    result = await session.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        return CancelResult(CancelOutcome.NOT_FOUND)
+    if is_terminal(task):
+        return CancelResult(CancelOutcome.ALREADY_TERMINAL, task=task)
+
+    await cancel_task(session, task, reason)
+    children_cancelled = await cancel_active_children(session, task.id)
+    await session.commit()
+    logger.info(
+        "task_cancelled",
+        task_id=str(task.id),
+        children_cancelled=children_cancelled,
+    )
+    return CancelResult(
+        CancelOutcome.CANCELLED, task=task, children_cancelled=children_cancelled
+    )
 
 
 async def _check_parent_completion(

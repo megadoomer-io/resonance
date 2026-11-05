@@ -246,6 +246,72 @@ class TestCancelActiveChildren:
             assert f"'{status.name}'" not in compiled
 
 
+class TestRequestCancel:
+    """Tests for request_cancel, the shared API/UI cancel logic."""
+
+    async def test_not_found(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = _scalar_result(None)
+
+        result = await lifecycle_module.request_cancel(
+            session, uuid.uuid4(), uuid.uuid4()
+        )
+
+        assert result.outcome == lifecycle_module.CancelOutcome.NOT_FOUND
+        assert result.task is None
+        session.commit.assert_not_called()
+
+    async def test_already_terminal_is_untouched(self) -> None:
+        for status in types_module.TERMINAL_STATUSES:
+            task = _make_task(status=status)
+            session = AsyncMock()
+            session.execute.return_value = _scalar_result(task)
+
+            result = await lifecycle_module.request_cancel(
+                session, task.id, task.user_id
+            )
+
+            assert result.outcome == lifecycle_module.CancelOutcome.ALREADY_TERMINAL
+            assert result.task is task
+            assert task.status == status
+            session.commit.assert_not_called()
+
+    async def test_cancels_active_task_and_children(self) -> None:
+        for status in types_module.ACTIVE_STATUSES:
+            task = _make_task(status=status)
+            child = _make_task(
+                parent_id=task.id, status=types_module.SyncStatus.PENDING
+            )
+            session = AsyncMock()
+            session.execute.side_effect = [
+                _scalar_result(task),
+                _scalars_result([child]),
+            ]
+
+            result = await lifecycle_module.request_cancel(
+                session, task.id, task.user_id
+            )
+
+            assert result.outcome == lifecycle_module.CancelOutcome.CANCELLED
+            assert result.children_cancelled == 1
+            assert task.status == types_module.SyncStatus.CANCELLED
+            assert task.error_message == "Cancelled by user"
+            assert child.status == types_module.SyncStatus.CANCELLED
+            session.commit.assert_awaited_once()
+
+    async def test_scopes_lookup_to_user(self) -> None:
+        session = AsyncMock()
+        session.execute.return_value = _scalar_result(None)
+        user_id = uuid.uuid4()
+
+        await lifecycle_module.request_cancel(session, uuid.uuid4(), user_id)
+
+        stmt = session.execute.call_args.args[0]
+        compiled = stmt.compile()
+        assert "sync_tasks.user_id" in str(compiled)
+        assert user_id in compiled.params.values()
+
+
 # ---------------------------------------------------------------------------
 # _check_parent_completion tests
 # ---------------------------------------------------------------------------
