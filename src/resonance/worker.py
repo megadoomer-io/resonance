@@ -80,6 +80,16 @@ import resonance.types as types_module
 
 logger = structlog.get_logger()
 
+
+def _defer_job_id(function: str, task_id: uuid.UUID) -> str:
+    """Return a fresh arq job id for an in-job deferral re-enqueue.
+
+    arq silently drops ``enqueue_job`` while a job with the same id (or its
+    result key) exists, which is always true for the running job's own id.
+    """
+    return f"{function}:{task_id}:{uuid.uuid4().hex}"
+
+
 # ---------------------------------------------------------------------------
 # Orphan recovery dispatch map
 # ---------------------------------------------------------------------------
@@ -402,7 +412,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await arq_redis_defer.enqueue_job(
                     "sync_range",
                     str(task.id),
-                    _job_id=f"sync_range:{task.id}",
+                    _job_id=_defer_job_id("sync_range", task.id),
                     _defer_by=datetime.timedelta(seconds=defer.retry_after),
                 )
                 log.info(
@@ -1237,7 +1247,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 await arq_redis_defer.enqueue_job(
                     "discover_tracks_for_artist",
                     str(task.id),
-                    _job_id=f"discover_tracks_for_artist:{task.id}",
+                    _job_id=_defer_job_id("discover_tracks_for_artist", task.id),
                     _defer_by=datetime.timedelta(seconds=exc.retry_after),
                 )
                 log.info(
