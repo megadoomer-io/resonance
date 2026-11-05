@@ -148,6 +148,7 @@ uv run resonance-api stats                      # Database statistics
 uv run resonance-api sync <service> [--full]    # Trigger a sync
 uv run resonance-api dedup <type> [--no-wait]   # Dedup: events|artists|tracks|all
 uv run resonance-api task <task_id>             # Check bulk task status
+uv run resonance-api tasks health [--json]      # Reaper liveness, queue backlog, running tasks
 uv run resonance-api cancel <task_id>           # Cancel a task + unfinished children
 uv run resonance-api track <query>              # Search tracks by title
 uv run resonance-api taste genres [--limit N]   # Top genres across the library

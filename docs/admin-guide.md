@@ -173,6 +173,23 @@ uv run resonance-api cancel <task_id>
 
 Marks a pending, deferred or running task `cancelled` and cancels its unfinished children (`POST /api/v1/sync/cancel/{task_id}`, scoped to the caller's own tasks). A task that already finished returns HTTP 400. A running task's arq job is aborted and the task stays `cancelled` even if its run reaches the end before the abort lands; work it already did is kept (an export's tracks already added stay on Spotify).
 
+#### `tasks health` -- Task Queue Health
+
+```bash
+uv run resonance-api tasks health
+uv run resonance-api tasks health --json   # raw GET /api/v1/admin/tasks/health
+```
+
+Admin only. Prints one aligned `Label: value` line per item:
+
+- **Reaper last tick**: when the reaper cron last ran (UTC) and how long ago. `STALE` means it hasn't run for more than twice its one-minute interval, so lost tasks aren't being re-delivered (check the worker). "Reaper has never run" means no tick has been recorded.
+- **Oldest pending**: age, type and id of the oldest PENDING or DEFERRED task, or "No pending tasks".
+- **Counts**: tasks in every status, zeros included.
+- **Running**: each RUNNING task with its age and progress, or "No running tasks".
+- **Reaper decisions**: recent re-deliveries and skips (newest first), or "No reaper decisions yet". Rows whose arq job is still queued are not recorded.
+
+A non-admin token prints "Admin role required". The command always exits 0, so it is safe in scripts that only want the report.
+
 #### `track` -- Search Tracks
 
 ```bash
