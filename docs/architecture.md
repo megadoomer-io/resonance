@@ -533,6 +533,9 @@ logged; the last tick and recent decisions are kept in Redis
 Recovery is type-agnostic: `sync/dispatch.TASK_DISPATCH` maps each task type
 to its arq job name and arguments.
 
+The API server does not touch task status on startup; the worker is the only
+recovery owner.
+
 Accepted gap: if two deliveries of one task are both RUNNING (a stalled but
 alive worker), the task runs twice. The entry guard covers only rows that are
 already terminal.
