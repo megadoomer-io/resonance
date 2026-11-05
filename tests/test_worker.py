@@ -1651,15 +1651,19 @@ class TestReenqueueOrphanedTasks:
     async def test_reenqueues_pending_sync_job(
         self, task_db: TaskDB, fake_arq: _FakeArq
     ) -> None:
-        """A legacy (unstamped) PENDING SYNC_JOB is delivered as plan_sync."""
+        """A legacy (unstamped) PENDING SYNC_JOB is delivered under its old id.
+
+        arq may still hold the pre-tracking ``plan_sync:<id>`` job; reusing the
+        id lets arq drop the duplicate instead of running it twice.
+        """
         task = await task_db.add(task_type=types_module.TaskType.SYNC_JOB)
 
         await worker_module._reenqueue_orphaned_tasks(task_db.factory, fake_arq)
 
         assert _enqueued_jobs(fake_arq) == [("plan_sync", str(task.id))]
+        assert fake_arq.enqueued[0][1]["_job_id"] == f"plan_sync:{task.id}"
         row = await task_db.get(task.id)
-        assert row.arq_job_id is not None
-        assert row.arq_job_id.startswith(f"plan_sync:{task.id}:")
+        assert row.arq_job_id == f"plan_sync:{task.id}"
         assert row.enqueued_at is not None
 
     async def test_reenqueues_pending_time_range(

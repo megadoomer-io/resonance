@@ -10,6 +10,7 @@ from typing import Any
 import arq.jobs as arq_jobs
 import pytest
 
+import resonance.models.task as task_models
 import resonance.sync.reaper as reaper_module
 import resonance.types as types_module
 from tests.conftest import TaskDB, minutes_ago
@@ -321,3 +322,37 @@ class TestReaperState:
             job_id="j",
         )
         assert json.loads(decision.to_json())["at"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestSiblingAdvance:
+    """Advancing a sequential pipeline never re-delivers a stamped sibling."""
+
+    async def test_stamped_pending_sibling_is_not_advanced_again(
+        self, task_db: TaskDB, fake_arq: _FakeArq
+    ) -> None:
+        import structlog
+
+        import resonance.worker as worker_module
+
+        parent = await task_db.add(
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+        )
+        done = await task_db.add(
+            parent_id=parent.id, status=types_module.SyncStatus.COMPLETED
+        )
+        await task_db.add(
+            parent_id=parent.id, enqueued_at=minutes_ago(1), arq_job_id="queued"
+        )
+        unstarted = await task_db.add(parent_id=parent.id)
+
+        async with task_db.factory() as session:
+            row = await session.get(task_models.Task, done.id)
+            assert row is not None
+            await worker_module._check_parent_completion(
+                session, row, fake_arq, structlog.get_logger()
+            )
+
+        assert [args for args, _ in fake_arq.enqueued] == [
+            ("sync_range", str(unstarted.id))
+        ]

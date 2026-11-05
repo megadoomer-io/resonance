@@ -579,3 +579,44 @@ class TestCancelSurvivesInFlightRun:
         assert (await task_db.get(task.id)).status == (
             types_module.SyncStatus.CANCELLED
         )
+
+
+class TestCancelRunningChild:
+    """An aborted child never reaches its sibling advance; cancel re-delivers it."""
+
+    async def test_running_child_is_redelivered_to_advance_parent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parent_id = uuid.uuid4()
+        child = _make_task(parent_id=parent_id, status=types_module.SyncStatus.RUNNING)
+        child.arq_job_id = "sync_range:c:1"
+        session = AsyncMock()
+        session.execute.side_effect = [_scalar_result(child), _scalars_result([])]
+        monkeypatch.setattr(lifecycle_module, "abort_job", AsyncMock(return_value=True))
+        arq_redis = AsyncMock()
+
+        await lifecycle_module.request_cancel(
+            session, child.id, child.user_id, arq_redis=arq_redis
+        )
+
+        arq_redis.enqueue_job.assert_awaited_once()
+        call = arq_redis.enqueue_job.call_args
+        assert call.args == ("sync_range", str(child.id))
+        assert call.kwargs["_job_id"].startswith(f"sync_range:{child.id}:")
+        assert child.status == types_module.SyncStatus.CANCELLED
+
+    async def test_pending_child_is_not_redelivered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        child = _make_task(
+            parent_id=uuid.uuid4(), status=types_module.SyncStatus.PENDING
+        )
+        session = AsyncMock()
+        session.execute.side_effect = [_scalar_result(child), _scalars_result([])]
+        arq_redis = AsyncMock()
+
+        await lifecycle_module.request_cancel(
+            session, child.id, child.user_id, arq_redis=arq_redis
+        )
+
+        arq_redis.enqueue_job.assert_not_awaited()

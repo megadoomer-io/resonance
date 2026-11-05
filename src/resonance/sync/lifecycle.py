@@ -14,6 +14,7 @@ import sqlalchemy as sa
 import structlog
 
 import resonance.models.task as task_models
+import resonance.sync.dispatch as dispatch_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -109,9 +110,10 @@ async def enqueue_task(
     job_name: str,
     *args: object,
     defer_by: datetime.timedelta | None = None,
+    job_id: str | None = None,
 ) -> Delivery:
     """Stamp a delivery on *task*, commit the session, then enqueue the job."""
-    delivery = stamp_delivery(task, job_name, *args, defer_by=defer_by)
+    delivery = stamp_delivery(task, job_name, *args, defer_by=defer_by, job_id=job_id)
     await session.commit()
     await deliver(arq_redis, delivery)
     return delivery
@@ -329,9 +331,29 @@ async def request_cancel(
             if row.arq_job_id is not None
         )
     )
+    if was_running and task.parent_id is not None:
+        await _redeliver_to_advance_parent(session, arq_redis, task)
     return CancelResult(
         CancelOutcome.CANCELLED, task=task, children_cancelled=len(children)
     )
+
+
+async def _redeliver_to_advance_parent(
+    session: AsyncSession,
+    arq_redis: arq.ArqRedis | None,
+    task: task_models.Task,
+) -> None:
+    """Hand an aborted child back to arq so its pipeline doesn't stall.
+
+    An aborted job exits with CancelledError and never reaches its sibling
+    advance. A fresh delivery hits the entry guard, which sees CANCELLED and
+    advances the next sibling or settles the parent.
+    """
+    job = dispatch_module.job_for(task)
+    if job is None:
+        return
+    await enqueue_task(session, arq_redis, task, job[0], *job[1])
+    logger.info("cancelled_child_redelivered_to_advance", task_id=str(task.id))
 
 
 # arq's abort waits for the job's result unless bounded; a cancel request must

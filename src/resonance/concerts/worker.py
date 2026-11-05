@@ -316,6 +316,7 @@ async def sync_concert_archives(
                         c
                         for c in existing_children
                         if c.status == types_module.SyncStatus.PENDING
+                        and c.enqueued_at is None
                     ),
                     None,
                 )
@@ -462,6 +463,8 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
             if lifecycle_module.is_duplicate_delivery(
                 task, "sync_concert_archives_chunk"
             ):
+                if task.status == types_module.SyncStatus.CANCELLED:
+                    await _check_parent_completion(session, task, arq_redis, log)
                 return
 
             if await lifecycle_module.is_cancelled(session, task):

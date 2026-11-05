@@ -2771,11 +2771,14 @@ async def _check_parent_completion(
 
     if pending_count > 0:
         # Enqueue the next PENDING sibling (sequential execution)
+        # A stamped sibling already has a delivery (or the reaper owns it);
+        # delivering it again would run it twice.
         next_pending_result = await session.execute(
             sa.select(task_module.Task)
             .where(
                 task_module.Task.parent_id == task.parent_id,
                 task_module.Task.status == types_module.SyncStatus.PENDING,
+                task_module.Task.enqueued_at.is_(None),
             )
             .order_by(task_module.Task.created_at)
             .limit(1)
@@ -3199,7 +3202,12 @@ async def _deliver_unless_planned(
         )
         await session.commit()
         return
-    await lifecycle_module.enqueue_task(session, arq_redis, task, job[0], *job[1])
+    # A row from before delivery tracking may still have its old fixed-id job
+    # in arq (SIGTERM retry); reusing that id lets arq drop the duplicate.
+    legacy_id = f"{job[0]}:{task.id}" if task.arq_job_id is None else None
+    await lifecycle_module.enqueue_task(
+        session, arq_redis, task, job[0], *job[1], job_id=legacy_id
+    )
 
 
 async def reap_tasks(ctx: dict[str, Any]) -> None:
