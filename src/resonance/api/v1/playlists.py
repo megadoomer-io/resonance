@@ -449,6 +449,7 @@ async def export_playlist(
 
     for connection in connections:
         task = task_models.Task(
+            id=uuid.uuid4(),
             user_id=user_id,
             service_connection_id=connection.id,
             task_type=types_module.TaskType.PLAYLIST_EXPORT,

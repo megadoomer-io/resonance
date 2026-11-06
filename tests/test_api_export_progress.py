@@ -240,6 +240,38 @@ class TestExportSubmitLocking:
         assert len(delivered) == 2
         assert all(t.enqueued_at is not None for t in db.added)
 
+    async def test_job_arg_and_response_carry_the_task_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+        import resonance.sync.lifecycle as lifecycle_module
+
+        delivered: list[Any] = []
+
+        async def fake_deliver(arq_redis: Any, delivery: Any) -> bool:
+            delivered.append(delivery)
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "deliver", fake_deliver)
+        user_id = uuid.uuid4()
+        playlist = playlist_models.Playlist(id=uuid.uuid4(), user_id=user_id, name="P")
+        conn = user_models.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            service_type=types_module.ServiceType.SPOTIFY,
+        )
+        db = _ExportDB(playlist, [conn])
+        resp = await _call(
+            db,  # type: ignore[arg-type]
+            user_id,
+            "POST",
+            f"/api/v1/playlists/{playlist.id}/export",
+        )
+        task = db.added[0]
+        assert delivered[0].args == (str(task.id),)
+        assert resp.json()["tasks"][0]["task_id"] == str(task.id)
+
 
 class TestExportRetryEndpoint:
     async def test_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
