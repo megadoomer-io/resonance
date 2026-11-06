@@ -42,7 +42,7 @@
                         hx-delete="/api/v1/account/connections/{{ conn.id }}"
                         hx-swap="none"
                         hx-confirm="Disconnect {{ conn.service_type.value | service_name }}?"
-                        hx-on::after-request="location.reload()"
+                        data-after-request-reload
                         class="outline secondary btn-sm"
                     ><i data-lucide="unlink" class="icon-inline"></i> Disconnect</button>
                 </td>
@@ -99,7 +99,7 @@
     <button
         hx-post="/api/v1/admin/test/connect"
         hx-swap="none"
-        hx-on::after-request="location.reload()"
+        data-after-request-reload
         class="outline contrast"
     >Connect Test Service</button>
     {% endif %}

@@ -15,6 +15,7 @@ import resonance.connectors.registry as registry_module
 import resonance.middleware.session as session_middleware
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -629,3 +630,99 @@ class TestSyncStatus:
         assert len(data) == 1
         assert data[0]["description"] == "Fetching your saved tracks"
         assert data[0]["deferred_until"] == deferred_time.isoformat()
+
+
+class FakeScalarsWrapper:
+    """Fake result whose .scalars().all() returns the given values."""
+
+    def __init__(self, values: list[Any]) -> None:
+        self._values = values
+
+    def scalars(self) -> FakeScalarsResult:
+        return FakeScalarsResult(self._values)
+
+
+class TestSyncCancel:
+    """Tests for POST /api/v1/sync/cancel/{task_id}."""
+
+    async def _post_cancel(
+        self, user_id: uuid.UUID, db_session: FakeAsyncSession, task_id: uuid.UUID
+    ) -> httpx.Response:
+        application, _redis = _create_authenticated_app(user_id, db_session=db_session)
+        cookie = _make_session_cookie(_make_settings().session_secret_key)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", cookies={"session_id": cookie}
+        ) as c:
+            return await c.post(f"/api/v1/sync/cancel/{task_id}")
+
+    async def test_unauthenticated_returns_401(self, client: httpx.AsyncClient) -> None:
+        response = await client.post(f"/api/v1/sync/cancel/{uuid.uuid4()}")
+        assert response.status_code == 401
+
+    async def test_not_found_returns_404(self) -> None:
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeScalarResult(None)])
+
+        response = await self._post_cancel(uuid.uuid4(), db_session, uuid.uuid4())
+
+        assert response.status_code == 404
+
+    async def test_terminal_task_returns_400(self) -> None:
+        user_id = uuid.uuid4()
+        task = task_models.Task(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.CANCELLED,
+        )
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results([FakeScalarResult(task)])
+
+        response = await self._post_cancel(user_id, db_session, task.id)
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Job is already finished"
+
+    async def test_running_task_is_cancelled_with_children(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RUNNING is cancelled and its recorded arq job is aborted."""
+        aborted: list[str] = []
+
+        async def _abort(_redis: object, _task_id: uuid.UUID, job_id: str) -> bool:
+            aborted.append(job_id)
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "abort_job", _abort)
+        user_id = uuid.uuid4()
+        task = task_models.Task(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            task_type=types_module.TaskType.SYNC_JOB,
+            status=types_module.SyncStatus.RUNNING,
+            arq_job_id="plan_sync:running:1",
+        )
+        child = task_models.Task(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            parent_id=task.id,
+            task_type=types_module.TaskType.TIME_RANGE,
+            status=types_module.SyncStatus.DEFERRED,
+        )
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeScalarResult(task), FakeScalarsWrapper([child])]
+        )
+
+        response = await self._post_cancel(user_id, db_session, task.id)
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "cancelled",
+            "job_id": str(task.id),
+            "children_cancelled": 1,
+        }
+        assert task.status == types_module.SyncStatus.CANCELLED
+        assert child.status == types_module.SyncStatus.CANCELLED
+        assert aborted == ["plan_sync:running:1"]

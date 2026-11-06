@@ -1,14 +1,22 @@
 {% extends "base.html" %}
+{% from "components/export.html" import export_row %}
 {% block title %}Exporting Playlist — resonance{% endblock %}
 {% block content %}
 <h2>{{ playlist_name }}</h2>
 
-<div id="export-status"
-     hx-get="/partials/export-status/{{ playlist_id }}?task_ids={{ task_ids }}"
-     hx-trigger="every 3s"
-     hx-swap="outerHTML">
-    <article aria-busy="true">
-        Exporting to Spotify...
-    </article>
-</div>
+<article>
+    <p id="export-headline"><strong>{{ headline }}</strong></p>
+    {% if not not_found %}
+    <div class="export-rows" aria-live="polite" aria-atomic="false">
+        {% for row in rows %}
+        {{ export_row(row, playlist_id) }}
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if not all_terminal and not not_found %}
+    {% include "partials/export_poller.html" %}
+    {% endif %}
+</article>
+
+<p><a href="/playlists/{{ playlist_id }}" class="text-muted">&larr; Back to playlist</a></p>
 {% endblock %}
