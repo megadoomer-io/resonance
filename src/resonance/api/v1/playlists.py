@@ -478,3 +478,102 @@ async def export_playlist(
     await db.commit()
 
     return {"tasks": tasks_info, "already_running": already_running}
+
+
+def format_export_status(task: task_models.Task) -> dict[str, Any]:
+    """One export task's status and progress, as the API and CLI see it."""
+    result = task.result or {}
+    return {
+        "task_id": str(task.id),
+        "connection_id": str((task.params or {}).get("connection_id")),
+        "status": task.status.value,
+        "error": task.error_message,
+        "exported": result.get("exported"),
+        "spotify_playlist_id": result.get("spotify_playlist_id"),
+        **playlist_export_module.export_progress(task).as_dict(),
+    }
+
+
+@router.get(
+    "/{playlist_id}/exports",
+    summary="List in-flight exports",
+    description="Status and progress of a playlist's pending or running exports.",
+)
+async def list_exports(
+    playlist_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> list[dict[str, Any]]:
+    """List the playlist's active export tasks with their progress."""
+    tasks = await playlist_export_module.in_progress_export_tasks(
+        db, user_id, playlist_id
+    )
+    return [format_export_status(t) for t in tasks]
+
+
+@router.get(
+    "/{playlist_id}/exports/{task_id}",
+    summary="Get export status",
+    description=(
+        "Status of one export: phase, progress_current/progress_total within the"
+        " phase, matched/skipped counts, last_progress_at, and whether it is"
+        " stalled (running with no progress for a while) or retryable."
+    ),
+)
+async def get_export(
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    """Return one of the user's export tasks for this playlist."""
+    result = await db.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if task is None or not playlist_export_module.is_playlist_export(task, playlist_id):
+        raise fastapi.HTTPException(status_code=404, detail="Export not found")
+    return format_export_status(task)
+
+
+@router.post(
+    "/{playlist_id}/exports/{task_id}/retry",
+    summary="Retry an export",
+    description=(
+        "Start a fresh export for a failed or stalled export's connection. A"
+        " stalled export is cancelled first. 409 if the export is neither failed"
+        " nor stalled, or if that connection already has an export in flight."
+    ),
+    status_code=202,
+)
+async def retry_export(
+    request: fastapi.Request,
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    """Retry a failed or stalled export."""
+    outcome = await playlist_export_module.retry_export(
+        db,
+        getattr(request.app.state, "arq_redis", None),
+        user_id,
+        playlist_id,
+        task_id,
+    )
+    status = playlist_export_module.RetryStatus
+    if outcome.status == status.NOT_FOUND:
+        raise fastapi.HTTPException(status_code=404, detail="Export not found")
+    if outcome.status == status.NOT_RETRYABLE:
+        raise fastapi.HTTPException(
+            status_code=409, detail="Export is not failed or stalled"
+        )
+    if outcome.status == status.ALREADY_RUNNING:
+        raise fastapi.HTTPException(
+            status_code=409, detail="An export for this connection is in progress"
+        )
+    assert outcome.task is not None
+    return {"status": "started", "task_id": str(outcome.task.id)}

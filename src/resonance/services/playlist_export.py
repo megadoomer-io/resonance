@@ -24,11 +24,13 @@ from typing import TYPE_CHECKING
 import sqlalchemy as sa
 
 import resonance.models.task as task_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import arq
     import sqlalchemy.ext.asyncio as sa_async
 
 
@@ -282,3 +284,95 @@ class ExportProgressRecorder:
         """Commit any recorded steps that haven't been committed yet."""
         if self._pending:
             await self._commit()
+
+
+class RetryStatus(enum.StrEnum):
+    """Outcome of ``retry_export``."""
+
+    STARTED = "started"
+    ALREADY_RUNNING = "already_running"
+    NOT_RETRYABLE = "not_retryable"
+    NOT_FOUND = "not_found"
+
+
+@dataclasses.dataclass(frozen=True)
+class RetryOutcome:
+    """``retry_export`` result: the new task, or the one that blocked a retry."""
+
+    status: RetryStatus
+    task: task_models.Task | None = None
+
+
+def is_playlist_export(task: task_models.Task, playlist_id: uuid.UUID) -> bool:
+    """Whether ``task`` is an export of this playlist."""
+    return task.task_type == types_module.TaskType.PLAYLIST_EXPORT and str(
+        (task.params or {}).get("playlist_id")
+    ) == str(playlist_id)
+
+
+async def retry_export(
+    db: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis | None,
+    user_id: uuid.UUID,
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> RetryOutcome:
+    """Start a fresh export for the connection of a failed or stalled export.
+
+    A stalled export is cancelled first (aborting its job), so the old and new
+    tasks never run together. The new task reuses the old one's params; the
+    worker replaces tracks on the Spotify playlist a prior attempt recorded,
+    so a retry never creates a second playlist.
+
+    Args:
+        db: Active database session.
+        arq_redis: arq pool used to abort and deliver jobs.
+        user_id: The requesting user (ownership scope).
+        playlist_id: The playlist the export belongs to.
+        task_id: The failed or stalled export task.
+
+    Returns:
+        STARTED with the new task; ALREADY_RUNNING with the in-flight export
+        for that connection; NOT_RETRYABLE with the task when it is neither
+        failed nor stalled; or NOT_FOUND.
+    """
+    result = await db.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
+    )
+    old = result.scalar_one_or_none()
+    if old is None or not is_playlist_export(old, playlist_id):
+        return RetryOutcome(RetryStatus.NOT_FOUND)
+    if not export_progress(old).retryable:
+        return RetryOutcome(RetryStatus.NOT_RETRYABLE, old)
+
+    if old.status == types_module.SyncStatus.RUNNING:
+        await lifecycle_module.request_cancel(
+            db,
+            old.id,
+            user_id,
+            reason="Stalled; retried by user",
+            arq_redis=arq_redis,
+        )
+
+    connection_id = str((old.params or {}).get("connection_id"))
+    for active in await in_progress_export_tasks(db, user_id, playlist_id):
+        if str((active.params or {}).get("connection_id")) == connection_id:
+            return RetryOutcome(RetryStatus.ALREADY_RUNNING, active)
+
+    new = task_models.Task(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        service_connection_id=old.service_connection_id,
+        task_type=types_module.TaskType.PLAYLIST_EXPORT,
+        status=types_module.SyncStatus.PENDING,
+        params=dict(old.params or {}),
+        description=old.description,
+    )
+    db.add(new)
+    delivery = lifecycle_module.stamp_delivery(new, "export_playlist", str(new.id))
+    await db.commit()
+    await lifecycle_module.deliver(arq_redis, delivery)
+    return RetryOutcome(RetryStatus.STARTED, new)

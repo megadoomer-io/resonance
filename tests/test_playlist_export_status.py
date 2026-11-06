@@ -266,6 +266,11 @@ class TestExportProgressRecorder:
         await recorder.flush()
         session.commit.assert_not_awaited()
 
+    async def test_forced_commit_on_advance(self) -> None:
+        _task, session, recorder = self._recorder(batch=100)
+        await recorder.advance(current=1, commit=True)
+        session.commit.assert_awaited_once()
+
     async def test_counts_carry_across_phases(self) -> None:
         task, _session, recorder = self._recorder()
         await recorder.advance(current=4, matched=3, skipped=1)
@@ -274,3 +279,139 @@ class TestExportProgressRecorder:
         )
         assert task.result["matched"] == 3
         assert task.result["skipped"] == 1
+
+
+class _RetrySession:
+    """Serves a fixed task to the retry helper's lookups and records writes."""
+
+    def __init__(self, task: task_models.Task | None, active: list[Any]) -> None:
+        self.task = task
+        self.active = active
+        self.added: list[Any] = []
+        self.commits = 0
+
+    async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> Any:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = self.task
+        scalars = MagicMock()
+        scalars.all.return_value = self.active
+        result.scalars.return_value = scalars
+        return result
+
+    def add(self, obj: Any) -> None:
+        self.added.append(obj)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+def _hours_ago(hours: int) -> str:
+    then = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+    return then.isoformat()
+
+
+async def _retry(session: _RetrySession, task: task_models.Task, **kw: Any) -> Any:
+    assert task.user_id is not None
+    return await playlist_export_module.retry_export(
+        session,  # type: ignore[arg-type]
+        None,
+        kw.get("user_id", task.user_id),
+        kw.get("playlist_id", uuid.UUID(str(task.params["playlist_id"]))),
+        kw.get("task_id", task.id),
+    )
+
+
+class TestRetryExport:
+    @pytest.fixture
+    def delivered(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        sent: list[Any] = []
+
+        async def fake_deliver(arq_redis: Any, delivery: Any) -> bool:
+            sent.append(delivery)
+            return True
+
+        monkeypatch.setattr(
+            playlist_export_module.lifecycle_module, "deliver", fake_deliver
+        )
+        return sent
+
+    @staticmethod
+    def _failed() -> task_models.Task:
+        task = _task_with(
+            {"phase": "adding_tracks"}, status=types_module.SyncStatus.FAILED
+        )
+        task.description = "Export to Spotify (me)"
+        task.service_connection_id = uuid.uuid4()
+        return task
+
+    async def test_failed_export_gets_a_fresh_task(self, delivered: list[Any]) -> None:
+        old = self._failed()
+        session = _RetrySession(old, active=[])
+        outcome = await _retry(session, old)
+        assert outcome.status == playlist_export_module.RetryStatus.STARTED
+        new = outcome.task
+        assert new is not None
+        assert new is not old
+        assert new.params == old.params
+        assert new.description == old.description
+        assert new.service_connection_id == old.service_connection_id
+        assert new.status == types_module.SyncStatus.PENDING
+        assert session.added == [new]
+        assert session.commits == 1
+        assert [d.task_id for d in delivered] == [new.id]
+
+    async def test_stalled_running_export_is_cancelled_then_retried(
+        self, monkeypatch: pytest.MonkeyPatch, delivered: list[Any]
+    ) -> None:
+        old = _task_with({"progress_updated_at": _hours_ago(1)})
+        cancelled: list[uuid.UUID] = []
+
+        async def fake_cancel(
+            session: Any, task_id: uuid.UUID, user_id: Any, **kw: Any
+        ) -> Any:
+            cancelled.append(task_id)
+            old.status = types_module.SyncStatus.CANCELLED
+            return MagicMock()
+
+        monkeypatch.setattr(
+            playlist_export_module.lifecycle_module, "request_cancel", fake_cancel
+        )
+        outcome = await _retry(_RetrySession(old, active=[]), old)
+        assert cancelled == [old.id]
+        assert outcome.status == playlist_export_module.RetryStatus.STARTED
+        assert len(delivered) == 1
+
+    async def test_healthy_running_export_is_not_retryable(
+        self, delivered: list[Any]
+    ) -> None:
+        old = _task_with({"progress_updated_at": _hours_ago(0)})
+        session = _RetrySession(old, active=[old])
+        outcome = await _retry(session, old)
+        assert outcome.status == playlist_export_module.RetryStatus.NOT_RETRYABLE
+        assert outcome.task is old
+        assert session.added == []
+        assert delivered == []
+
+    async def test_other_playlist_or_missing_task_is_not_found(self) -> None:
+        old = self._failed()
+        outcome = await _retry(
+            _RetrySession(old, active=[]), old, playlist_id=uuid.uuid4()
+        )
+        assert outcome.status == playlist_export_module.RetryStatus.NOT_FOUND
+        outcome = await _retry(_RetrySession(None, active=[]), old)
+        assert outcome.status == playlist_export_module.RetryStatus.NOT_FOUND
+
+    async def test_connection_already_exporting_returns_that_task(
+        self, delivered: list[Any]
+    ) -> None:
+        old = self._failed()
+        other = _export_task(
+            playlist_id=uuid.UUID(str(old.params["playlist_id"])),
+            connection_id=uuid.UUID(str(old.params["connection_id"])),
+        )
+        session = _RetrySession(old, active=[other])
+        outcome = await _retry(session, old)
+        assert outcome.status == playlist_export_module.RetryStatus.ALREADY_RUNNING
+        assert outcome.task is other
+        assert session.added == []
+        assert delivered == []
