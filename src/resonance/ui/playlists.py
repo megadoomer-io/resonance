@@ -808,6 +808,7 @@ async def export_playlist_submit(
     # Don't start a second export for a connection that's already exporting --
     # re-clicking while one is in flight is what produces duplicate Spotify
     # playlists. Land the user on the in-progress page for those instead.
+    await playlist_export_module.lock_playlist(db, user_id, playlist_id)
     active_tasks = await playlist_export_module.in_progress_export_tasks(
         db, user_id, playlist_id
     )
@@ -859,10 +860,7 @@ def _parse_task_ids(task_ids: str) -> list[uuid.UUID]:
     ]
 
 
-def _is_playlist_export(task: task_models.Task, playlist_id: uuid.UUID) -> bool:
-    return task.task_type == types_module.TaskType.PLAYLIST_EXPORT and str(
-        (task.params or {}).get("playlist_id")
-    ) == str(playlist_id)
+_is_playlist_export = playlist_export_module.is_playlist_export
 
 
 async def _load_export_task(
@@ -901,6 +899,7 @@ async def _load_export_tasks(
 def _export_row(task: task_models.Task) -> dict[str, object]:
     """Template view of one per-connection export task."""
     result = task.result or {}
+    progress = playlist_export_module.export_progress(task)
     return {
         "task_id": str(task.id),
         "description": task.description or "Export",
@@ -910,6 +909,7 @@ def _export_row(task: task_models.Task) -> dict[str, object]:
         "spotify_playlist_id": result.get("spotify_playlist_id"),
         "error": task.error_message,
         "cancellable": task.status in _CANCELLABLE_EXPORT_STATUSES,
+        "progress": progress,
     }
 
 
@@ -980,15 +980,53 @@ async def export_status_partial(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     playlist_id: uuid.UUID,
     task_ids: str = "",
+    from_: Annotated[str, fastapi.Query(alias="from")] = "",
 ) -> fastapi.responses.HTMLResponse:
-    """Polled partial: the poller itself plus out-of-band row status updates."""
+    """Polled partial: the poller itself plus out-of-band row status updates.
+
+    Polled from the playlist detail page (``from=detail``), the last poll
+    reloads the page once every export is terminal, so the Export button and
+    sync summary come back.
+    """
     tasks = await _load_export_tasks(
         db, user_id, playlist_id, _parse_task_ids(task_ids)
     )
-    return common.templates.TemplateResponse(
-        request,
-        "partials/playlist_export_status.html",
-        _export_context(playlist_id, task_ids, tasks),
+    ctx = _export_context(playlist_id, task_ids, tasks)
+    from_detail = from_ == "detail"
+    ctx["from_detail"] = from_detail
+    response = common.templates.TemplateResponse(
+        request, "partials/playlist_export_status.html", ctx
+    )
+    if from_detail and ctx["all_terminal"]:
+        response.headers["HX-Refresh"] = "true"
+    return response
+
+
+@router.post("/playlists/{playlist_id}/export/{task_id}/retry", response_model=None)
+async def retry_export(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> fastapi.responses.RedirectResponse:
+    """Retry a failed or stalled export, then show its progress.
+
+    When the retry is refused (the connection already has an export in flight,
+    or this one recovered), land on that export's progress instead.
+    """
+    outcome = await playlist_export_module.retry_export(
+        db,
+        getattr(request.app.state, "arq_redis", None),
+        user_id,
+        playlist_id,
+        task_id,
+    )
+    if outcome.task is None:
+        raise fastapi.HTTPException(status_code=404, detail="Export not found")
+    return fastapi.responses.RedirectResponse(
+        url=f"/playlists/exporting/{playlist_id}?task_ids={outcome.task.id}",
+        status_code=303,
     )
 
 
@@ -1151,6 +1189,7 @@ async def playlist_detail_page(
         export_in_progress=bool(active_export_tasks),
         export_task_ids=export_task_ids,
         export_rows=export_rows,
+        export_headline=_export_headline(active_export_tasks),
         page=page,
         has_next=has_next,
         has_prev=page > 1,

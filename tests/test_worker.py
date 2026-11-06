@@ -3492,6 +3492,388 @@ class TestExportPlaylist:
         assert "exported_at" in link
 
 
+class TestExportPlaylistProgress:
+    """export_playlist reports phase, N of M and matched/skipped (#173)."""
+
+    @staticmethod
+    def _track(
+        spotify_id: str | None = None, mbid: str | None = None, title: str = "Song"
+    ) -> MagicMock:
+        import resonance.models.playlist as playlist_models
+
+        links: dict[str, Any] = {}
+        if spotify_id:
+            links["spotify"] = spotify_id
+        if mbid:
+            links["musicbrainz"] = {"id": mbid}
+        track = MagicMock()
+        track.title = title
+        track.service_links = links
+        track.artist = MagicMock()
+        track.artist.name = "Artist"
+        pt = MagicMock(spec=playlist_models.PlaylistTrack)
+        pt.track = track
+        pt.track_id = uuid.uuid4()
+        pt.spotify_synced_at = None
+        return pt
+
+    @staticmethod
+    def _run_setup(
+        pts: list[MagicMock],
+        *,
+        existing_export: bool = False,
+        lb: Any = None,
+    ) -> tuple[Any, ...]:
+        import resonance.connectors.spotify as spotify_module
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+
+        connection_id = uuid.uuid4()
+        task = task_module.Task(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            parent_id=None,
+            task_type=types_module.TaskType.PLAYLIST_EXPORT,
+            status=types_module.SyncStatus.PENDING,
+            params={
+                "playlist_id": str(uuid.uuid4()),
+                "connection_id": str(connection_id),
+            },
+        )
+        playlist = MagicMock(spec=playlist_models.Playlist)
+        playlist.name = "PL"
+        playlist.description = ""
+        playlist.service_links = (
+            {
+                "spotify": {
+                    str(connection_id): {"playlist_id": "sp_old", "exported_at": "x"}
+                }
+            }
+            if existing_export
+            else None
+        )
+        playlist.tracks = pts
+
+        connection = MagicMock(spec=user_models.ServiceConnection)
+        connection.encrypted_access_token = b"enc"
+        connection.encrypted_refresh_token = None
+        connection.token_expires_at = None
+
+        session = AsyncMock()
+        results = []
+        for value in (task, playlist, connection):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = value
+            results.append(res)
+        session.execute.side_effect = results
+
+        snapshots: list[dict[str, Any]] = []
+
+        async def _commit() -> None:
+            result = dict(task.result or {})
+            snapshots.append(
+                {
+                    "status": task.status,
+                    "phase": result.get("phase"),
+                    "current": task.progress_current,
+                    "total": task.progress_total,
+                    "matched": result.get("matched"),
+                    "skipped": result.get("skipped"),
+                    "at": result.get("progress_updated_at"),
+                }
+            )
+
+        session.commit.side_effect = _commit
+
+        # What a fresh column read sees in the database, as opposed to the
+        # in-memory objects: "status" (None = whatever the task row holds) and
+        # "service_links" (None = the playlist's committed links).
+        db_state: dict[str, Any] = {"status": None, "service_links": None}
+        session.db_state = db_state
+        session.scalar_reads = []
+
+        async def _scalar(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            column = stmt.column_descriptions[0]["name"]
+            session.scalar_reads.append(column)
+            if column == "status":
+                return db_state["status"] or task.status
+            if column == "service_links":
+                stored = db_state["service_links"]
+                return stored if stored is not None else playlist.service_links
+            raise AssertionError(f"unexpected scalar read: {column}")
+
+        session.scalar.side_effect = _scalar
+
+        spotify_conn = MagicMock(spec=spotify_module.SpotifyConnector)
+        spotify_conn.create_playlist = AsyncMock(return_value="sp_new")
+        spotify_conn.add_tracks_to_playlist = AsyncMock()
+        spotify_conn.replace_playlist_tracks = AsyncMock()
+        spotify_conn.search_track = AsyncMock(return_value=None)
+        session.playlist = playlist
+
+        registry = MagicMock()
+
+        def _get_base(stype: Any) -> Any:
+            if stype == types_module.ServiceType.SPOTIFY:
+                return spotify_conn
+            if stype == types_module.ServiceType.LISTENBRAINZ:
+                return lb
+            return None
+
+        registry.get_base_connector.side_effect = _get_base
+        ctx: dict[str, Any] = {
+            "session_factory": _mock_session_factory(session),
+            "connector_registry": registry,
+            "settings": MagicMock(),
+            "redis": AsyncMock(),
+        }
+        return task, session, spotify_conn, ctx, snapshots, str(connection_id)
+
+    @staticmethod
+    async def _run(ctx: dict[str, Any], task: Any) -> None:
+        with patch.object(
+            worker_module.crypto_module, "decrypt_token", lambda *_a, **_k: "access"
+        ):
+            await worker_module.export_playlist(ctx, str(task.id))
+
+    @pytest.mark.asyncio
+    async def test_reports_each_phase_with_counts(self) -> None:
+        import resonance.connectors.listenbrainz as listenbrainz_module
+
+        cached = self._track(spotify_id="cached1")
+        via_mb = self._track(mbid="mb-1")
+        via_search = self._track(title="Findable")
+        missing = self._track(title="Nowhere")
+
+        lb = MagicMock(spec=listenbrainz_module.ListenBrainzConnector)
+        lb.get_recording_spotify_id = AsyncMock(return_value="mbhit")
+
+        task, _session, spotify_conn, ctx, snapshots, _ = self._run_setup(
+            [cached, via_mb, via_search, missing], lb=lb
+        )
+
+        async def _search(_token: str, title: str, _artist: str) -> str | None:
+            return "searchhit" if title == "Findable" else None
+
+        spotify_conn.search_track.side_effect = _search
+
+        await self._run(ctx, task)
+
+        phases = [s["phase"] for s in snapshots if s["phase"]]
+        ordered = list(dict.fromkeys(phases))
+        assert ordered == [
+            "matching_mbid",
+            "matching_search",
+            "creating_playlist",
+            "adding_tracks",
+        ]
+        mbid_end = [s for s in snapshots if s["phase"] == "matching_mbid"][-1]
+        assert (mbid_end["current"], mbid_end["total"]) == (1, 1)
+        assert mbid_end["matched"] == 2  # cached + MusicBrainz hit
+        search_end = [s for s in snapshots if s["phase"] == "matching_search"][-1]
+        assert (search_end["current"], search_end["total"]) == (2, 2)
+        assert (search_end["matched"], search_end["skipped"]) == (3, 1)
+        adding_end = [s for s in snapshots if s["phase"] == "adding_tracks"][-1]
+        assert (adding_end["current"], adding_end["total"]) == (3, 3)
+        assert all(s["at"] for s in snapshots if s["phase"])
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        assert task.result["exported"] == 3
+        assert task.result["matched"] == 3
+        assert task.result["skipped"] == 1
+        assert task.progress_current == task.progress_total == 3
+
+    @pytest.mark.asyncio
+    async def test_skips_phases_with_no_work(self) -> None:
+        task, _session, spotify_conn, ctx, snapshots, _ = self._run_setup(
+            [self._track(spotify_id="a"), self._track(spotify_id="b")]
+        )
+        await self._run(ctx, task)
+        phases = {s["phase"] for s in snapshots if s["phase"]}
+        assert phases == {"creating_playlist", "adding_tracks"}
+        spotify_conn.search_track.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_progress_is_committed_in_batches(self) -> None:
+        import resonance.services.playlist_export as playlist_export_module
+
+        n = 60
+        pts = [self._track(title=f"t{i}") for i in range(n)]
+        task, _session, spotify_conn, ctx, snapshots, _ = self._run_setup(pts)
+        spotify_conn.search_track.return_value = "hit"
+
+        await self._run(ctx, task)
+
+        search_commits = [s for s in snapshots if s["phase"] == "matching_search"]
+        batch = playlist_export_module.PROGRESS_BATCH_SIZE
+        # Phase entry, one per full batch, and a final flush; never one per track.
+        assert len(search_commits) <= 2 + n // batch
+        assert search_commits[-1]["current"] == n
+
+    @pytest.mark.asyncio
+    async def test_adding_tracks_reports_each_chunk(self) -> None:
+        pts = [self._track(spotify_id=f"id{i}") for i in range(150)]
+        task, _session, spotify_conn, ctx, snapshots, _ = self._run_setup(pts)
+
+        await self._run(ctx, task)
+
+        adding = [s["current"] for s in snapshots if s["phase"] == "adding_tracks"]
+        assert adding[0] == 0
+        assert 100 in adding
+        assert adding[-1] == 150
+        assert spotify_conn.add_tracks_to_playlist.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_update_replaces_first_chunk_then_appends(self) -> None:
+        pts = [self._track(spotify_id=f"id{i}") for i in range(150)]
+        task, _session, spotify_conn, ctx, snapshots, _ = self._run_setup(
+            pts, existing_export=True
+        )
+
+        await self._run(ctx, task)
+
+        spotify_conn.create_playlist.assert_not_called()
+        spotify_conn.replace_playlist_tracks.assert_awaited_once()
+        assert spotify_conn.replace_playlist_tracks.await_args is not None
+        replaced = spotify_conn.replace_playlist_tracks.await_args.args[2]
+        assert len(replaced) == 100
+        spotify_conn.add_tracks_to_playlist.assert_awaited_once()
+        assert spotify_conn.add_tracks_to_playlist.await_args is not None
+        appended = spotify_conn.add_tracks_to_playlist.await_args.args[2]
+        assert len(appended) == 50
+        assert "creating_playlist" not in {s["phase"] for s in snapshots}
+        adding = [s["current"] for s in snapshots if s["phase"] == "adding_tracks"]
+        assert adding[-1] == 150
+        assert task.status == types_module.SyncStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_failure_keeps_phase_for_the_ui(self) -> None:
+        task, session, spotify_conn, ctx, _snapshots, _ = self._run_setup(
+            [self._track(spotify_id="a")]
+        )
+        spotify_conn.add_tracks_to_playlist.side_effect = RuntimeError("boom")
+        reload = MagicMock()
+        reload.scalar_one_or_none.return_value = task
+        session.execute.side_effect = [*session.execute.side_effect, reload]
+
+        await self._run(ctx, task)
+
+        assert task.status == types_module.SyncStatus.FAILED
+        assert task.result["phase"] == "adding_tracks"
+
+    @pytest.mark.asyncio
+    async def test_zero_matches_fails_without_touching_spotify(self) -> None:
+        """No match on an update fails the task and leaves the Spotify
+        playlist alone, as it did before progress reporting."""
+        task, _session, spotify_conn, ctx, _snapshots, _ = self._run_setup(
+            [self._track(title="Nowhere")], existing_export=True
+        )
+        await self._run(ctx, task)
+        assert task.status == types_module.SyncStatus.FAILED
+        assert task.error_message == "No tracks could be matched to Spotify"
+        spotify_conn.replace_playlist_tracks.assert_not_called()
+        spotify_conn.add_tracks_to_playlist.assert_not_called()
+
+    @staticmethod
+    def _cancel_when(session: Any, mock: AsyncMock, *, after_calls: int) -> None:
+        """Mark the stored row CANCELLED (another session's cancel) once
+        ``mock`` has been awaited ``after_calls`` times."""
+        original = mock.side_effect
+        calls = {"n": 0}
+
+        async def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] >= after_calls:
+                session.db_state["status"] = types_module.SyncStatus.CANCELLED
+            if callable(original):
+                return await original(*args, **kwargs)
+            return mock.return_value
+
+        mock.side_effect = _wrapped
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_create_skips_playlist_creation(self) -> None:
+        task, session, spotify_conn, ctx, _snapshots, _ = self._run_setup(
+            [self._track(title="Findable")]
+        )
+        # The stall-retry cancel lands while this run is still matching.
+        self._cancel_when(session, spotify_conn.search_track, after_calls=1)
+        spotify_conn.search_track.return_value = "hit"
+
+        await self._run(ctx, task)
+
+        spotify_conn.create_playlist.assert_not_called()
+        spotify_conn.add_tracks_to_playlist.assert_not_called()
+        assert session.playlist.service_links is None
+        assert "spotify_playlist_id" not in task.result
+
+    @pytest.mark.asyncio
+    async def test_cancel_mid_push_stops_before_next_chunk_and_final_writes(
+        self,
+    ) -> None:
+        pts = [self._track(spotify_id=f"id{i}") for i in range(250)]
+        task, session, spotify_conn, ctx, _snapshots, conn_id = self._run_setup(pts)
+        self._cancel_when(session, spotify_conn.add_tracks_to_playlist, after_calls=1)
+
+        await self._run(ctx, task)
+
+        assert spotify_conn.add_tracks_to_playlist.await_count == 1
+        # The playlist id recorded at creation stays; no exported_at, no
+        # per-track sync stamps, no completion payload.
+        link = session.playlist.service_links["spotify"][conn_id]
+        assert link == {"playlist_id": "sp_new"}
+        assert all(pt.spotify_synced_at is None for pt in pts)
+        assert "spotify_playlist_id" not in task.result
+        assert task.status != types_module.SyncStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_push_skips_final_writes(self) -> None:
+        pts = [self._track(spotify_id="a")]
+        task, session, spotify_conn, ctx, _snapshots, conn_id = self._run_setup(
+            pts, existing_export=True
+        )
+        self._cancel_when(session, spotify_conn.replace_playlist_tracks, after_calls=1)
+
+        await self._run(ctx, task)
+
+        assert session.playlist.service_links["spotify"][conn_id]["exported_at"] == "x"
+        assert pts[0].spotify_synced_at is None
+        assert task.status != types_module.SyncStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_status_checks_use_fresh_reads(self) -> None:
+        task, session, _spotify_conn, ctx, _snapshots, _ = self._run_setup(
+            [self._track(spotify_id=f"id{i}") for i in range(150)]
+        )
+        await self._run(ctx, task)
+        # Before create, before each of two chunks, before the final writes.
+        assert session.scalar_reads.count("status") >= 4
+        assert task.status == types_module.SyncStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_link_write_merges_into_fresh_service_links(self) -> None:
+        """Another connection's export committed while this one ran; the final
+        write keeps it instead of writing back a stale whole dict."""
+        task, session, _spotify_conn, ctx, _snapshots, conn_id = self._run_setup(
+            [self._track(spotify_id="a")], existing_export=True
+        )
+        session.db_state["service_links"] = {
+            "spotify": {
+                conn_id: {"playlist_id": "sp_old", "exported_at": "x"},
+                "other-conn": {"playlist_id": "sp_other", "exported_at": "y"},
+            },
+            "note": "kept",
+        }
+
+        await self._run(ctx, task)
+
+        links = session.playlist.service_links
+        assert links["note"] == "kept"
+        assert links["spotify"]["other-conn"]["playlist_id"] == "sp_other"
+        assert links["spotify"][conn_id]["playlist_id"] == "sp_old"
+        assert links["spotify"][conn_id]["exported_at"] != "x"
+
+
 class TestArtistsNeedingDiscovery:
     """Gating for which target artists get an external catalog fetch (#110)."""
 

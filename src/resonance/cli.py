@@ -94,6 +94,9 @@ Commands:
   enrich <profile-id> ...      Add related artists to a profile's pool
   playlists                    List playlists
   playlist <id> [diff <other>] Show or diff a playlist
+  playlist exports <id>        A playlist's in-flight exports with progress
+  playlist export <id> <task>  One export's phase, progress and stall state
+  playlist export-retry <id> <task>  Retry a failed or stalled export
   watermark <service> [--reset] View or reset sync watermark (direct DB)
   import concert_archives      Import Concert Archives CSV
   api [METHOD] PATH [opts]     Raw API request (like gh api)
@@ -1124,9 +1127,65 @@ def _cmd_playlists() -> None:
         print()
 
 
+_PLAYLIST_EXPORT_USAGE = """\
+Usage:
+  resonance-api playlist exports <playlist-id>                In-flight exports
+  resonance-api playlist export <playlist-id> <task-id>       One export's progress
+  resonance-api playlist export-retry <playlist-id> <task-id> Retry failed/stalled
+"""
+
+
+def _print_export(e: dict[str, Any], playlist_id: str) -> None:
+    status = str(e.get("status", "")).upper()
+    if e.get("stalled"):
+        status += " (STALLED)"
+    print(f"{e['task_id']}  {status}  connection {e.get('connection_id')}")
+    if e.get("phase_label"):
+        total = e.get("progress_total")
+        counter = f" {e.get('progress_current', 0)}/{total}" if total else ""
+        print(f"  {e['phase_label']}{counter}")
+    if e.get("matched") or e.get("skipped"):
+        print(f"  {e.get('matched', 0)} matched, {e.get('skipped', 0)} not found")
+    if e.get("last_progress_at"):
+        print(f"  last progress: {_utc_label(e['last_progress_at'])}")
+    if e.get("error"):
+        print(f"  error: {e['error']}")
+    if e.get("retryable"):
+        print(
+            f"  retry: resonance-api playlist export-retry {playlist_id} {e['task_id']}"
+        )
+
+
+def _cmd_playlist_exports(args: list[str]) -> None:
+    sub = args[0]
+    needed = 2 if sub == "exports" else 3
+    if len(args) < needed:
+        print(_PLAYLIST_EXPORT_USAGE)
+        sys.exit(1)
+    playlist_id = args[1]
+    base = f"/api/v1/playlists/{playlist_id}/exports"
+    if sub == "exports":
+        exports = _api_request("GET", base).json()
+        if not exports:
+            print("No exports in progress.")
+        for e in exports:
+            _print_export(e, playlist_id)
+        return
+    task_id = args[2]
+    if sub == "export":
+        _print_export(_api_request("GET", f"{base}/{task_id}").json(), playlist_id)
+        return
+    data = _api_request("POST", f"{base}/{task_id}/retry").json()
+    print(f"Retry started: {data['task_id']}")
+
+
 def _cmd_playlist() -> None:
+    if len(sys.argv) >= 3 and sys.argv[2] in ("exports", "export", "export-retry"):
+        _cmd_playlist_exports(sys.argv[2:])
+        return
     if len(sys.argv) < 3:
         print("Usage: resonance-api playlist <id> [diff <other-id>]")
+        print(_PLAYLIST_EXPORT_USAGE)
         sys.exit(1)
 
     # Check for diff subcommand

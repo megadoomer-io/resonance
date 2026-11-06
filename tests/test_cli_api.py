@@ -994,3 +994,97 @@ class TestHumanizeSeconds:
     )
     def test_humanize(self, seconds: object, expected: str) -> None:
         assert cli_module._humanize_seconds(seconds) == expected
+
+
+_EXPORT = {
+    "task_id": "t1",
+    "connection_id": "c1",
+    "status": "running",
+    "error": None,
+    "exported": None,
+    "spotify_playlist_id": None,
+    "phase": "matching_search",
+    "phase_label": "Matching tracks (Spotify search)",
+    "progress_current": 12,
+    "progress_total": 40,
+    "matched": 30,
+    "skipped": 2,
+    "last_progress_at": "2026-11-06T12:00:00+00:00",
+    "stalled": False,
+    "retryable": False,
+}
+
+
+@pytest.mark.usefixtures("_mock_config")
+class TestPlaylistExportCommands:
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, body: Any, *args: str
+    ) -> list[tuple[str, str]]:
+        calls: list[tuple[str, str]] = []
+
+        def fake_req(method: str, path: str, **_: Any) -> httpx.Response:
+            calls.append((method, path))
+            return _fake_response(json_body=body)
+
+        monkeypatch.setattr(cli_module, "_api_request", fake_req)
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "playlist", *args])
+        cli_module._cmd_playlist()
+        return calls
+
+    def test_exports_lists_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = self._run(monkeypatch, [_EXPORT], "exports", "p1")
+        assert calls == [("GET", "/api/v1/playlists/p1/exports")]
+        out = capsys.readouterr().out
+        assert "t1" in out
+        assert "Matching tracks (Spotify search) 12/40" in out
+        assert "30 matched, 2 not found" in out
+
+    def test_exports_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(monkeypatch, [], "exports", "p1")
+        assert "No exports in progress." in capsys.readouterr().out
+
+    def test_export_shows_one(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        stalled = {**_EXPORT, "stalled": True, "retryable": True}
+        calls = self._run(monkeypatch, stalled, "export", "p1", "t1")
+        assert calls == [("GET", "/api/v1/playlists/p1/exports/t1")]
+        out = capsys.readouterr().out
+        assert "STALLED" in out
+        assert "retry: resonance-api playlist export-retry p1 t1" in out
+
+    def test_export_failed_shows_error(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        failed = {**_EXPORT, "status": "failed", "error": "boom", "retryable": True}
+        self._run(monkeypatch, failed, "export", "p1", "t1")
+        out = capsys.readouterr().out
+        assert "error: boom" in out
+
+    def test_export_retry_posts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = self._run(
+            monkeypatch,
+            {"status": "started", "task_id": "t2"},
+            "export-retry",
+            "p1",
+            "t1",
+        )
+        assert calls == [("POST", "/api/v1/playlists/p1/exports/t1/retry")]
+        assert "Retry started: t2" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "args", [("exports",), ("export", "p1"), ("export-retry", "p1")]
+    )
+    def test_missing_args_print_usage(
+        self, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "playlist", *args])
+        with pytest.raises(SystemExit) as exc:
+            cli_module._cmd_playlist()
+        assert exc.value.code == 1
