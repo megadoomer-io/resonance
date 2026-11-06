@@ -1,5 +1,5 @@
 <div id="export-poller"
-     hx-get="/partials/export-status/{{ playlist_id }}?task_ids={{ task_ids }}"
+     hx-get="/partials/export-status/{{ playlist_id }}?task_ids={{ task_ids }}{% if from_detail %}&amp;from=detail{% endif %}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
      hidden></div>

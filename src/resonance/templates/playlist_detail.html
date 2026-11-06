@@ -93,7 +93,7 @@
         {% endfor %}
     </div>
     <a href="/playlists/exporting/{{ playlist.id }}?task_ids={{ export_task_ids }}" style="font-size: 0.8rem;">View progress</a>
-    {% with playlist_id=playlist.id, task_ids=export_task_ids %}
+    {% with playlist_id=playlist.id, task_ids=export_task_ids, from_detail=true %}
     {% include "partials/export_poller.html" %}
     {% endwith %}
     {% else %}

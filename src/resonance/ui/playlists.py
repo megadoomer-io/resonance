@@ -980,16 +980,26 @@ async def export_status_partial(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
     playlist_id: uuid.UUID,
     task_ids: str = "",
+    from_: Annotated[str, fastapi.Query(alias="from")] = "",
 ) -> fastapi.responses.HTMLResponse:
-    """Polled partial: the poller itself plus out-of-band row status updates."""
+    """Polled partial: the poller itself plus out-of-band row status updates.
+
+    Polled from the playlist detail page (``from=detail``), the last poll
+    reloads the page once every export is terminal, so the Export button and
+    sync summary come back.
+    """
     tasks = await _load_export_tasks(
         db, user_id, playlist_id, _parse_task_ids(task_ids)
     )
-    return common.templates.TemplateResponse(
-        request,
-        "partials/playlist_export_status.html",
-        _export_context(playlist_id, task_ids, tasks),
+    ctx = _export_context(playlist_id, task_ids, tasks)
+    from_detail = from_ == "detail"
+    ctx["from_detail"] = from_detail
+    response = common.templates.TemplateResponse(
+        request, "partials/playlist_export_status.html", ctx
     )
+    if from_detail and ctx["all_terminal"]:
+        response.headers["HX-Refresh"] = "true"
+    return response
 
 
 @router.post("/playlists/{playlist_id}/export/{task_id}/retry", response_model=None)

@@ -1064,10 +1064,58 @@ class TestExportProgressRendering:
         assert "12 of 40" in html
         assert _keeps_polling(html)
         assert (
-            f'hx-get="/partials/export-status/{playlist.id}?task_ids={running.id}"'
-            in html
+            f'hx-get="/partials/export-status/{playlist.id}'
+            f'?task_ids={running.id}&amp;from=detail"' in html
         )
         assert 'id="export-headline"' in html
+
+    async def test_detail_poll_refreshes_page_once_all_terminal(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        done = _export_task(
+            user_id,
+            playlist_id,
+            status=types_module.SyncStatus.COMPLETED,
+            result={"exported": 3},
+        )
+        resp = await _get(
+            TaskStoreSession([done]),
+            user_id,
+            _poll_url(playlist_id, done) + "&from=detail",
+        )
+        assert resp.headers.get("HX-Refresh") == "true"
+        assert not _keeps_polling(resp.text)
+
+    async def test_detail_poll_keeps_polling_without_refresh_while_active(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        running = _progressing(user_id, playlist_id)
+        resp = await _get(
+            TaskStoreSession([running]),
+            user_id,
+            _poll_url(playlist_id, running) + "&from=detail",
+        )
+        assert "HX-Refresh" not in resp.headers
+        # The re-rendered poller keeps the detail tag.
+        assert "&amp;from=detail" in resp.text
+
+    async def test_exporting_page_poll_never_refreshes(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        done = _export_task(
+            user_id,
+            playlist_id,
+            status=types_module.SyncStatus.COMPLETED,
+            result={"exported": 3},
+        )
+        resp = await _get(
+            TaskStoreSession([done]), user_id, _poll_url(playlist_id, done)
+        )
+        assert "HX-Refresh" not in resp.headers
+        assert "from=detail" not in resp.text
 
 
 class _SubmitSession:
