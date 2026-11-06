@@ -71,83 +71,16 @@ import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
 import resonance.sync.backfill as backfill_module
 import resonance.sync.base as sync_base
+import resonance.sync.dispatch as dispatch_module
 import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
+import resonance.sync.reaper as reaper_module
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
 import resonance.types as types_module
 
 logger = structlog.get_logger()
-
-
-def _defer_job_id(function: str, task_id: uuid.UUID) -> str:
-    """Return a fresh arq job id for an in-job deferral re-enqueue.
-
-    arq silently drops ``enqueue_job`` while a job with the same id (or its
-    result key) exists, which is always true for the running job's own id.
-    """
-    return f"{function}:{task_id}:{uuid.uuid4().hex}"
-
-
-# ---------------------------------------------------------------------------
-# Orphan recovery dispatch map
-# ---------------------------------------------------------------------------
-# Maps each TaskType to (arq_job_name, args_builder). The args_builder
-# receives a Task and returns the positional args tuple for enqueue_job.
-
-_TASK_DISPATCH: dict[
-    types_module.TaskType,
-    tuple[str, collections.abc.Callable[[task_module.Task], tuple[str, ...]]],
-] = {
-    types_module.TaskType.SYNC_JOB: ("plan_sync", lambda t: (str(t.id),)),
-    types_module.TaskType.TIME_RANGE: ("sync_range", lambda t: (str(t.id),)),
-    types_module.TaskType.CALENDAR_SYNC: (
-        "sync_calendar_feed",
-        lambda t: (str(t.service_connection_id), str(t.id)),
-    ),
-    types_module.TaskType.BULK_JOB: ("run_bulk_job", lambda t: (str(t.id),)),
-    types_module.TaskType.PLAYLIST_GENERATION: (
-        "generate_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.TRACK_DISCOVERY: (
-        "discover_tracks_for_artist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.TRACK_SCORING: (
-        "score_and_build_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.CONCERT_ARCHIVES_IMPORT: (
-        "sync_concert_archives",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.CONCERT_ARCHIVES_CHUNK: (
-        "sync_concert_archives_chunk",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.PLAYLIST_EXPORT: (
-        "export_playlist",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.MBID_BACKFILL: (
-        "backfill_mbids",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.POPULARITY_BACKFILL: (
-        "backfill_popularity",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.RELATED_ARTIST_ENRICHMENT: (
-        "enrich_related_artists",
-        lambda t: (str(t.id),),
-    ),
-    types_module.TaskType.GENRE_BACKFILL: (
-        "backfill_genres",
-        lambda t: (str(t.id),),
-    ),
-}
 
 
 class WorkerContext(typing.TypedDict):
@@ -190,14 +123,23 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("plan_sync_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "plan_sync"):
+                return
 
             # Check if this task was cancelled before we start
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
                 log.info("plan_sync_cancelled")
+                return
+
+            # A re-delivery after planning would create duplicate children; the
+            # entry guard misses it because the parent is RUNNING, not terminal.
+            existing_children = await _child_count(session, task.id)
+            if existing_children > 0:
+                log.info("plan_sync_skipped_has_children", children=existing_children)
                 return
 
             task.status = types_module.SyncStatus.RUNNING
@@ -275,28 +217,21 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
                 )
                 session.add(child)
                 children.append(child)
-            await session.commit()
 
-            # Enqueue based on concurrency policy
-            if strategy.concurrency == "parallel":
-                for child in children:
-                    await arq_redis.enqueue_job(
-                        "sync_range",
-                        str(child.id),
-                        _job_id=f"sync_range:{child.id}",
-                    )
-                    log.info("child_enqueued", child_id=str(child.id))
-            else:
-                # Sequential: enqueue only the first
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(children[0].id),
-                    _job_id=f"sync_range:{children[0].id}",
-                )
+            # Sequential: only the first child is delivered now; the rest stay
+            # unstamped until _check_parent_completion advances to them.
+            parallel = strategy.concurrency == "parallel"
+            deliveries = [
+                lifecycle_module.stamp_delivery(child, "sync_range", str(child.id))
+                for child in (children if parallel else children[:1])
+            ]
+            await session.commit()
+            for delivery in deliveries:
+                await lifecycle_module.deliver(arq_redis, delivery)
                 log.info(
                     "child_enqueued",
-                    child_id=str(children[0].id),
-                    mode="sequential",
+                    child_id=str(delivery.task_id),
+                    mode=strategy.concurrency,
                 )
 
         except Exception:
@@ -338,10 +273,14 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("sync_range_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "sync_range"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -407,13 +346,13 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 task.deferred_until = datetime.datetime.now(
                     datetime.UTC
                 ) + datetime.timedelta(seconds=defer.retry_after)
-                await session.commit()
-                arq_redis_defer = wctx["redis"]
-                await arq_redis_defer.enqueue_job(
+                await lifecycle_module.enqueue_task(
+                    session,
+                    wctx["redis"],
+                    task,
                     "sync_range",
                     str(task.id),
-                    _job_id=_defer_job_id("sync_range", task.id),
-                    _defer_by=datetime.timedelta(seconds=defer.retry_after),
+                    defer_by=datetime.timedelta(seconds=defer.retry_after),
                 )
                 log.info(
                     "sync_range_deferred",
@@ -489,10 +428,12 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("bulk_job_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "run_bulk_job"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -583,9 +524,11 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("mbid_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_mbids"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -692,9 +635,11 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("popularity_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_popularity"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -756,9 +701,11 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("genre_backfill_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "backfill_genres"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -977,10 +924,12 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("generate_playlist_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "generate_playlist"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1124,19 +1073,16 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             )
             session.add(scoring_child)
             children.append(scoring_child)
-            await session.commit()
 
-            # Enqueue the first child (sequential dispatch)
+            # Sequential dispatch: only the first child is delivered now.
             first_child = children[0]
-            dispatch = _TASK_DISPATCH.get(first_child.task_type)
-            if dispatch is not None:
-                job_name, args_builder = dispatch
-                args = args_builder(first_child)
-                await arq_redis.enqueue_job(
-                    job_name,
-                    *args,
-                    _job_id=f"{job_name}:{first_child.id}",
+            job = dispatch_module.job_for(first_child)
+            if job is not None:
+                await lifecycle_module.enqueue_task(
+                    session, arq_redis, first_child, job[0], *job[1]
                 )
+            else:
+                await session.commit()
             log.info(
                 "generate_playlist_planned",
                 discovery_tasks=len(discovery_artist_ids),
@@ -1177,10 +1123,14 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("discover_tracks_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "discover_tracks_for_artist"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -1242,13 +1192,13 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 task.deferred_until = datetime.datetime.now(
                     datetime.UTC
                 ) + datetime.timedelta(seconds=exc.retry_after)
-                await session.commit()
-                arq_redis_defer = wctx["redis"]
-                await arq_redis_defer.enqueue_job(
+                await lifecycle_module.enqueue_task(
+                    session,
+                    wctx["redis"],
+                    task,
                     "discover_tracks_for_artist",
                     str(task.id),
-                    _job_id=_defer_job_id("discover_tracks_for_artist", task.id),
-                    _defer_by=datetime.timedelta(seconds=exc.retry_after),
+                    defer_by=datetime.timedelta(seconds=exc.retry_after),
                 )
                 log.info(
                     "discover_tracks_deferred",
@@ -1761,9 +1711,11 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("enrich_related_artists_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "enrich_related_artists"):
+                return
 
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2122,10 +2074,14 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("score_and_build_task_not_found")
                 return
+            if await _skip_duplicate_child_delivery(
+                session, task, wctx["redis"], log, "score_and_build_playlist"
+            ):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2456,6 +2412,20 @@ _HTTP_ERROR_MESSAGES: dict[int, str] = {
 }
 
 
+def _set_spotify_export_link(
+    playlist: playlist_models.Playlist,
+    connection_id: str,
+    link: dict[str, object],
+) -> None:
+    """Set ``service_links["spotify"][connection_id]`` (copy-on-write for JSON)."""
+    links = dict(playlist.service_links or {})
+    current = links.get("spotify")
+    spotify_section = dict(current) if isinstance(current, dict) else {}
+    spotify_section[connection_id] = link
+    links["spotify"] = spotify_section
+    playlist.service_links = links
+
+
 def _friendly_http_error(exc: httpx.HTTPStatusError, service: str) -> str:
     status = exc.response.status_code
     template = _HTTP_ERROR_MESSAGES.get(status)
@@ -2490,10 +2460,12 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("export_playlist_task_not_found")
                 return
+            if lifecycle_module.is_duplicate_delivery(task, "export_playlist"):
+                return
 
             # Check if this task or its parent was cancelled
             if await lifecycle_module.is_cancelled(session, task):
-                await lifecycle_module.fail_task(
+                await lifecycle_module.cancel_task(
                     session, task, "Parent task was cancelled"
                 )
                 await session.commit()
@@ -2688,6 +2660,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     playlist.name,
                     playlist.description or "",
                 )
+                # Persist the id before anything else can fail, so a retry
+                # replaces tracks on this playlist instead of creating another.
+                # No exported_at yet: the page reads it as not yet synced.
+                _set_spotify_export_link(
+                    playlist, connection_id_str, {"playlist_id": spotify_playlist_id}
+                )
+                await session.commit()
                 await connector.add_tracks_to_playlist(
                     access_token, spotify_playlist_id, spotify_uris
                 )
@@ -2696,19 +2675,14 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     spotify_playlist_id=spotify_playlist_id,
                 )
 
-            # Update playlist service_links (copy-on-write)
-            updated_playlist_links = dict(playlist_links)
-            spotify_section = dict(
-                updated_playlist_links.get("spotify", {})
-                if isinstance(updated_playlist_links.get("spotify"), dict)
-                else {}
+            _set_spotify_export_link(
+                playlist,
+                connection_id_str,
+                {
+                    "playlist_id": spotify_playlist_id,
+                    "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                },
             )
-            spotify_section[connection_id_str] = {
-                "playlist_id": spotify_playlist_id,
-                "exported_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            }
-            updated_playlist_links["spotify"] = spotify_section
-            playlist.service_links = updated_playlist_links
 
             # Persist per-track Spotify sync status (#spotify-sync-visibility): the
             # push succeeded, so every matched track is now confirmed on Spotify;
@@ -2790,42 +2764,34 @@ async def _check_parent_completion(
     pending_count_result = await session.execute(
         sa.select(sa.func.count()).where(
             task_module.Task.parent_id == task.parent_id,
-            task_module.Task.status.notin_(
-                [types_module.SyncStatus.COMPLETED, types_module.SyncStatus.FAILED]
-            ),
+            task_module.Task.status.notin_(types_module.TERMINAL_STATUSES),
         )
     )
     pending_count: int = pending_count_result.scalar_one()
 
     if pending_count > 0:
         # Enqueue the next PENDING sibling (sequential execution)
+        # A stamped sibling already has a delivery (or the reaper owns it);
+        # delivering it again would run it twice.
         next_pending_result = await session.execute(
             sa.select(task_module.Task)
             .where(
                 task_module.Task.parent_id == task.parent_id,
                 task_module.Task.status == types_module.SyncStatus.PENDING,
+                task_module.Task.enqueued_at.is_(None),
             )
             .order_by(task_module.Task.created_at)
             .limit(1)
         )
         next_pending = next_pending_result.scalar_one_or_none()
         if next_pending is not None:
-            dispatch = _TASK_DISPATCH.get(next_pending.task_type)
-            if dispatch is not None:
-                job_name, args_builder = dispatch
-                args = args_builder(next_pending)
-                await arq_redis.enqueue_job(
-                    job_name,
-                    *args,
-                    _job_id=f"{job_name}:{next_pending.id}",
-                )
-            else:
-                # Fallback for unknown task types
-                await arq_redis.enqueue_job(
-                    "sync_range",
-                    str(next_pending.id),
-                    _job_id=f"sync_range:{next_pending.id}",
-                )
+            job = dispatch_module.job_for(next_pending) or (
+                "sync_range",
+                (str(next_pending.id),),
+            )
+            await lifecycle_module.enqueue_task(
+                session, arq_redis, next_pending, job[0], *job[1]
+            )
             log.info(
                 "next_sibling_enqueued",
                 next_task_id=str(next_pending.id),
@@ -2845,6 +2811,14 @@ async def _check_parent_completion(
     if parent is None:
         log.error("parent_task_not_found", parent_id=str(task.parent_id))
         return
+    if lifecycle_module.is_terminal(parent):
+        # Already settled (e.g. cancelled by the user); don't overwrite it.
+        log.info(
+            "parent_already_terminal",
+            parent_id=str(parent.id),
+            status=parent.status.value,
+        )
+        return
 
     # Check if any children failed
     failed_count_result = await session.execute(
@@ -2861,10 +2835,15 @@ async def _check_parent_completion(
     )
     children = children_result.scalars().all()
 
+    cancelled_count = sum(
+        1 for c in children if c.status == types_module.SyncStatus.CANCELLED
+    )
     base_result: dict[str, object] = {
-        "children_completed": len(children) - failed_count,
+        "children_completed": len(children) - failed_count - cancelled_count,
         "children_failed": failed_count,
     }
+    if cancelled_count:
+        base_result["children_cancelled"] = cancelled_count
 
     if parent.task_type == types_module.TaskType.PLAYLIST_GENERATION:
         total_tracks_found = 0
@@ -2915,6 +2894,9 @@ async def _check_parent_completion(
     if failed_count > 0:
         parent.status = types_module.SyncStatus.FAILED
         parent.error_message = f"{failed_count} child task(s) failed"
+    elif cancelled_count > 0:
+        parent.status = types_module.SyncStatus.CANCELLED
+        parent.error_message = f"{cancelled_count} child task(s) cancelled"
     else:
         parent.status = types_module.SyncStatus.COMPLETED
 
@@ -2946,11 +2928,8 @@ async def _check_parent_completion(
             description="Post-sync entity resolution",
         )
         session.add(dedup_task)
-        await session.commit()
-        await arq_redis.enqueue_job(
-            "run_bulk_job",
-            str(dedup_task.id),
-            _job_id=f"bulk:{dedup_task.id}",
+        await lifecycle_module.enqueue_task(
+            session, arq_redis, dedup_task, "run_bulk_job", str(dedup_task.id)
         )
         log.info("post_sync_dedup_enqueued", task_id=str(dedup_task.id))
 
@@ -2966,11 +2945,8 @@ async def _check_parent_completion(
             description="Post-sync event artist reconciliation",
         )
         session.add(reconcile_task)
-        await session.commit()
-        await arq_redis.enqueue_job(
-            "run_bulk_job",
-            str(reconcile_task.id),
-            _job_id=f"bulk:{reconcile_task.id}",
+        await lifecycle_module.enqueue_task(
+            session, arq_redis, reconcile_task, "run_bulk_job", str(reconcile_task.id)
         )
         log.info(
             "post_sync_reconcile_enqueued",
@@ -2981,6 +2957,34 @@ async def _check_parent_completion(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _skip_duplicate_child_delivery(
+    session: sa_async.AsyncSession,
+    task: task_module.Task,
+    arq_redis: arq.ArqRedis,
+    log: structlog.stdlib.BoundLogger,
+    job: str,
+) -> bool:
+    """Entry guard for child jobs that drive a sibling pipeline.
+
+    Like ``lifecycle.is_duplicate_delivery``, but a child cancelled on its own
+    still advances its parent, so sequential siblings don't stall behind it.
+    """
+    if not lifecycle_module.is_duplicate_delivery(task, job):
+        return False
+    if task.status == types_module.SyncStatus.CANCELLED:
+        await _check_parent_completion(session, task, arq_redis, log)
+    return True
+
+
+async def _child_count(session: sa_async.AsyncSession, parent_id: uuid.UUID) -> int:
+    """Number of child tasks (any status) under a parent."""
+    result = await session.execute(
+        sa.select(sa.func.count()).where(task_module.Task.parent_id == parent_id)
+    )
+    count: int = result.scalar_one()
+    return count
 
 
 async def _load_task(
@@ -3042,170 +3046,174 @@ async def _reenqueue_orphaned_tasks(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     arq_redis: arq.ArqRedis,
 ) -> None:
-    """Re-enqueue orphaned tasks on worker startup.
+    """Recover tasks whose arq delivery was lost, on worker startup.
 
-    Finds tasks stuck in PENDING, expired DEFERRED, or RUNNING status
-    (from crashes or ungraceful shutdowns) and re-enqueues them. arq jobs
-    in Redis expire after ~1 day, so if the worker was down during that
-    window the Task row remains but the arq job is gone.
+    Cleans up stale PENDING children of terminal parents, resets RUNNING rows
+    whose job arq no longer holds, delivers legacy (never-stamped) top-level
+    rows once, then runs the reaper for every stamped PENDING/DEFERRED row.
     """
     async with session_factory() as session:
         now = datetime.datetime.now(datetime.UTC)
+        parent_alias = sa_orm.aliased(task_module.Task)
+        await _fail_stale_children(session, parent_alias, now)
+        await _recover_running(session, arq_redis, parent_alias)
+        await _deliver_legacy_unstamped(session, arq_redis, now)
 
-        # Find PENDING tasks (orphaned — their arq job likely expired).
-        # Exclude children whose parent already completed or failed —
-        # those are stale leftovers, not actionable orphans.
-        parent_alias = sa.orm.aliased(task_module.Task)
-        pending_result = await session.execute(
-            sa.select(task_module.Task)
-            .outerjoin(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.PENDING,
-                sa.or_(
-                    task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
-                ),
-            )
+    await reaper_module.reap(session_factory, arq_redis)
+
+
+async def _fail_stale_children(
+    session: sa_async.AsyncSession,
+    parent_alias: type[task_module.Task],
+    now: datetime.datetime,
+) -> None:
+    stale_result = await session.execute(
+        sa.select(task_module.Task)
+        .join(parent_alias, task_module.Task.parent_id == parent_alias.id)
+        .where(
+            task_module.Task.status == types_module.SyncStatus.PENDING,
+            parent_alias.status.in_(types_module.TERMINAL_STATUSES),
         )
-        pending_tasks = list(pending_result.scalars().all())
+    )
+    stale_tasks = list(stale_result.scalars().all())
+    for task in stale_tasks:
+        task.status = types_module.SyncStatus.FAILED
+        task.error_message = "Parent task already terminal"
+        task.completed_at = now
+    if stale_tasks:
+        await session.commit()
+        logger.info("cleaned_stale_orphans", count=len(stale_tasks))
 
-        # Find DEFERRED tasks whose deferred_until has passed
-        deferred_result = await session.execute(
-            sa.select(task_module.Task).where(
-                task_module.Task.status == types_module.SyncStatus.DEFERRED,
-                sa.or_(
-                    task_module.Task.deferred_until <= now,
-                    task_module.Task.deferred_until.is_(None),
-                ),
-            )
+
+async def _recover_running(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    parent_alias: type[task_module.Task],
+) -> None:
+    """Reset RUNNING rows whose job arq no longer holds, and re-deliver them.
+
+    A job arq still holds (queued, deferred, in progress) is left alone: on
+    SIGTERM arq keeps the interrupted job queued and runs it again, so a
+    second delivery here would run the task twice. Rows from before delivery
+    tracking (no ``arq_job_id``) take the reset path.
+    """
+    running_result = await session.execute(
+        sa.select(task_module.Task)
+        .outerjoin(parent_alias, task_module.Task.parent_id == parent_alias.id)
+        .where(
+            task_module.Task.status == types_module.SyncStatus.RUNNING,
+            sa.or_(
+                task_module.Task.parent_id.is_(None),
+                parent_alias.status.notin_(types_module.TERMINAL_STATUSES),
+            ),
         )
-        deferred_tasks = list(deferred_result.scalars().all())
-
-        # Mark stale children of terminal parents as FAILED
-        stale_result = await session.execute(
-            sa.select(task_module.Task)
-            .join(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.PENDING,
-                parent_alias.status.in_(
-                    [
-                        types_module.SyncStatus.COMPLETED,
-                        types_module.SyncStatus.FAILED,
-                    ]
-                ),
-            )
-        )
-        stale_tasks = list(stale_result.scalars().all())
-        for task in stale_tasks:
-            task.status = types_module.SyncStatus.FAILED
-            task.error_message = "Parent task already terminal"
-            task.completed_at = now
-        if stale_tasks:
-            await session.commit()
-            logger.info("cleaned_stale_orphans", count=len(stale_tasks))
-
-        # Find RUNNING tasks (interrupted by crash/restart)
-        running_result = await session.execute(
-            sa.select(task_module.Task)
-            .outerjoin(
-                parent_alias,
-                task_module.Task.parent_id == parent_alias.id,
-            )
-            .where(
-                task_module.Task.status == types_module.SyncStatus.RUNNING,
-                sa.or_(
-                    task_module.Task.parent_id.is_(None),
-                    parent_alias.status.notin_(
-                        [
-                            types_module.SyncStatus.COMPLETED,
-                            types_module.SyncStatus.FAILED,
-                        ]
-                    ),
-                ),
-            )
-        )
-        running_tasks = list(running_result.scalars().all())
-
-        # Reset deferred tasks back to PENDING before re-enqueueing
-        for task in deferred_tasks:
-            task.status = types_module.SyncStatus.PENDING
-        if deferred_tasks:
-            await session.commit()
-
-        # Reset RUNNING tasks back to PENDING, with watermark resume.
-        # Preserve started_at so the UI shows continuous elapsed time.
-        for task in running_tasks:
-            task.status = types_module.SyncStatus.PENDING
-
-            # Attempt watermark-based resume for TIME_RANGE tasks
-            if task.task_type == types_module.TaskType.TIME_RANGE:
-                conn_result = await session.execute(
-                    sa.select(user_models.ServiceConnection).where(
-                        user_models.ServiceConnection.id == task.service_connection_id
-                    )
-                )
-                connection = conn_result.scalar_one_or_none()
-                if connection is not None:
-                    _apply_watermark_resume(task, connection)
-
-        if running_tasks:
-            await session.commit()
-            logger.info("reset_running_orphans", count=len(running_tasks))
-
-        all_tasks = pending_tasks + deferred_tasks + running_tasks
-        if not all_tasks:
-            return
-
-        enqueued = 0
-        for task in all_tasks:
-            if task.task_type in (
-                types_module.TaskType.SYNC_JOB,
-                types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-            ):
-                # Skip parent tasks that already have children — re-planning
-                # would create duplicate child tasks.
-                children_count_result = await session.execute(
-                    sa.select(sa.func.count()).where(
-                        task_module.Task.parent_id == task.id,
-                    )
-                )
-                if children_count_result.scalar_one() > 0:
-                    logger.info(
-                        "skipped_parent_with_children",
-                        task_id=str(task.id),
-                        task_type=task.task_type.value,
-                    )
-                    continue
-
-            dispatch = _TASK_DISPATCH.get(task.task_type)
-            if dispatch is None:
-                logger.warning(
-                    "no_dispatch_for_task_type",
-                    task_id=str(task.id),
-                    task_type=task.task_type.value,
-                )
+    )
+    reset: list[task_module.Task] = []
+    for task in running_result.scalars().all():
+        log = logger.bind(task_id=str(task.id), job_id=task.arq_job_id)
+        if task.arq_job_id is not None:
+            try:
+                status = await reaper_module.job_status(arq_redis, task.arq_job_id)
+            except Exception:
+                log.exception("running_recovery_status_check_failed")
                 continue
+            if status in reaper_module.ARQ_HOLDS_JOB:
+                log.info("running_left_to_arq", arq_status=status.value)
+                continue
+            log.info("running_job_gone", arq_status=status.value)
 
-            job_name, args_builder = dispatch
-            args = args_builder(task)
-            await arq_redis.enqueue_job(
-                job_name, *args, _job_id=f"{job_name}:{task.id}"
+        # Preserve started_at so the UI shows continuous elapsed time.
+        task.status = types_module.SyncStatus.PENDING
+        if task.task_type == types_module.TaskType.TIME_RANGE:
+            conn_result = await session.execute(
+                sa.select(user_models.ServiceConnection).where(
+                    user_models.ServiceConnection.id == task.service_connection_id
+                )
             )
-            enqueued += 1
+            connection = conn_result.scalar_one_or_none()
+            if connection is not None:
+                _apply_watermark_resume(task, connection)
+        reset.append(task)
 
-        if enqueued:
-            logger.info("reenqueued_orphaned_tasks", count=enqueued)
+    if not reset:
+        return
+    await session.commit()
+    logger.info("reset_running_orphans", count=len(reset))
+
+    for task in reset:
+        await _deliver_unless_planned(session, arq_redis, task)
+
+
+async def _deliver_legacy_unstamped(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    now: datetime.datetime,
+) -> None:
+    """Deliver top-level rows created before delivery tracking, once.
+
+    Unstamped children are sequential siblings or step-mode steps that were
+    never handed to arq, so only rows without a parent qualify.
+    """
+    legacy_result = await session.execute(
+        sa.select(task_module.Task).where(
+            task_module.Task.parent_id.is_(None),
+            task_module.Task.enqueued_at.is_(None),
+            sa.or_(
+                task_module.Task.status == types_module.SyncStatus.PENDING,
+                sa.and_(
+                    task_module.Task.status == types_module.SyncStatus.DEFERRED,
+                    sa.or_(
+                        task_module.Task.deferred_until.is_(None),
+                        task_module.Task.deferred_until <= now,
+                    ),
+                ),
+            ),
+        )
+    )
+    legacy = list(legacy_result.scalars().all())
+    for task in legacy:
+        task.status = types_module.SyncStatus.PENDING
+    if legacy:
+        logger.info("legacy_unstamped_tasks", count=len(legacy))
+    for task in legacy:
+        await _deliver_unless_planned(session, arq_redis, task)
+
+
+async def _deliver_unless_planned(
+    session: sa_async.AsyncSession,
+    arq_redis: arq.ArqRedis,
+    task: task_module.Task,
+) -> None:
+    # Re-planning a parent that already has children would duplicate them.
+    if await _child_count(session, task.id) > 0:
+        logger.info(
+            "skipped_parent_with_children",
+            task_id=str(task.id),
+            task_type=task.task_type.value,
+        )
+        await session.commit()
+        return
+    job = dispatch_module.job_for(task)
+    if job is None:
+        logger.warning(
+            "no_dispatch_for_task_type",
+            task_id=str(task.id),
+            task_type=task.task_type.value,
+        )
+        await session.commit()
+        return
+    # A row from before delivery tracking may still have its old fixed-id job
+    # in arq (SIGTERM retry); reusing that id lets arq drop the duplicate.
+    legacy_id = f"{job[0]}:{task.id}" if task.arq_job_id is None else None
+    await lifecycle_module.enqueue_task(
+        session, arq_redis, task, job[0], *job[1], job_id=legacy_id
+    )
+
+
+async def reap_tasks(ctx: dict[str, Any]) -> None:
+    """arq cron entry: re-deliver PENDING/DEFERRED tasks whose job was lost."""
+    wctx = typing.cast("WorkerContext", ctx)
+    await reaper_module.reap(wctx["session_factory"], wctx["redis"])
 
 
 # ---------------------------------------------------------------------------
@@ -3341,8 +3349,17 @@ class WorkerSettings:
         arq.func(heartbeat_module.with_heartbeat(enrich_related_artists), timeout=3600),
         arq.func(heartbeat_module.with_heartbeat(backfill_genres), timeout=3600),
     ]
+    cron_jobs: typing.ClassVar[list[typing.Any]] = [
+        arq.cron(
+            reap_tasks,
+            second=0,
+            unique=True,
+            timeout=int(reaper_module.INTERVAL.total_seconds()),
+        ),
+    ]
     on_startup = startup
     on_shutdown = shutdown
+    allow_abort_jobs = True
     max_jobs = 10
     job_timeout = 300  # default for future leaf tasks (e.g., page_fetch)
     # arq reads redis_settings as a class attribute (not a method call).

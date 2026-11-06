@@ -101,6 +101,16 @@ class SyncStatus(enum.StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     DEFERRED = "deferred"
+    CANCELLED = "cancelled"
+
+
+# A task in a terminal status never runs again; an active one is still owed work.
+TERMINAL_STATUSES: frozenset[SyncStatus] = frozenset(
+    {SyncStatus.COMPLETED, SyncStatus.FAILED, SyncStatus.CANCELLED}
+)
+ACTIVE_STATUSES: frozenset[SyncStatus] = frozenset(
+    {SyncStatus.PENDING, SyncStatus.RUNNING, SyncStatus.DEFERRED}
+)
 
 
 class FeedType(enum.StrEnum):

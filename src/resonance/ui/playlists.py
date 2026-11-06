@@ -11,6 +11,7 @@ import fastapi.responses
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
+import structlog
 
 import resonance.api.v1.artists as artists_api
 import resonance.api.v1.generators as generators_api
@@ -24,6 +25,7 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.services.playlist_export as playlist_export_module
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 import resonance.ui.common as common
 import resonance.ui.filters as filters_module
@@ -31,6 +33,7 @@ import resonance.ui.htmx as htmx
 import resonance.ui.view_filters as view_filters_module
 
 router = fastapi.APIRouter(tags=["ui"])
+logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +816,7 @@ async def export_playlist_submit(
     existing_task_ids = [str(t.id) for t in active_tasks]
 
     new_task_ids: list[str] = []
+    deliveries: list[lifecycle_module.Delivery] = []
     for conn in new_connections:
         task = task_models.Task(
             id=uuid.uuid4(),
@@ -827,15 +831,13 @@ async def export_playlist_submit(
         )
         db.add(task)
         new_task_ids.append(str(task.id))
+        deliveries.append(
+            lifecycle_module.stamp_delivery(task, "export_playlist", str(task.id))
+        )
     await db.commit()
 
-    arq_redis = request.app.state.arq_redis
-    for tid in new_task_ids:
-        await arq_redis.enqueue_job(
-            "export_playlist",
-            tid,
-            _job_id=f"export_playlist:{tid}",
-        )
+    for delivery in deliveries:
+        await lifecycle_module.deliver(request.app.state.arq_redis, delivery)
 
     # Track both the newly-started and already-running tasks so the progress
     # page reflects everything in flight for this playlist.
@@ -846,6 +848,102 @@ async def export_playlist_submit(
     )
 
 
+_CANCELLABLE_EXPORT_STATUSES = types_module.ACTIVE_STATUSES
+
+
+def _parse_task_ids(task_ids: str) -> list[uuid.UUID]:
+    return [
+        uuid.UUID(tid)
+        for tid in (raw.strip() for raw in task_ids.split(","))
+        if tid and _is_uuid(tid)
+    ]
+
+
+def _is_playlist_export(task: task_models.Task, playlist_id: uuid.UUID) -> bool:
+    return task.task_type == types_module.TaskType.PLAYLIST_EXPORT and str(
+        (task.params or {}).get("playlist_id")
+    ) == str(playlist_id)
+
+
+async def _load_export_task(
+    db: sa_async.AsyncSession,
+    user_id: uuid.UUID,
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> task_models.Task | None:
+    """One of the user's export tasks for this playlist; anything else is None."""
+    result = await db.execute(
+        sa.select(task_models.Task).where(
+            task_models.Task.id == task_id,
+            task_models.Task.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if task is None or not _is_playlist_export(task, playlist_id):
+        return None
+    return task
+
+
+async def _load_export_tasks(
+    db: sa_async.AsyncSession,
+    user_id: uuid.UUID,
+    playlist_id: uuid.UUID,
+    task_ids: list[uuid.UUID],
+) -> list[task_models.Task]:
+    tasks: list[task_models.Task] = []
+    for tid in task_ids:
+        task = await _load_export_task(db, user_id, playlist_id, tid)
+        if task is not None:
+            tasks.append(task)
+    return tasks
+
+
+def _export_row(task: task_models.Task) -> dict[str, object]:
+    """Template view of one per-connection export task."""
+    result = task.result or {}
+    return {
+        "task_id": str(task.id),
+        "description": task.description or "Export",
+        "status": task.status.value,
+        "exported": result.get("exported", 0),
+        "skipped": result.get("skipped", 0),
+        "spotify_playlist_id": result.get("spotify_playlist_id"),
+        "error": task.error_message,
+        "cancellable": task.status in _CANCELLABLE_EXPORT_STATUSES,
+    }
+
+
+def _export_headline(tasks: list[task_models.Task]) -> str:
+    """Headline for a set of export tasks; terminal only when every task is."""
+    if not tasks:
+        return "Export not found"
+    if any(t.status not in types_module.TERMINAL_STATUSES for t in tasks):
+        return "Exporting to Spotify…"
+    if any(
+        t.status
+        not in (types_module.SyncStatus.COMPLETED, types_module.SyncStatus.CANCELLED)
+        for t in tasks
+    ):
+        return "Export finished with errors"
+    if any(t.status == types_module.SyncStatus.CANCELLED for t in tasks):
+        return "Export stopped"
+    return "Export complete"
+
+
+def _export_context(
+    playlist_id: uuid.UUID, task_ids: str, tasks: list[task_models.Task]
+) -> dict[str, object]:
+    return {
+        "playlist_id": str(playlist_id),
+        "task_ids": task_ids,
+        "rows": [_export_row(t) for t in tasks],
+        "headline": _export_headline(tasks),
+        "all_terminal": bool(tasks)
+        and all(t.status in types_module.TERMINAL_STATUSES for t in tasks),
+        "not_found": not tasks,
+    }
+
+
 @router.get("/playlists/exporting/{playlist_id}", response_model=None)
 async def export_status_page(
     request: fastapi.Request,
@@ -854,7 +952,7 @@ async def export_status_page(
     playlist_id: uuid.UUID,
     task_ids: str = "",
 ) -> fastapi.responses.HTMLResponse:
-    """Render the playlist export status page."""
+    """Render the playlist export status page: a stable frame of per-connection rows."""
     result = await db.execute(
         sa.select(playlist_models.Playlist).where(
             playlist_models.Playlist.id == playlist_id,
@@ -865,12 +963,12 @@ async def export_status_page(
     if playlist is None:
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
-    ctx = common.base_context(request)
-    ctx.update(
-        playlist_id=str(playlist_id),
-        playlist_name=playlist.name,
-        task_ids=task_ids,
+    tasks = await _load_export_tasks(
+        db, user_id, playlist_id, _parse_task_ids(task_ids)
     )
+    ctx = common.base_context(request)
+    ctx.update(_export_context(playlist_id, task_ids, tasks))
+    ctx["playlist_name"] = playlist.name
 
     return common.templates.TemplateResponse(request, "playlists_exporting.html", ctx)
 
@@ -883,59 +981,69 @@ async def export_status_partial(
     playlist_id: uuid.UUID,
     task_ids: str = "",
 ) -> fastapi.responses.HTMLResponse:
-    """Polled partial for playlist export progress."""
-    task_id_list = [
-        uuid.UUID(tid)
-        for tid in (raw.strip() for raw in task_ids.split(","))
-        if tid and _is_uuid(tid)
-    ]
-
-    task_results: list[dict[str, object]] = []
-    all_completed = True
-    any_failed = False
-
-    for tid in task_id_list:
-        result = await db.execute(
-            sa.select(task_models.Task).where(
-                task_models.Task.id == tid,
-                task_models.Task.user_id == user_id,
-            )
-        )
-        task = result.scalar_one_or_none()
-        if task is None:
-            continue
-
-        task_info: dict[str, object] = {
-            "description": task.description or "Export",
-            "status": task.status.value,
-        }
-
-        if task.status == types_module.SyncStatus.COMPLETED:
-            task_result = task.result or {}
-            task_info["exported"] = task_result.get("exported", 0)
-            task_info["skipped"] = task_result.get("skipped", 0)
-            task_info["spotify_playlist_id"] = task_result.get("spotify_playlist_id")
-        elif task.status == types_module.SyncStatus.FAILED:
-            task_info["error"] = task.error_message or "Unknown error"
-            any_failed = True
-            all_completed = False
-        else:
-            all_completed = False
-
-        task_results.append(task_info)
-
-    if not task_results:
-        all_completed = False
-
+    """Polled partial: the poller itself plus out-of-band row status updates."""
+    tasks = await _load_export_tasks(
+        db, user_id, playlist_id, _parse_task_ids(task_ids)
+    )
     return common.templates.TemplateResponse(
         request,
         "partials/playlist_export_status.html",
+        _export_context(playlist_id, task_ids, tasks),
+    )
+
+
+@router.post("/playlists/{playlist_id}/export/{task_id}/cancel", response_model=None)
+async def cancel_export(
+    request: fastapi.Request,
+    user_id: Annotated[uuid.UUID, fastapi.Depends(common.require_user)],
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+    playlist_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> fastapi.responses.HTMLResponse:
+    """Stop one connection's export and return that connection's row.
+
+    A task that isn't this user's export of this playlist, or a cancel that
+    errors, leaves the row (and its Stop button) alone and shows an inline
+    error in the row's error slot instead.
+    """
+    outcome: lifecycle_module.CancelOutcome | None = None
+    task: task_models.Task | None = None
+    try:
+        if await _load_export_task(db, user_id, playlist_id, task_id) is not None:
+            cancel = await lifecycle_module.request_cancel(
+                db,
+                task_id,
+                user_id,
+                arq_redis=getattr(request.app.state, "arq_redis", None),
+            )
+            outcome, task = cancel.outcome, cancel.task
+    except Exception:
+        logger.exception("export_cancel_failed", task_id=str(task_id))
+        await db.rollback()
+        outcome = None
+
+    if task is None or outcome not in (
+        lifecycle_module.CancelOutcome.CANCELLED,
+        lifecycle_module.CancelOutcome.ALREADY_TERMINAL,
+    ):
+        response = common.templates.TemplateResponse(
+            request, "partials/export_cancel_error.html", {}
+        )
+        return htmx.retarget(response, f"#export-error-{task_id}", "innerHTML")
+
+    notice = (
+        "This export had already finished."
+        if outcome == lifecycle_module.CancelOutcome.ALREADY_TERMINAL
+        else None
+    )
+    return common.templates.TemplateResponse(
+        request,
+        "partials/export_row.html",
         {
+            "row": _export_row(task),
             "playlist_id": str(playlist_id),
-            "task_ids": task_ids,
-            "task_results": task_results,
-            "all_completed": all_completed,
-            "any_failed": any_failed,
+            "notice": notice,
+            "focus": True,
         },
     )
 
@@ -1028,6 +1136,7 @@ async def playlist_detail_page(
         db, user_id, playlist_id
     )
     export_task_ids = ",".join(str(t.id) for t in active_export_tasks)
+    export_rows = [_export_row(t) for t in active_export_tasks]
 
     ctx = common.base_context(request)
     ctx.update(
@@ -1041,6 +1150,7 @@ async def playlist_detail_page(
         spotify_connections=spotify_connections,
         export_in_progress=bool(active_export_tasks),
         export_task_ids=export_task_ids,
+        export_rows=export_rows,
         page=page,
         has_next=has_next,
         has_prev=page > 1,
