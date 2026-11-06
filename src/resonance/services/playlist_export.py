@@ -17,19 +17,13 @@ import sqlalchemy.ext.asyncio as sa_async
 import resonance.models.task as task_models
 import resonance.types as types_module
 
-# A PENDING or RUNNING export is "in flight"; anything else is terminal.
-_ACTIVE_STATUSES = (
-    types_module.SyncStatus.PENDING,
-    types_module.SyncStatus.RUNNING,
-)
-
 
 async def in_progress_export_tasks(
     db: sa_async.AsyncSession,
     user_id: uuid.UUID,
     playlist_id: uuid.UUID,
 ) -> list[task_models.Task]:
-    """Return the pending/running ``PLAYLIST_EXPORT`` tasks for one playlist.
+    """Return the active ``PLAYLIST_EXPORT`` tasks for one playlist.
 
     ``params`` is a JSON column, so the per-playlist filter happens in Python
     (export tasks are few). Used both to dedupe re-clicks and to drive the
@@ -48,7 +42,7 @@ async def in_progress_export_tasks(
         .where(
             task_models.Task.user_id == user_id,
             task_models.Task.task_type == types_module.TaskType.PLAYLIST_EXPORT,
-            task_models.Task.status.in_(_ACTIVE_STATUSES),
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
         .order_by(task_models.Task.created_at.desc())
     )

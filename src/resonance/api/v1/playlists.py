@@ -19,6 +19,7 @@ import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.services.playlist_export as playlist_export_module
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -456,12 +457,8 @@ async def export_playlist(
             },
         )
         db.add(task)
-        await db.flush()
-
-        await arq_redis.enqueue_job(
-            "export_playlist",
-            str(task.id),
-            _job_id=f"export_playlist:{task.id}",
+        await lifecycle_module.enqueue_task(
+            db, arq_redis, task, "export_playlist", str(task.id)
         )
 
         tasks_info.append(

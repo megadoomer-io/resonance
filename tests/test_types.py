@@ -109,3 +109,33 @@ class TestTaskTypeNewValues:
             types_module.TaskType.RELATED_ARTIST_ENRICHMENT
             == "related_artist_enrichment"
         )
+
+
+class TestSyncStatusSets:
+    """Tests for the shared TERMINAL/ACTIVE SyncStatus sets."""
+
+    def test_cancelled_member(self) -> None:
+        assert types_module.SyncStatus.CANCELLED == "cancelled"
+
+    def test_terminal_statuses(self) -> None:
+        expected = {
+            types_module.SyncStatus.COMPLETED,
+            types_module.SyncStatus.FAILED,
+            types_module.SyncStatus.CANCELLED,
+        }
+        assert set(types_module.TERMINAL_STATUSES) == expected
+
+    def test_active_statuses(self) -> None:
+        expected = {
+            types_module.SyncStatus.PENDING,
+            types_module.SyncStatus.RUNNING,
+            types_module.SyncStatus.DEFERRED,
+        }
+        assert set(types_module.ACTIVE_STATUSES) == expected
+
+    def test_sets_partition_every_status(self) -> None:
+        """Every status is exactly one of active or terminal."""
+        terminal = types_module.TERMINAL_STATUSES
+        active = types_module.ACTIVE_STATUSES
+        assert terminal.isdisjoint(active)
+        assert set(types_module.SyncStatus) == terminal | active

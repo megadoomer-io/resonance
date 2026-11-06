@@ -15,6 +15,7 @@ import resonance.concerts.concert_archives as concert_archives_module
 import resonance.dependencies as deps_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -134,12 +135,7 @@ async def upload_csv(
         task_models.Task.user_id == user_id,
         task_models.Task.service_connection_id == connection.id,
         task_models.Task.task_type == types_module.TaskType.CONCERT_ARCHIVES_IMPORT,
-        task_models.Task.status.in_(
-            [
-                types_module.SyncStatus.PENDING,
-                types_module.SyncStatus.RUNNING,
-            ]
-        ),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     if running_result.scalar_one_or_none() is not None:
@@ -165,15 +161,13 @@ async def upload_csv(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.commit()
-
-    # 11. Enqueue arq job
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
+    await lifecycle_module.enqueue_task(
+        db,
+        request.app.state.arq_redis,
+        task,
         "sync_concert_archives",
         str(task.id),
         csv_text,
-        _job_id=f"sync_concert_archives:{task.id}",
     )
 
     logger.info(
