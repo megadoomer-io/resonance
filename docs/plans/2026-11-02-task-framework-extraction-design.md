@@ -168,6 +168,72 @@ already terminal; startup and the guard log the case, so it is not silent. The
 `ShutdownRequest` checkpoint never fires on SIGTERM (see the arq notes above) and is tracked
 in `TODOS.md`.
 
+## Queue spike results (2026-11-05)
+
+Versions read: arq 0.28.0 (we pin 0.27.0), procrastinate 3.10.0, PgQueuer 1.6.0, DBOS
+Transact 3.4.0. Each library was read from a shallow clone of its main branch plus its
+docs. No prototypes were run. **V** = verified from docs or source; **I** = inferred.
+Source paths are relative to each project's repo root.
+
+### Facts that frame the decision
+
+- **Redis stays either way (V, this repo).** Sessions (`middleware/session.py`), rate
+  limiting (`middleware/rate_limit.py`) and session invalidation (`api/v1/auth.py`) use
+  Redis directly. A Postgres queue removes arq's use of Redis, not the Redis dependency.
+- **Joey cannot use a Postgres queue (V, this doc).** Joey has Redis and no Postgres
+  (see "Notes for a future lift"). So all three candidates are Resonance-only choices, and
+  the Joey lift depends on a Redis `TaskStore` or a store-less mode whatever we pick here.
+- **arq is maintenance-only (V, arq README, issue #510).** It still ships releases
+  (0.27.0 in 2026-02, 0.28.0 in 2026-04), so nothing is broken today.
+
+### Comparison
+
+| | arq + current layer | procrastinate | PgQueuer | DBOS |
+|---|---|---|---|---|
+| Fan-out (parent/child, sequential siblings) | Ours: `_check_parent_completion`, unstamped siblings | None (V, docs + source) | None (V, `docs/index.md:194`) | Child workflows via `start_workflow` + handles (V, `_dbos.py:1636`) |
+| Cancel pending | Row CANCELLED + entry guard | `cancel_job_by_id` (V, `sql/schema.sql:294`) | `mark_job_as_cancelled` deletes it (V, `qb.py:696`) | `cancel_workflow` (V, `_sys_db.py:1710`) |
+| Hard-cancel running | arq abort + `before_flush` keep-CANCELLED | `abort=True` sends `asyncio.Task.cancel()` to async jobs (V, `worker.py:543`) | Only inside `with ctx.cancellation:`; "best-effort" (V, `docs/guides/job-cancellation.md`) | At the next step boundary; async steps marked `preemptible` can be interrupted (V, `_core.py:472`) |
+| Crash recovery | Our reaper (PENDING/DEFERRED); startup RUNNING check | Worker heartbeats, but you write the stalled-job retry task yourself (V, `docs/howto/production/retry_stalled_jobs.md`) | Per-job heartbeat; stale jobs reclaimed (V, `docs/guides/heartbeat.md`) | Per-`executor_id` startup recovery; no lease unless you pay for Conductor (V, `_recovery.py:34`; I for no heartbeat) |
+| Closes the two-RUNNING double run | No (accepted gap) | Mostly: `lock=task_id` allows one `doing` job per lock (V, `schema.sql:100`); a manual stalled retry on a live worker could still double-run (I) | No: at-least-once with no fencing, by design (V, `docs/adr/ADR-0004`) | Yes: atomic dequeue claim + `owner_xid` on outcome writes (V, `_sys_db.py:1528`) |
+| Cron | `arq.cron(unique=True)` | `@app.periodic`, slot dedup via unique index (V, `schema.sql:87`) | `@pgq.schedule`, `SKIP LOCKED` claim (V, `qb.py:1072`) | DB-stored schedules, one workflow id per slot (V, `_scheduler.py:182`) |
+| `sync_tasks` stays system of record | Yes | Yes, with our task id as the job arg (I) | Yes, with our task id as the payload (I) | Partly: DBOS keeps its own workflow state; our row would be a mirror updated from steps (I) |
+| Drops Redis | No | No, see above | No, see above | No, see above |
+| Maturity | Maintenance-only | 2 active maintainers, about one minor release a quarter, MIT (V) | Bus factor 1 (85 of last 100 commits), releases every 2 to 4 weeks (V) | Company-backed; 3.0 (2026-09) was breaking, and stable minors come every 1 to 3 weeks (V) |
+| Async SQLAlchemy (we use asyncpg) | Fine (separate transport) | No asyncpg connector. Transactional enqueue needs psycopg3 (V, 3.10.0 `external_connection.md`) | asyncpg driver; transactional enqueue on SQLAlchemy's raw connection is untested (I) | `AsyncSQLAlchemyDatasource` reuses our engine, but the system DB needs a sync engine (V, `_dbos_config.py:39`) |
+| Migration cost | None | Medium: 14 job registrations, enqueue path, hand-wrapped SQL migrations in Alembic, psycopg3 driver or a second pool (I) | Medium, same shape; enum-adding upgrades need autocommit Alembic blocks (V, `docs/reference/cli.md:204`) | High: deterministic workflow/step rewrite of `worker.py` (V); the default version hash strands in-flight workflows on deploy unless the version is pinned (I) |
+
+### Recommendation: keep arq and the current layer; close the double-run gap in our layer
+
+1. **Do not migrate now.** None of the three cuts the dependency count (Redis stays), and
+   procrastinate and PgQueuer have no fan-out, so our parent/child and sibling code
+   survives a move unchanged. The win would be native hard-cancel and moving delivery into
+   Postgres, which PR5 already covers with arq abort and the reaper. DBOS is the only one
+   that would replace our fan-out and fencing, but it means rewriting every job as a
+   deterministic workflow and taking on a young 3.x API.
+2. **Close the double run with a row claim (I, design step 5 narrowed).** Add an
+   `attempt` counter: a delivery moves to RUNNING by conditional UPDATE (`WHERE status IN
+   (PENDING, DEFERRED)`, or `lease_expires_at < now()` for recovery) and increments
+   `attempt`; status writes include `WHERE attempt = :mine`. A second delivery loses the
+   claim and exits. This matches what DBOS's claim does and is stronger than PgQueuer's
+   model. Like every candidate, it cannot undo side effects from a stalled worker that
+   wakes up after its lease is reclaimed.
+3. **Exit plan: procrastinate (I).** If arq stops working on a Python or redis-py upgrade,
+   or an unfixed security issue appears, swap the transport to procrastinate. It has two
+   maintainers, async forced abort, a per-task `lock`, and slot-deduped cron, and it fits
+   "row is truth, queue is transport" without changing handlers. Prototype abort and
+   `lock` on psycopg3 first. PgQueuer ranks second because of its bus factor and its
+   at-least-once design.
+
+### What changes for each deferred piece (`TODOS.md`)
+
+| Piece | Decision |
+|---|---|
+| `taskkit` runner, registry, `submit()` + `dedup_key` (steps 2-4) | Drop the package. `enqueue_task` already serves as submit. Add `dedup_key` as a partial unique index only when a feature needs it. Deriving `WorkerSettings.functions` from `TASK_DISPATCH` is an optional small cleanup. |
+| Typed params, `ctx.checkpoint`, `ctx.defer`, split `worker.py`, `@scheduled` (steps 6-8) | Not decided by the queue choice. Treat as code health, done one domain at a time. Scheduling for #120/#149 uses `arq.cron` to insert a normal `sync_tasks` row, deduped by a unique (type, slot) index. |
+| Row leases, attempt fencing, periodic RUNNING recovery, `max_tries=1` + shutdown release, reaper rollout | Build the narrow version from recommendation 2: attempt claim, conditional writes at the status assignments, row-lease heartbeat retargeted from `heartbeat.py`, reaper extended to RUNNING rows with an expired lease. Roll out log-only first. Retire the arq-lock heartbeat and `KEYS` scan once leases work. |
+| Redis-backed `TaskStore` | Drop for now. The layer stays tied to SQLAlchemy and `sync_tasks`. A Joey lift would be a separate, smaller Redis design, and where shared code lives (personal vs employer repo) is still open. |
+| `ShutdownRequest` checkpoint | Delete. arq cancels jobs before `on_shutdown`, and the RUNNING-retry watermark resume already recovers. |
+
 ## Target design (deferred until the queue spike)
 
 The rest of this document is the full framework. It is not scheduled; `TODOS.md` records
