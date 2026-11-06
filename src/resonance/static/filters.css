@@ -134,6 +134,31 @@
   font-size: 0.75em;
 }
 
+/* Per-connection export rows (playlist detail + exporting page) */
+.export-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.5rem;
+}
+.export-status:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.export-stop {
+  min-width: 44px;
+  min-height: 44px;
+}
+.export-row-note,
+.export-row-error {
+  flex-basis: 100%;
+}
+.export-row-error:empty {
+  display: none;
+}
+
 /* Inline form — for side-by-side buttons in table cells */
 .inline-form {
   display: inline;

@@ -10,7 +10,6 @@ import arq.connections as arq_connections
 import fastapi
 import fastapi.staticfiles
 import redis.asyncio as aioredis
-import sqlalchemy as sa
 import structlog
 
 import resonance.api.v1 as api_v1_module
@@ -30,8 +29,6 @@ import resonance.middleware.rate_limit as rate_limit_module
 import resonance.middleware.security_headers as security_headers_module
 import resonance.middleware.session as session_middleware
 import resonance.migrations as migrations_module
-import resonance.models.task as task_models
-import resonance.types as types_module
 import resonance.ui.account as ui_account_module
 import resonance.ui.admin as ui_admin_module
 import resonance.ui.artists as ui_artists_module
@@ -71,21 +68,6 @@ async def lifespan(application: fastapi.FastAPI) -> AsyncIterator[None]:
     application.state.session_factory = session_factory
     application.state.redis = redis_pool
     application.state.arq_redis = arq_redis
-
-    # Reset RUNNING tasks back to PENDING (interrupted by pod restart)
-    async with session_factory() as db:
-        result = await db.execute(
-            sa.update(task_models.Task)
-            .where(task_models.Task.status == types_module.SyncStatus.RUNNING)
-            .values(
-                status=types_module.SyncStatus.PENDING,
-                started_at=None,
-            )
-        )
-        row_count = result.rowcount if hasattr(result, "rowcount") else 0
-        if row_count:
-            logger.info("Reset %d interrupted sync tasks back to pending", row_count)
-        await db.commit()
 
     yield
 

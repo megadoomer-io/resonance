@@ -503,12 +503,42 @@ Each `SyncStrategy` declares a `concurrency` mode:
 
 ### Crash Recovery
 
-On worker startup, `_reenqueue_orphaned_tasks()` finds tasks stuck in
-PENDING (lost arq job), RUNNING (interrupted by crash), or expired DEFERRED
-status and re-enqueues them. Recovery is type-agnostic — the `_TASK_DISPATCH`
-map determines the arq job name and arguments for each task type. For
-ListenBrainz TIME_RANGE tasks, watermark-based resume is applied so the task
-picks up where it left off rather than re-processing from the beginning.
+The task row is the truth and arq is the transport. Every enqueue goes through
+`lifecycle.enqueue_task`, which stamps `enqueued_at` and a fresh per-delivery
+`arq_job_id` on the row in the same transaction that inserts or advances it,
+then enqueues after commit. Sequential siblings and step-mode children are
+stamped only when advanced to, so a row with `enqueued_at IS NULL` was never
+handed to arq.
+
+**Reaper** (`sync/reaper.py`, arq cron every minute, `unique=True`): finds
+PENDING and due DEFERRED rows that are stamped (and older than a 60s grace
+window), have no children, and whose parent (if any) is not terminal. For each,
+it asks arq for the status of `arq_job_id`; only `not_found` or `complete`
+triggers a re-delivery, and the row is re-read under a row lock first so a row
+that finished or was re-delivered meanwhile is skipped. Every decision is
+logged; the last tick and recent decisions are kept in Redis
+(`resonance:reaper:*`) for `GET /api/v1/admin/tasks/health`.
+
+**Worker startup** (`_reenqueue_orphaned_tasks`):
+
+1. Fails PENDING children of terminal parents.
+2. RUNNING rows: if arq still holds `arq_job_id` (queued, deferred, in
+   progress) the row is left alone, because arq's SIGTERM retry runs it again.
+   Otherwise (job gone, or a row from before delivery tracking) it is reset to
+   PENDING, keeping `started_at`, with watermark resume for ListenBrainz
+   TIME_RANGE tasks, and re-delivered unless it already has children.
+3. Delivers top-level rows created before delivery tracking once.
+4. Runs the reaper.
+
+Recovery is type-agnostic: `sync/dispatch.TASK_DISPATCH` maps each task type
+to its arq job name and arguments.
+
+The API server does not touch task status on startup; the worker is the only
+recovery owner.
+
+Accepted gap: if two deliveries of one task are both RUNNING (a stalled but
+alive worker), the task runs twice. The entry guard covers only rows that are
+already terminal.
 
 ### Task Lifecycle Helpers
 
