@@ -86,12 +86,16 @@
     {% if export_in_progress %}
     {# An export is already running -- show progress, not another Export button,
        so a re-click can't spawn a duplicate Spotify playlist. #}
+    <p id="export-headline"><strong>{{ export_headline }}</strong></p>
     <div class="export-rows" aria-live="polite" aria-atomic="false">
         {% for row in export_rows %}
         {{ export_row(row, playlist.id) }}
         {% endfor %}
     </div>
     <a href="/playlists/exporting/{{ playlist.id }}?task_ids={{ export_task_ids }}" style="font-size: 0.8rem;">View progress</a>
+    {% with playlist_id=playlist.id, task_ids=export_task_ids %}
+    {% include "partials/export_poller.html" %}
+    {% endwith %}
     {% else %}
     {% for conn in spotify_connections %}
     {% set conn_id = conn.id | string %}

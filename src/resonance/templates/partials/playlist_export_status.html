@@ -1,8 +1,9 @@
-{#- Polled by the exporting page. The main swap replaces only the hidden poller
-    (dropped once every task is terminal); the headline, each row's status span
-    and non-cancellable rows' actions update out of band, so a Stop button is
-    never inside a polled region. -#}
-{% from "components/export.html" import export_status_content %}
+{#- Polled by the exporting page and the playlist detail page. The main swap
+    replaces only the hidden poller (dropped once every task is terminal); the
+    headline, each row's status span and retry slot, and non-cancellable rows'
+    actions update out of band, so a Stop button is never inside a polled
+    region. -#}
+{% from "components/export.html" import export_status_content, export_retry_content %}
 {% if not all_terminal and not not_found %}
 {% include "partials/export_poller.html" %}
 {% else %}
@@ -11,6 +12,7 @@
 <p id="export-headline" hx-swap-oob="innerHTML"><strong>{{ headline }}</strong></p>
 {% for row in rows %}
 <span id="export-status-{{ row.task_id }}" hx-swap-oob="innerHTML">{{ export_status_content(row) }}</span>
+<span id="export-retry-{{ row.task_id }}" hx-swap-oob="innerHTML">{{ export_retry_content(row, playlist_id) }}</span>
 {% if not row.cancellable %}
 <span id="export-actions-{{ row.task_id }}" hx-swap-oob="innerHTML"></span>
 {% endif %}

@@ -6,6 +6,7 @@ malformed task id must never 500.
 
 from __future__ import annotations
 
+import datetime
 import json
 import uuid
 from typing import Any
@@ -19,6 +20,7 @@ import resonance.config as config_module
 import resonance.middleware.session as session_middleware
 import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
+import resonance.services.playlist_export as playlist_export_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 import resonance.ui.common as common_ui
@@ -884,3 +886,255 @@ class TestGeneratingTerminalRule:
             TaskStoreSession([task]), user_id, f"/playlists/generating/{task.id}"
         )
         assert '<div aria-live="polite">' in resp.text
+
+
+def _ago(minutes: int) -> str:
+    then = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=minutes)
+    return then.isoformat()
+
+
+def _progressing(
+    user_id: uuid.UUID,
+    playlist_id: uuid.UUID,
+    *,
+    phase: str = "matching_search",
+    current: int = 12,
+    total: int = 40,
+    matched: int = 30,
+    skipped: int = 2,
+    idle_minutes: int = 0,
+) -> task_models.Task:
+    task = _export_task(
+        user_id,
+        playlist_id,
+        result={
+            "phase": phase,
+            "matched": matched,
+            "skipped": skipped,
+            "progress_updated_at": _ago(idle_minutes),
+        },
+    )
+    task.progress_current = current
+    task.progress_total = total
+    return task
+
+
+def _retry_url(playlist_id: uuid.UUID, task_id: uuid.UUID) -> str:
+    return f"/playlists/{playlist_id}/export/{task_id}/retry"
+
+
+class TestExportProgressRendering:
+    def _row_html(self, task: task_models.Task, playlist_id: uuid.UUID) -> str:
+        return _render(
+            "partials/export_row.html",
+            row=playlists_ui._export_row(task),
+            playlist_id=str(playlist_id),
+        )
+
+    def test_running_row_shows_phase_n_of_m_and_counts(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        html = self._row_html(_progressing(user_id, playlist_id), playlist_id)
+        assert "Matching tracks (Spotify search)" in html
+        assert "12 of 40" in html
+        assert '<progress value="12" max="40"' in html
+        assert "30 matched" in html
+        assert "2 not found" in html
+        assert ">Stop</button>" in html
+        assert "Retry" not in html
+        assert "Stalled" not in html
+
+    def test_adding_tracks_phase(self, user_id: uuid.UUID) -> None:
+        playlist_id = uuid.uuid4()
+        task = _progressing(
+            user_id, playlist_id, phase="adding_tracks", current=100, total=180
+        )
+        html = self._row_html(task, playlist_id)
+        assert "Adding tracks" in html
+        assert "100 of 180" in html
+
+    def test_creating_phase_has_no_counter(self, user_id: uuid.UUID) -> None:
+        playlist_id = uuid.uuid4()
+        task = _progressing(
+            user_id, playlist_id, phase="creating_playlist", current=0, total=0
+        )
+        html = self._row_html(task, playlist_id)
+        assert "Creating Spotify playlist" in html
+        assert " of 0" not in html
+        assert "<progress" not in html
+
+    def test_running_without_progress_yet_says_exporting(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        html = self._row_html(_export_task(user_id, playlist_id), playlist_id)
+        assert "Exporting…" in html
+        assert "matched" not in html
+
+    def test_stalled_row_says_so_and_offers_stop_and_retry(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        task = _progressing(user_id, playlist_id, idle_minutes=12)
+        html = self._row_html(task, playlist_id)
+        assert "Stalled" in html
+        assert "no progress for 12 min" in html
+        assert 'aria-busy="true"' not in html
+        assert ">Stop</button>" in html
+        assert f'action="{_retry_url(playlist_id, task.id)}"' in html
+        assert ">Retry</button>" in html
+
+    def test_failed_row_shows_error_and_retry(self, user_id: uuid.UUID) -> None:
+        playlist_id = uuid.uuid4()
+        task = _export_task(
+            user_id,
+            playlist_id,
+            status=types_module.SyncStatus.FAILED,
+            error="Spotify said no",
+        )
+        html = self._row_html(task, playlist_id)
+        assert "<mark>Failed: Spotify said no</mark>" in html
+        assert ">Retry</button>" in html
+        assert ">Stop</button>" not in html
+
+    @pytest.mark.parametrize(
+        "status",
+        [types_module.SyncStatus.COMPLETED, types_module.SyncStatus.CANCELLED],
+    )
+    def test_no_retry_for_completed_or_stopped(
+        self, user_id: uuid.UUID, status: types_module.SyncStatus
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        task = _export_task(user_id, playlist_id, status=status, result={})
+        assert "Retry" not in self._row_html(task, playlist_id)
+
+    async def test_poll_updates_progress_and_retry_slot_out_of_band(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        moving = _progressing(user_id, playlist_id)
+        stalled = _progressing(user_id, playlist_id, idle_minutes=30)
+        resp = await _get(
+            TaskStoreSession([moving, stalled]),
+            user_id,
+            _poll_url(playlist_id, moving, stalled),
+        )
+        html = resp.text
+        assert _keeps_polling(html)
+        assert "12 of 40" in html
+        assert "Stalled" in html
+        # The retry slot is refreshed every poll, so Retry appears the moment a
+        # row stalls even though the Stop button is never re-rendered.
+        assert f'id="export-retry-{moving.id}" hx-swap-oob="innerHTML"' in html
+        assert f'id="export-retry-{stalled.id}" hx-swap-oob="innerHTML"' in html
+        assert html.count(">Retry</button>") == 1
+        assert f'action="{_retry_url(playlist_id, stalled.id)}"' in html
+        assert ">Stop</button>" not in html
+
+    async def test_final_poll_for_failed_export_carries_retry(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        failed = _export_task(
+            user_id, playlist_id, status=types_module.SyncStatus.FAILED, error="x"
+        )
+        resp = await _get(
+            TaskStoreSession([failed]), user_id, _poll_url(playlist_id, failed)
+        )
+        assert not _keeps_polling(resp.text)
+        assert f'id="export-retry-{failed.id}" hx-swap-oob="innerHTML"' in resp.text
+        assert ">Retry</button>" in resp.text
+
+    def test_detail_page_polls_in_progress_exports(self, user_id: uuid.UUID) -> None:
+        playlist = _playlist(user_id, "My Playlist")
+        playlist.track_count = 0
+        running = _progressing(user_id, playlist.id)
+        html = _render(
+            "playlist_detail.html",
+            playlist=playlist,
+            playlist_id=playlist.id,
+            tracks=[],
+            spotify_connections=[object()],
+            export_in_progress=True,
+            export_task_ids=str(running.id),
+            export_rows=[playlists_ui._export_row(running)],
+            export_headline="Exporting to Spotify…",
+        )
+        assert "12 of 40" in html
+        assert _keeps_polling(html)
+        assert (
+            f'hx-get="/partials/export-status/{playlist.id}?task_ids={running.id}"'
+            in html
+        )
+        assert 'id="export-headline"' in html
+
+
+class TestRetryExportRoute:
+    async def test_retry_redirects_to_new_tasks_progress(
+        self, user_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        failed = _export_task(
+            user_id, playlist_id, status=types_module.SyncStatus.FAILED
+        )
+        fresh = _export_task(
+            user_id, playlist_id, status=types_module.SyncStatus.PENDING
+        )
+        calls: list[tuple[Any, ...]] = []
+
+        async def fake_retry(*args: Any) -> Any:
+            calls.append(args)
+            return playlist_export_module.RetryOutcome(
+                playlist_export_module.RetryStatus.STARTED, fresh
+            )
+
+        monkeypatch.setattr(playlist_export_module, "retry_export", fake_retry)
+        resp = await _post(
+            TaskStoreSession([failed]), user_id, _retry_url(playlist_id, failed.id)
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == (
+            f"/playlists/exporting/{playlist_id}?task_ids={fresh.id}"
+        )
+        assert calls[0][2:] == (user_id, playlist_id, failed.id)
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            playlist_export_module.RetryStatus.ALREADY_RUNNING,
+            playlist_export_module.RetryStatus.NOT_RETRYABLE,
+        ],
+    )
+    async def test_refused_retry_shows_the_blocking_export(
+        self,
+        user_id: uuid.UUID,
+        monkeypatch: pytest.MonkeyPatch,
+        status: playlist_export_module.RetryStatus,
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        blocking = _export_task(user_id, playlist_id)
+
+        async def fake_retry(*args: Any) -> Any:
+            return playlist_export_module.RetryOutcome(status, blocking)
+
+        monkeypatch.setattr(playlist_export_module, "retry_export", fake_retry)
+        resp = await _post(
+            TaskStoreSession([]), user_id, _retry_url(playlist_id, uuid.uuid4())
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"].endswith(f"task_ids={blocking.id}")
+
+    async def test_unknown_export_is_404(
+        self, user_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_retry(*args: Any) -> Any:
+            return playlist_export_module.RetryOutcome(
+                playlist_export_module.RetryStatus.NOT_FOUND
+            )
+
+        monkeypatch.setattr(playlist_export_module, "retry_export", fake_retry)
+        resp = await _post(
+            TaskStoreSession([]), user_id, _retry_url(uuid.uuid4(), uuid.uuid4())
+        )
+        assert resp.status_code == 404

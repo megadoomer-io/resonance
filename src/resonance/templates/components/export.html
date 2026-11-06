@@ -5,19 +5,38 @@
   touching its Stop button.
 
   Usage:
-    {% from "components/export.html" import export_row, export_status_content %}
+    {% from "components/export.html" import export_row, export_status_content, export_retry_content %}
 #}
 {% from "components/macros.html" import error_state %}
 
 
+{# Phase, "N of M" and match counts for a running export. #}
+{% macro export_progress_detail(p) %}
+{% if p.total %}
+<progress value="{{ p.current }}" max="{{ p.total }}" class="export-progress"></progress>
+<small>{{ p.current }} of {{ p.total }}</small>
+{% endif %}
+{% if p.matched or p.skipped %}
+<small class="text-muted">&middot; {{ p.matched }} matched{% if p.skipped %}, {{ p.skipped }} not found{% endif %}</small>
+{% endif %}
+{% endmacro %}
+
+
 {# Inner content of a row's status span; the span itself never changes. #}
 {% macro export_status_content(row) %}
+{% set p = row.progress %}
 {% if row.status == "completed" %}
 <span>Exported &middot; {{ row.exported }} tracks{% if row.skipped %} <span class="text-muted">({{ row.skipped }} not found on Spotify)</span>{% endif %}{% if row.spotify_playlist_id %} &middot; <a href="https://open.spotify.com/playlist/{{ row.spotify_playlist_id }}" target="_blank" rel="noopener">Open in Spotify</a>{% endif %}</span>
 {% elif row.status == "cancelled" %}
 <span class="text-muted">Stopped</span>
 {% elif row.status == "failed" %}
 <mark>Failed: {{ row.error or "Unknown error" }}</mark>
+{% elif row.status == "running" and p and p.stalled %}
+<span class="export-stalled"><strong>Stalled</strong> &middot; no progress for {{ p.stalled_minutes }} min{% if p.phase_label %} ({{ p.phase_label }}){% endif %}</span>
+{{ export_progress_detail(p) }}
+{% elif row.status == "running" and p and p.phase %}
+<span aria-busy="true">{{ p.phase_label }}</span>
+{{ export_progress_detail(p) }}
 {% elif row.status == "running" %}
 <span aria-busy="true">Exporting…</span>
 {% elif row.status == "deferred" %}
@@ -26,6 +45,18 @@
 <span aria-busy="true">Queued</span>
 {% else %}
 <mark>Failed: {{ row.error or "Unknown error" }} (status: {{ row.status }})</mark>
+{% endif %}
+{% endmacro %}
+
+
+{# Inner content of a row's retry slot, refreshed on every poll so Retry shows
+   up as soon as a row stalls or fails. A plain form: it redirects to the new
+   export's progress page. #}
+{% macro export_retry_content(row, playlist_id) %}
+{% if row.progress and row.progress.retryable %}
+<form method="post" action="/playlists/{{ playlist_id }}/export/{{ row.task_id }}/retry" class="inline-form">
+    <button type="submit" class="outline btn-sm export-retry">Retry</button>
+</form>
 {% endif %}
 {% endmacro %}
 
@@ -46,6 +77,7 @@
         >Stop</button>
         {% endif %}
     </span>
+    <span class="export-retry-slot" id="export-retry-{{ row.task_id }}">{{ export_retry_content(row, playlist_id) }}</span>
     {% if notice %}
     <small class="text-muted export-row-note">{{ notice }}</small>
     {% endif %}
