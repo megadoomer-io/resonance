@@ -1,0 +1,5 @@
+<div id="export-poller"
+     hx-get="/partials/export-status/{{ playlist_id }}?task_ids={{ task_ids }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     hidden></div>

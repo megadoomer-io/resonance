@@ -12,7 +12,7 @@
             hx-post="/api/v1/matching/artists/{{ canonical.id }}/merge/{{ duplicate.id }}/confirm"
             hx-target="body"
             hx-swap="none"
-            hx-on::after-request="if(event.detail.successful) window.location='/artists/{{ canonical.id }}'">Confirm Merge</button>
+            data-after-success-redirect="/artists/{{ canonical.id }}">Confirm Merge</button>
         <a href="/artists/{{ canonical.id }}/compare/{{ duplicate.id }}" role="button" class="secondary outline">Cancel</a>
     </div>
 </article>

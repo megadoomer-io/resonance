@@ -13,6 +13,8 @@ import {
   allArtistIds,
   artistMeta,
   clampSeedCount,
+  enrichFailureMessage,
+  enrichOutcome,
   escapeHtml,
   groupKey,
   hasArtist,
@@ -401,7 +403,8 @@ async function pollEnrich(taskId) {
   }
   if (!resp.ok) return;
   const data = await resp.json();
-  if (data.status === "completed") {
+  const outcome = enrichOutcome(data.status);
+  if (outcome === "completed") {
     const result = data.result || {};
     const found = result.found != null ? result.found : 0;
     if (result.message) {
@@ -416,8 +419,12 @@ async function pollEnrich(taskId) {
     window.location.reload();
     return;
   }
-  if (data.status === "failed") {
-    showEnrichBanner("Enrichment failed. " + escapeHtml(data.error || ""));
+  if (outcome === "cancelled") {
+    showEnrichBanner("Enrichment was cancelled.");
+    return;
+  }
+  if (outcome === "failed") {
+    showEnrichBanner(enrichFailureMessage(data.status, data.error));
     return;
   }
   const cur = data.progress_current || 0;

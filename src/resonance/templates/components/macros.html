@@ -163,7 +163,7 @@
 
 {% macro error_state(message="An error occurred.", errors=none) %}
 <div role="alert" style="padding: 0.5em 1em; margin-bottom: 1em; border-left: 3px solid var(--error); background: var(--surface);">
-    <small style="color: var(--error)">{{ message }}</small>
+    <small style="color: var(--error)" data-error-message>{{ message }}</small>
     {% if errors %}
     <ul style="margin-top: 0.5em; font-size: 0.85em;">
         {% for err in errors %}

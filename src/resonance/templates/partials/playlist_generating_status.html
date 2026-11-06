@@ -1,14 +1,5 @@
-{% if status == "completed" and playlist_id %}
-<article>
-    <p>Playlist ready! Redirecting...</p>
-    <script>window.location = '/playlists/{{ playlist_id }}';</script>
-</article>
-{% elif status == "failed" %}
-<article>
-    <p><mark>Generation failed: {{ error or "Unknown error" }}</mark></p>
-    <a href="/playlists/new" role="button" class="secondary">Try Again</a>
-</article>
-{% else %}
+{#- Anything outside pending/running/deferred is terminal and stops the poll. -#}
+{% if status in ("pending", "running", "deferred") %}
 <div id="generating-status"
      hx-get="/partials/generating-status/{{ task_id }}"
      hx-trigger="every 3s"
@@ -23,5 +14,26 @@
         <progress value="{{ progress_current }}" max="{{ progress_total }}"></progress>
         {% endif %}
     </article>
+</div>
+{% elif status == "completed" and playlist_id %}
+<div id="generating-status">
+<article>
+    <p>Playlist ready! Redirecting...</p>
+    <script>window.location = '/playlists/{{ playlist_id }}';</script>
+</article>
+</div>
+{% elif status == "cancelled" %}
+<div id="generating-status">
+<article>
+    <p>Generation was cancelled.</p>
+    <a href="/playlists/new" role="button" class="secondary">Start over</a>
+</article>
+</div>
+{% else %}
+<div id="generating-status">
+<article>
+    <p><mark>Generation failed: {{ error or "Unknown error" }}{% if status != "failed" %} (status: {{ status }}){% endif %}</mark></p>
+    <a href="/playlists/new" role="button" class="secondary">Try Again</a>
+</article>
 </div>
 {% endif %}
