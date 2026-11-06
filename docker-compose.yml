@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18
     ports:
       - "5432:5432"
     environment:
@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: resonance
       POSTGRES_DB: resonance
     volumes:
-      - resonance-pgdata:/var/lib/postgresql/data
+      - resonance-pgdata18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U resonance"]
       interval: 5s
@@ -26,4 +26,4 @@ services:
       retries: 5
 
 volumes:
-  resonance-pgdata:
+  resonance-pgdata18:
