@@ -21,7 +21,7 @@ jobs:
           TAG="$(date -u '+%Y%m%dT%H%M%S')-$(git rev-parse --short HEAD)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
