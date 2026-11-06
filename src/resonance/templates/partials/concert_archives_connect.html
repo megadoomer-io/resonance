@@ -11,15 +11,9 @@
     hx-post="/api/v1/connections/concert-archives/upload"
     hx-swap="none"
     hx-encoding="multipart/form-data"
-    hx-on::after-request="
-      if(event.detail.successful) { location.reload(); }
-      else {
-        var msg = 'Upload failed.';
-        try { msg = JSON.parse(event.detail.xhr.responseText).detail; } catch(e) {}
-        var el = document.getElementById('ca-upload-error');
-        if(el) { el.querySelector('mark').textContent = msg; el.style.display = 'block'; }
-      }
-    "
+    data-after-success-reload
+    data-after-error-show="#ca-upload-error"
+    data-after-error-fallback="Upload failed."
 >
     <label>
         CSV Export File

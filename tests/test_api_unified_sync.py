@@ -222,7 +222,9 @@ class TestTriggerSyncByConnection:
         assert call_args[0][0] == "sync_calendar_feed"
         assert call_args[0][1] == str(conn_id)  # connection_id
         assert call_args[0][2] == str(task.id)  # task_id
-        assert call_args[1]["_job_id"] == f"sync_calendar_feed:{task.id}"
+        assert call_args[1]["_job_id"].startswith(f"sync_calendar_feed:{task.id}:")
+        assert task.arq_job_id == call_args[1]["_job_id"]
+        assert task.enqueued_at is not None
 
     async def test_trigger_oauth_sync(self) -> None:
         """OAuth connection (test connector) triggers plan_sync job."""
@@ -267,7 +269,8 @@ class TestTriggerSyncByConnection:
         assert call_args[0][0] == "plan_sync"
         assert call_args[0][1] == str(task.id)
         assert len(call_args[0]) == 2  # only function name + task_id
-        assert call_args[1]["_job_id"] == f"plan_sync:{task.id}"
+        assert call_args[1]["_job_id"].startswith(f"plan_sync:{task.id}:")
+        assert task.arq_job_id == call_args[1]["_job_id"]
 
     async def test_connection_not_found(self) -> None:
         """Returns 404 when connection does not exist."""

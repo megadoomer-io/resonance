@@ -137,13 +137,7 @@ async def dashboard(
         active_stmt = sa.select(task_models.Task).where(
             task_models.Task.user_id == user_id,
             task_models.Task.service_connection_id.in_(conn_ids),
-            task_models.Task.status.in_(
-                [
-                    types_module.SyncStatus.PENDING,
-                    types_module.SyncStatus.RUNNING,
-                    types_module.SyncStatus.DEFERRED,
-                ]
-            ),
+            task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
         active_result = await db.execute(active_stmt)
         for active_task in active_result.scalars().all():
