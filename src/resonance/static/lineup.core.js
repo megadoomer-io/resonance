@@ -278,3 +278,29 @@ export function serializeRediscovery(window, seedCount, groups) {
     exclude_artist_ids: base.exclude_artist_ids,
   };
 }
+
+/* Task status polling. A task is still owed work only while pending, running or
+ * deferred; any other status (including one this client doesn't know) is
+ * terminal and must stop the poll. */
+export const ACTIVE_TASK_STATUSES = ["pending", "running", "deferred"];
+
+export function isTaskActive(status) {
+  return ACTIVE_TASK_STATUSES.includes(status);
+}
+
+/* Classify a polled enrich task: "active" (keep polling), "completed",
+ * "cancelled", or "failed" (failed plus any unknown terminal status). */
+export function enrichOutcome(status) {
+  if (isTaskActive(status)) return "active";
+  if (status === "completed" || status === "cancelled") return status;
+  return "failed";
+}
+
+/* Banner HTML for a failed enrich. An unknown terminal status shows its raw
+ * value so it isn't mistaken for an ordinary failure. */
+export function enrichFailureMessage(status, error) {
+  const parts = ["Enrichment failed."];
+  if (error) parts.push(escapeHtml(error));
+  if (status !== "failed") parts.push("(status: " + escapeHtml(status) + ")");
+  return parts.join(" ");
+}

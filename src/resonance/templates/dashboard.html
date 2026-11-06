@@ -55,7 +55,7 @@
                             hx-post="/api/v1/sync/cancel/{{ active_task.id }}"
                             hx-swap="none"
                             hx-confirm="Cancel sync?"
-                            hx-on::after-request="location.reload()"
+                            data-after-request-reload
                             class="outline secondary btn-sm"
                         >Cancel</button>
                     {% elif conn.service_type.value == 'concert_archives' %}
@@ -69,7 +69,8 @@
                     <button
                         hx-post="/api/v1/sync/connection/{{ conn.id }}"
                         hx-swap="none"
-                        hx-on::after-request="htmx.trigger('#sync-status', 'load'); this.textContent='Syncing...'; this.disabled=true"
+                        data-after-request-refresh="#sync-status"
+                        data-after-request-disable="Syncing..."
                     ><i data-lucide="refresh-cw" class="icon-inline"></i> Sync Now</button>
                     {% endif %}
                 </td>

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import fastapi
 import sqlalchemy as sa
@@ -16,7 +17,12 @@ import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
+import resonance.sync.reaper as reaper_module
 import resonance.types as types_module
+
+if TYPE_CHECKING:
+    import arq
 
 router = fastapi.APIRouter(
     prefix="/admin",
@@ -200,6 +206,111 @@ async def get_task_detail(
     }
 
 
+_HEALTH_RUNNING_LIMIT = 50
+
+
+def _utc(value: datetime.datetime | None) -> datetime.datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=datetime.UTC)
+
+
+def _iso(value: datetime.datetime | None) -> str | None:
+    aware = _utc(value)
+    return aware.isoformat() if aware else None
+
+
+def _age_seconds(then: datetime.datetime | None, now: datetime.datetime) -> int | None:
+    aware = _utc(then)
+    if aware is None:
+        return None
+    return max(0, int((now - aware).total_seconds()))
+
+
+async def get_tasks_health(
+    db: sa_async.AsyncSession,
+    redis: arq.ArqRedis,
+    now: datetime.datetime | None = None,
+) -> dict[str, object]:
+    """Reaper liveness, queue backlog, running tasks and recent reaper decisions."""
+    now = now or datetime.datetime.now(datetime.UTC)
+    task = task_models.Task
+
+    counts: dict[str, int] = {s.value: 0 for s in types_module.SyncStatus}
+    for status, count in (
+        await db.execute(sa.select(task.status, sa.func.count()).group_by(task.status))
+    ).all():
+        counts[types_module.SyncStatus(status).value] = count
+
+    oldest = (
+        await db.execute(
+            sa.select(task)
+            .where(
+                task.status.in_(
+                    (types_module.SyncStatus.PENDING, types_module.SyncStatus.DEFERRED)
+                )
+            )
+            .order_by(task.created_at)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    running = (
+        (
+            await db.execute(
+                sa.select(task)
+                .where(task.status == types_module.SyncStatus.RUNNING)
+                .order_by(task.started_at)
+                .limit(_HEALTH_RUNNING_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    state = await reaper_module.read_state(redis)
+    stale_after = 2 * reaper_module.INTERVAL
+    last_tick_at: datetime.datetime | None = None
+    if state.last_tick is not None:
+        last_tick_at = datetime.datetime.fromisoformat(str(state.last_tick["at"]))
+    tick_age = _age_seconds(last_tick_at, now)
+
+    return {
+        "reaper": {
+            "last_tick_at": _iso(last_tick_at),
+            "age_seconds": tick_age,
+            "stale": tick_age is None or tick_age > stale_after.total_seconds(),
+            "stale_after_seconds": int(stale_after.total_seconds()),
+            "last_candidates": (state.last_tick or {}).get("candidates"),
+            "last_redelivered": (state.last_tick or {}).get("redelivered"),
+        },
+        "oldest_pending": (
+            {
+                "task_id": str(oldest.id),
+                "task_type": oldest.task_type.value,
+                "status": oldest.status.value,
+                "created_at": _iso(oldest.created_at),
+                "age_seconds": _age_seconds(oldest.created_at, now),
+            }
+            if oldest is not None
+            else None
+        ),
+        "counts": counts,
+        "running": [
+            {
+                "task_id": str(t.id),
+                "task_type": t.task_type.value,
+                "started_at": _iso(t.started_at),
+                "age_seconds": _age_seconds(t.started_at, now),
+                "progress_current": t.progress_current,
+                "progress_total": t.progress_total,
+            }
+            for t in running
+        ],
+        "recent_decisions": state.decisions,
+    }
+
+
 async def search_tracks(
     db: sa_async.AsyncSession,
     query: str,
@@ -284,15 +395,10 @@ async def enqueue_dedup(
         description=operation.replace("_", " ").title(),
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "run_bulk_job",
-        task_id,
-        _job_id=f"bulk:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "run_bulk_job", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -319,6 +425,22 @@ async def admin_stats_endpoint(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     return await get_db_stats(db)
+
+
+@router.get(
+    "/tasks/health",
+    summary="Task queue health",
+    description=(
+        "Reaper last tick (stale past twice its interval), oldest pending or"
+        " deferred task, task counts for every status, running tasks with age"
+        " and progress, and the most recent reaper decisions."
+    ),
+)
+async def admin_tasks_health_endpoint(
+    request: fastapi.Request,
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_tasks_health(db, request.app.state.arq_redis)
 
 
 @router.get(
@@ -390,15 +512,10 @@ async def admin_backfill_mbids_endpoint(
         description="MBID Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_mbids",
-        task_id,
-        _job_id=f"mbid-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_mbids", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -458,15 +575,10 @@ async def admin_backfill_popularity_endpoint(
         description="Popularity Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_popularity",
-        task_id,
-        _job_id=f"popularity-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_popularity", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 
@@ -540,15 +652,10 @@ async def admin_backfill_genres_endpoint(
         description="Genre Backfill",
     )
     db.add(task)
-    await db.commit()
-    task_id = str(task.id)
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "backfill_genres",
-        task_id,
-        _job_id=f"genre-backfill:{task_id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "backfill_genres", str(task.id)
     )
+    task_id = str(task.id)
     return {"task_id": task_id, "status": "started"}
 
 

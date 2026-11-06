@@ -1,0 +1,54 @@
+{#
+  Per-connection Spotify export row, shared by the playlist detail page, the
+  exporting page and the Stop route. Element ids are keyed by task id so the
+  exporting page's poller can update a row's status span out of band without
+  touching its Stop button.
+
+  Usage:
+    {% from "components/export.html" import export_row, export_status_content %}
+#}
+{% from "components/macros.html" import error_state %}
+
+
+{# Inner content of a row's status span; the span itself never changes. #}
+{% macro export_status_content(row) %}
+{% if row.status == "completed" %}
+<span>Exported &middot; {{ row.exported }} tracks{% if row.skipped %} <span class="text-muted">({{ row.skipped }} not found on Spotify)</span>{% endif %}{% if row.spotify_playlist_id %} &middot; <a href="https://open.spotify.com/playlist/{{ row.spotify_playlist_id }}" target="_blank" rel="noopener">Open in Spotify</a>{% endif %}</span>
+{% elif row.status == "cancelled" %}
+<span class="text-muted">Stopped</span>
+{% elif row.status == "failed" %}
+<mark>Failed: {{ row.error or "Unknown error" }}</mark>
+{% elif row.status == "running" %}
+<span aria-busy="true">Exporting…</span>
+{% elif row.status == "deferred" %}
+<span aria-busy="true">Waiting to retry</span>
+{% elif row.status == "pending" %}
+<span aria-busy="true">Queued</span>
+{% else %}
+<mark>Failed: {{ row.error or "Unknown error" }} (status: {{ row.status }})</mark>
+{% endif %}
+{% endmacro %}
+
+
+{% macro export_row(row, playlist_id, notice=none, error=none, focus=false) %}
+<div class="export-row" id="export-row-{{ row.task_id }}">
+    <span class="export-row-label">{{ row.description }}</span>
+    <span class="export-status" id="export-status-{{ row.task_id }}" tabindex="-1"{% if focus %} autofocus{% endif %}>{{ export_status_content(row) }}</span>
+    <span class="export-actions" id="export-actions-{{ row.task_id }}">
+        {% if row.cancellable %}
+        <button
+            hx-post="/playlists/{{ playlist_id }}/export/{{ row.task_id }}/cancel"
+            hx-target="#export-row-{{ row.task_id }}"
+            hx-swap="outerHTML"
+            hx-disabled-elt="this"
+            hx-confirm="Stop export? Tracks already added stay on Spotify."
+            class="outline secondary btn-sm export-stop"
+        >Stop</button>
+        {% endif %}
+    </span>
+    {% if notice %}
+    <small class="text-muted export-row-note">{{ notice }}</small>
+    {% endif %}
+    <div class="export-row-error" id="export-error-{{ row.task_id }}">{% if error %}{{ error_state(error) }}{% endif %}</div>
+</div>
+{% endmacro %}

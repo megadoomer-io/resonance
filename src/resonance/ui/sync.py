@@ -16,6 +16,7 @@ import sqlalchemy.orm as sa_orm
 import resonance.dependencies as deps_module
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 import resonance.ui.common as common
 
@@ -166,16 +167,14 @@ async def songkick_sync_trigger(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.flush()
-
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
+    await lifecycle_module.enqueue_task(
+        db,
+        request.app.state.arq_redis,
+        task,
         "sync_calendar_feed",
         str(connection.id),
         str(task.id),
-        _job_id=f"sync_calendar_feed:{task.id}",
     )
-    await db.commit()
 
     return fastapi.responses.HTMLResponse("")
 
@@ -245,24 +244,12 @@ async def sync_status_partial(
     sync_jobs = sync_jobs_result.scalars().all()
 
     for job in sync_jobs:
-        if job.status in (
-            types_module.SyncStatus.PENDING,
-            types_module.SyncStatus.RUNNING,
-            types_module.SyncStatus.DEFERRED,
-        ):
+        if job.status in types_module.ACTIVE_STATUSES:
             child_total = sum(child.progress_current for child in job.children)
             if child_total:
                 job.progress_current = int(child_total)
 
-    has_active_sync = any(
-        j.status
-        in (
-            types_module.SyncStatus.PENDING,
-            types_module.SyncStatus.RUNNING,
-            types_module.SyncStatus.DEFERRED,
-        )
-        for j in sync_jobs
-    )
+    has_active_sync = any(j.status in types_module.ACTIVE_STATUSES for j in sync_jobs)
 
     return common.templates.TemplateResponse(
         request,
