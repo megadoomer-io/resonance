@@ -69,6 +69,7 @@ import resonance.services.artist_import as artist_import_module
 import resonance.services.artist_tags as artist_tags_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
+import resonance.services.playlist_export as playlist_export_module
 import resonance.sync.backfill as backfill_module
 import resonance.sync.base as sync_base
 import resonance.sync.dispatch as dispatch_module
@@ -2401,6 +2402,8 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 # Playlist export to external services
 # ---------------------------------------------------------------------------
 
+_SPOTIFY_WRITE_CHUNK = 100
+
 _HTTP_ERROR_MESSAGES: dict[int, str] = {
     401: "Authorization expired — please reconnect your {service} account.",
     403: (
@@ -2569,59 +2572,88 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 else None
             )
 
-            # Match tracks to Spotify IDs (two-pass: MB URL relations, then text search)
+            # Match tracks to Spotify IDs in two passes (MB URL relations, then
+            # text search), reporting progress per pass.
             export_now = datetime.datetime.now(datetime.UTC)
-            spotify_uris: list[str] = []
-            skipped_tracks: list[str] = []
-            # Per-track sync status (#spotify-sync-visibility): which PlaylistTrack
-            # rows matched vs not, so we can stamp spotify_synced_at after the push.
-            matched_pts: list[playlist_models.PlaylistTrack] = []
-            unmatched_pts: list[playlist_models.PlaylistTrack] = []
+            progress = playlist_export_module.ExportProgressRecorder(session, task)
+            export_phase = playlist_export_module.ExportPhase
+            pts = list(playlist.tracks)
+            resolved: dict[int, str] = {}
+            for idx, pt in enumerate(pts):
+                cached_id = (pt.track.service_links or {}).get("spotify")
+                if cached_id is not None:
+                    resolved[idx] = str(cached_id)
+            cached = len(resolved)
+
+            def _record_match(idx: int, spotify_id: str) -> None:
+                track = pts[idx].track
+                updated_links = dict(track.service_links or {})
+                updated_links["spotify"] = spotify_id
+                track.service_links = updated_links
+                resolved[idx] = spotify_id
+
+            mbid_todo: list[tuple[int, str]] = []
+            if lb_connector is not None:
+                for idx, pt in enumerate(pts):
+                    mbid = artist_utils.get_mbid(pt.track.service_links or {})
+                    if idx not in resolved and mbid:
+                        mbid_todo.append((idx, mbid))
             mb_matched = 0
+            if mbid_todo and lb_connector is not None:
+                await progress.phase(
+                    export_phase.MATCHING_MBID, total=len(mbid_todo), matched=cached
+                )
+                for done, (idx, mbid) in enumerate(mbid_todo, start=1):
+                    found_id = await lb_connector.get_recording_spotify_id(mbid)
+                    if found_id is not None:
+                        _record_match(idx, found_id)
+                        mb_matched += 1
+                    await progress.advance(current=done, matched=len(resolved))
+                await progress.flush()
+
+            search_todo = [idx for idx in range(len(pts)) if idx not in resolved]
             search_matched = 0
-
-            for pt in playlist.tracks:
-                track = pt.track
-                track_links = track.service_links or {}
-                spotify_id = track_links.get("spotify")
-
-                if spotify_id is None and lb_connector is not None:
-                    recording_mbid = artist_utils.get_mbid(track_links)
-                    if recording_mbid:
-                        found_id = await lb_connector.get_recording_spotify_id(
-                            recording_mbid
-                        )
-                        if found_id is not None:
-                            updated_links = dict(track_links)
-                            updated_links["spotify"] = found_id
-                            track.service_links = updated_links
-                            spotify_id = found_id
-                            mb_matched += 1
-
-                if spotify_id is None:
+            skipped_tracks: list[str] = []
+            if search_todo:
+                await progress.phase(
+                    export_phase.MATCHING_SEARCH,
+                    total=len(search_todo),
+                    matched=len(resolved),
+                    skipped=0,
+                )
+                for done, idx in enumerate(search_todo, start=1):
+                    track = pts[idx].track
                     artist_name = track.artist.name if track.artist else ""
                     found_spotify_id = await connector.search_track(
                         access_token, track.title, artist_name
                     )
                     if found_spotify_id is not None:
-                        updated_links = dict(track_links)
-                        updated_links["spotify"] = found_spotify_id
-                        track.service_links = updated_links
-                        spotify_id = found_spotify_id
+                        _record_match(idx, found_spotify_id)
                         search_matched += 1
                     else:
                         skipped_tracks.append(track.title)
-                        unmatched_pts.append(pt)
-                        continue
+                    await progress.advance(
+                        current=done,
+                        matched=len(resolved),
+                        skipped=len(skipped_tracks),
+                    )
+                await progress.flush()
 
-                spotify_uris.append(f"spotify:track:{spotify_id}")
-                matched_pts.append(pt)
+            # Per-track sync status (#spotify-sync-visibility): which PlaylistTrack
+            # rows matched vs not, so we can stamp spotify_synced_at after the push.
+            matched_pts = [pt for idx, pt in enumerate(pts) if idx in resolved]
+            unmatched_pts = [pt for idx, pt in enumerate(pts) if idx not in resolved]
+            spotify_uris = [
+                f"spotify:track:{resolved[idx]}"
+                for idx in range(len(pts))
+                if idx in resolved
+            ]
 
             log.info(
                 "export_track_matching_summary",
                 mb_matched=mb_matched,
                 search_matched=search_matched,
-                cached=len(spotify_uris) - mb_matched - search_matched,
+                cached=cached,
                 skipped=len(skipped_tracks),
             )
 
@@ -2643,18 +2675,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 else None
             )
 
+            counts = {"matched": len(spotify_uris), "skipped": len(skipped_tracks)}
+
             if existing_export and isinstance(existing_export, dict):
-                # Update existing playlist
                 spotify_playlist_id = str(existing_export["playlist_id"])
-                await connector.replace_playlist_tracks(
-                    access_token, spotify_playlist_id, spotify_uris
-                )
-                log.info(
-                    "export_playlist_replaced",
-                    spotify_playlist_id=spotify_playlist_id,
-                )
+                replace_first = True
             else:
-                # Create new playlist
+                await progress.phase(export_phase.CREATING_PLAYLIST, **counts)
                 spotify_playlist_id = await connector.create_playlist(
                     access_token,
                     playlist.name,
@@ -2667,13 +2694,31 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     playlist, connection_id_str, {"playlist_id": spotify_playlist_id}
                 )
                 await session.commit()
-                await connector.add_tracks_to_playlist(
-                    access_token, spotify_playlist_id, spotify_uris
-                )
-                log.info(
-                    "export_playlist_created",
-                    spotify_playlist_id=spotify_playlist_id,
-                )
+                replace_first = False
+
+            # Spotify takes at most 100 items per write, so the push is chunked
+            # here (per-chunk progress); on an update the first chunk replaces
+            # the playlist's contents and the rest append.
+            await progress.phase(
+                export_phase.ADDING_TRACKS, total=len(spotify_uris), **counts
+            )
+            for start in range(0, len(spotify_uris), _SPOTIFY_WRITE_CHUNK):
+                chunk = spotify_uris[start : start + _SPOTIFY_WRITE_CHUNK]
+                if start == 0 and replace_first:
+                    await connector.replace_playlist_tracks(
+                        access_token, spotify_playlist_id, chunk
+                    )
+                else:
+                    await connector.add_tracks_to_playlist(
+                        access_token, spotify_playlist_id, chunk
+                    )
+                await progress.advance(current=start + len(chunk), commit=True)
+            log.info(
+                "export_playlist_replaced"
+                if replace_first
+                else "export_playlist_created",
+                spotify_playlist_id=spotify_playlist_id,
+            )
 
             _set_spotify_export_link(
                 playlist,
@@ -2698,6 +2743,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 session,
                 task,
                 {
+                    **(task.result or {}),
                     "spotify_playlist_id": spotify_playlist_id,
                     "exported": len(spotify_uris),
                     "skipped": len(skipped_tracks),

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import datetime
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 import resonance.models.task as task_models
 import resonance.services.playlist_export as playlist_export_module
@@ -90,3 +94,183 @@ class TestExportConnectionIds:
 
     def test_empty_list(self) -> None:
         assert playlist_export_module.export_connection_ids([]) == set()
+
+
+_NOW = datetime.datetime(2026, 11, 5, 12, 0, tzinfo=datetime.UTC)
+
+
+def _task_with(
+    result: dict[str, object] | None = None,
+    *,
+    started_at: datetime.datetime | None = None,
+    status: types_module.SyncStatus = types_module.SyncStatus.RUNNING,
+) -> task_models.Task:
+    task = _export_task(
+        playlist_id=uuid.uuid4(), connection_id=uuid.uuid4(), status=status
+    )
+    task.result = result or {}
+    task.started_at = started_at
+    return task
+
+
+class TestExportProgress:
+    def test_reads_phase_counts_and_progress(self) -> None:
+        task = _task_with(
+            {
+                "phase": "matching_search",
+                "matched": 7,
+                "skipped": 2,
+                "progress_updated_at": _NOW.isoformat(),
+            }
+        )
+        task.progress_current = 9
+        task.progress_total = 20
+        progress = playlist_export_module.export_progress(task, now=_NOW)
+        assert progress.phase == "matching_search"
+        assert progress.phase_label == "Matching tracks (Spotify search)"
+        assert (progress.current, progress.total) == (9, 20)
+        assert (progress.matched, progress.skipped) == (7, 2)
+        assert progress.last_progress_at == _NOW
+        assert not progress.stalled
+        assert not progress.retryable
+
+    def test_running_past_threshold_is_stalled_and_retryable(self) -> None:
+        last = _NOW - playlist_export_module.STALL_THRESHOLD
+        last -= datetime.timedelta(seconds=1)
+        task = _task_with(
+            {"phase": "adding_tracks", "progress_updated_at": last.isoformat()}
+        )
+        progress = playlist_export_module.export_progress(task, now=_NOW)
+        assert progress.stalled
+        assert progress.retryable
+        assert progress.stalled_minutes == 5
+
+    def test_within_threshold_is_not_stalled(self) -> None:
+        last = _NOW - playlist_export_module.STALL_THRESHOLD
+        last += datetime.timedelta(seconds=1)
+        task = _task_with({"progress_updated_at": last.isoformat()})
+        assert not playlist_export_module.export_progress(task, now=_NOW).stalled
+
+    def test_falls_back_to_started_at(self) -> None:
+        task = _task_with({}, started_at=_NOW - datetime.timedelta(hours=1))
+        progress = playlist_export_module.export_progress(task, now=_NOW)
+        assert progress.last_progress_at == task.started_at
+        assert progress.stalled
+
+    def test_no_timestamp_at_all_is_not_stalled(self) -> None:
+        progress = playlist_export_module.export_progress(_task_with(), now=_NOW)
+        assert progress.last_progress_at is None
+        assert not progress.stalled
+
+    def test_unparseable_timestamp_falls_back_to_started_at(self) -> None:
+        task = _task_with({"progress_updated_at": "nope"}, started_at=_NOW)
+        progress = playlist_export_module.export_progress(task, now=_NOW)
+        assert progress.last_progress_at == _NOW
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            types_module.SyncStatus.PENDING,
+            types_module.SyncStatus.DEFERRED,
+            types_module.SyncStatus.COMPLETED,
+            types_module.SyncStatus.CANCELLED,
+        ],
+    )
+    def test_only_running_can_stall(self, status: types_module.SyncStatus) -> None:
+        old = (_NOW - datetime.timedelta(hours=1)).isoformat()
+        task = _task_with({"progress_updated_at": old}, status=status)
+        progress = playlist_export_module.export_progress(task, now=_NOW)
+        assert not progress.stalled
+        assert not progress.retryable
+
+    def test_failed_is_retryable(self) -> None:
+        task = _task_with(
+            {"phase": "adding_tracks"}, status=types_module.SyncStatus.FAILED
+        )
+        assert playlist_export_module.export_progress(task, now=_NOW).retryable
+
+    def test_missing_and_unknown_phase_labels(self) -> None:
+        missing = playlist_export_module.export_progress(_task_with(), now=_NOW)
+        assert missing.phase is None
+        assert missing.phase_label is None
+        weird = _task_with({"phase": "mystery"})
+        progress = playlist_export_module.export_progress(weird, now=_NOW)
+        assert progress.phase_label == "mystery"
+
+    def test_as_dict_is_json_ready(self) -> None:
+        task = _task_with(
+            {
+                "phase": "adding_tracks",
+                "matched": 3,
+                "skipped": 1,
+                "progress_updated_at": _NOW.isoformat(),
+            }
+        )
+        task.progress_current = 3
+        task.progress_total = 3
+        data = playlist_export_module.export_progress(task, now=_NOW).as_dict()
+        assert data == {
+            "phase": "adding_tracks",
+            "phase_label": "Adding tracks",
+            "progress_current": 3,
+            "progress_total": 3,
+            "matched": 3,
+            "skipped": 1,
+            "last_progress_at": _NOW.isoformat(),
+            "stalled": False,
+            "retryable": False,
+        }
+
+
+class TestExportProgressRecorder:
+    def _recorder(self, batch: int = 3) -> tuple[task_models.Task, AsyncMock, Any]:
+        task = _task_with({"keep": "me"})
+        session = AsyncMock()
+        recorder = playlist_export_module.ExportProgressRecorder(
+            session, task, batch_size=batch, clock=lambda: _NOW
+        )
+        return task, session, recorder
+
+    async def test_phase_commits_immediately(self) -> None:
+        task, session, recorder = self._recorder()
+        await recorder.phase(
+            playlist_export_module.ExportPhase.MATCHING_MBID, current=2, total=10
+        )
+        session.commit.assert_awaited_once()
+        assert (task.progress_current, task.progress_total) == (2, 10)
+        assert task.result["phase"] == "matching_mbid"
+        assert task.result["progress_updated_at"] == _NOW.isoformat()
+        assert task.result["keep"] == "me"
+
+    async def test_advance_commits_in_batches(self) -> None:
+        task, session, recorder = self._recorder(batch=3)
+        await recorder.phase(
+            playlist_export_module.ExportPhase.MATCHING_SEARCH, current=0, total=10
+        )
+        session.commit.reset_mock()
+        for i in range(1, 8):
+            await recorder.advance(current=i, matched=i, skipped=0)
+        # 7 steps in batches of 3: commits at 3 and 6 only.
+        assert session.commit.await_count == 2
+        assert task.progress_current == 7
+        assert task.result["matched"] == 7
+        await recorder.flush()
+        assert session.commit.await_count == 3
+
+    async def test_flush_without_pending_change_is_a_noop(self) -> None:
+        _task, session, recorder = self._recorder()
+        await recorder.phase(
+            playlist_export_module.ExportPhase.ADDING_TRACKS, current=0, total=5
+        )
+        session.commit.reset_mock()
+        await recorder.flush()
+        session.commit.assert_not_awaited()
+
+    async def test_counts_carry_across_phases(self) -> None:
+        task, _session, recorder = self._recorder()
+        await recorder.advance(current=4, matched=3, skipped=1)
+        await recorder.phase(
+            playlist_export_module.ExportPhase.ADDING_TRACKS, current=0, total=3
+        )
+        assert task.result["matched"] == 3
+        assert task.result["skipped"] == 1
