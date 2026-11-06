@@ -41,7 +41,12 @@ _ENTRY_POINTS: list[tuple[Any, Callable[..., Awaitable[None]], tuple[str, ...]]]
 
 
 _PIPELINE_CHILD_JOBS = frozenset(
-    {"sync_range", "discover_tracks_for_artist", "score_and_build_playlist"}
+    {
+        "sync_range",
+        "discover_tracks_for_artist",
+        "score_and_build_playlist",
+        "sync_concert_archives_chunk",
+    }
 )
 
 

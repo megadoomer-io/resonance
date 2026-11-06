@@ -827,3 +827,170 @@ class TestPollTaskTerminal:
             cli_module._poll_task("t1", "Working")
         assert exc.value.code == 1
         assert status.upper() in capsys.readouterr().out
+
+
+_HEALTH = {
+    "reaper": {
+        "last_tick_at": "2026-11-05T12:00:00+00:00",
+        "age_seconds": 250,
+        "stale": True,
+        "stale_after_seconds": 120,
+    },
+    "oldest_pending": {
+        "task_id": "abc",
+        "task_type": "time_range",
+        "status": "deferred",
+        "age_seconds": 7300,
+    },
+    "counts": {
+        "pending": 1,
+        "running": 2,
+        "completed": 9,
+        "failed": 0,
+        "deferred": 1,
+        "cancelled": 0,
+    },
+    "running": [
+        {
+            "task_id": "r1",
+            "task_type": "playlist_export",
+            "age_seconds": 65,
+            "progress_current": 4,
+            "progress_total": 10,
+        },
+        {
+            "task_id": "r2",
+            "task_type": "sync_range",
+            "age_seconds": 5,
+            "progress_current": 7,
+            "progress_total": None,
+        },
+    ],
+    "recent_decisions": [
+        {
+            "at": "2026-11-05T11:59:00+00:00",
+            "action": "redelivered",
+            "task_type": "time_range",
+            "task_id": "x",
+        }
+    ],
+}
+
+_EMPTY_HEALTH = {
+    "reaper": {"last_tick_at": None, "age_seconds": None, "stale": True},
+    "oldest_pending": None,
+    "counts": {"pending": 0, "running": 0},
+    "running": [],
+    "recent_decisions": [],
+}
+
+
+@pytest.mark.usefixtures("_mock_config")
+class TestTasksHealthCommand:
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        response: httpx.Response,
+        *args: str,
+    ) -> dict[str, Any]:
+        captured: dict[str, Any] = {}
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["method"] = method
+            captured["url"] = url
+            return response
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "tasks", "health", *args])
+        cli_module._cmd_tasks()
+        return captured
+
+    def test_prints_aligned_report_in_order(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        captured = self._run(monkeypatch, _fake_response(json_body=_HEALTH))
+
+        assert captured == {
+            "method": "GET",
+            "url": "http://test-host/api/v1/admin/tasks/health",
+        }
+        assert capsys.readouterr().out.splitlines() == [
+            "Reaper last tick: 2026-11-05 12:00:00 UTC (4m 10s ago) STALE",
+            "Oldest pending:   2h 1m old, time_range abc (deferred)",
+            "Counts:           pending 1, running 2, completed 9, failed 0,"
+            " deferred 1, cancelled 0",
+            "Running:          playlist_export r1, 1m 5s, progress 4/10",
+            "                  sync_range r2, 5s, progress 7",
+            "Reaper decisions: 2026-11-05 11:59:00 UTC redelivered time_range x",
+        ]
+
+    def test_fresh_tick_has_no_stale_flag(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fresh = {**_HEALTH, "reaper": {**_HEALTH["reaper"], "stale": False}}
+        self._run(monkeypatch, _fake_response(json_body=fresh))
+        assert "STALE" not in capsys.readouterr().out
+
+    def test_empty_states(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(monkeypatch, _fake_response(json_body=_EMPTY_HEALTH))
+
+        assert capsys.readouterr().out.splitlines() == [
+            "Reaper last tick: Reaper has never run",
+            "Oldest pending:   No pending tasks",
+            "Counts:           pending 0, running 0",
+            "Running:          No running tasks",
+            "Reaper decisions: No reaper decisions yet",
+        ]
+
+    def test_json_prints_raw_response(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(monkeypatch, _fake_response(json_body=_HEALTH), "--json")
+        assert json.loads(capsys.readouterr().out) == _HEALTH
+
+    def test_forbidden_prints_admin_required_and_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(
+            monkeypatch,
+            _fake_response(status_code=403, json_body={"detail": "Invalid API token"}),
+        )
+        assert capsys.readouterr().out.strip() == "Admin role required"
+
+    def test_other_http_error_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(monkeypatch, _fake_response(status_code=500, text="boom"))
+        assert capsys.readouterr().out.strip() == "Error: HTTP 500"
+
+    def test_missing_subcommand_prints_usage(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "tasks"])
+        with pytest.raises(SystemExit) as exc:
+            cli_module._cmd_tasks()
+        assert exc.value.code == 1
+        assert "tasks <subcommand>" in capsys.readouterr().out
+
+    def test_registered_in_dispatch(self) -> None:
+        assert cli_module._COMMANDS["tasks"][1] is cli_module._cmd_tasks
+
+
+class TestHumanizeSeconds:
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m"),
+            (95, "1m 35s"),
+            (3600, "1h"),
+            (7300, "2h 1m"),
+            (90061, "1d 1h"),
+            (None, "unknown"),
+        ],
+    )
+    def test_humanize(self, seconds: object, expected: str) -> None:
+        assert cli_module._humanize_seconds(seconds) == expected

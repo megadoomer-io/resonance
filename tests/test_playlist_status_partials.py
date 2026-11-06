@@ -341,9 +341,9 @@ class TestExportStatusPartial:
         assert f'id="export-status-{running.id}" hx-swap-oob="innerHTML"' in resp.text
         assert "Exporting…" in resp.text
         # Rows that can no longer be stopped lose their actions; a still-stoppable
-        # row's Stop is left alone and never re-rendered by the poll.
+        # row's Stop (pending or running) is left alone and never re-rendered.
         assert f'id="export-actions-{done.id}" hx-swap-oob' in resp.text
-        assert f'id="export-actions-{running.id}" hx-swap-oob' in resp.text
+        assert f'id="export-actions-{running.id}"' not in resp.text
         assert f'id="export-actions-{pending.id}"' not in resp.text
         assert "Stop" not in resp.text
 
@@ -516,10 +516,11 @@ class TestExportingPageFrame:
         assert f'id="export-row-{running.id}"' in html
         assert "Back to playlist" in html
         assert _keeps_polling(html)
-        # Stop only for PENDING/DEFERRED; RUNNING explains why it can't stop.
-        assert html.count(">Stop</button>") == 1
+        assert html.count(">Stop</button>") == 2
         assert f"/export/{pending.id}/cancel" in html
-        assert "Can't be stopped once it has started." in html
+        assert f"/export/{running.id}/cancel" in html
+        assert _STOP_CONFIRM in html
+        assert "Can&#39;t be stopped" not in html
 
     async def test_all_terminal_renders_without_poller(
         self, user_id: uuid.UUID
@@ -569,6 +570,7 @@ def _cancel_url(playlist_id: uuid.UUID, task_id: uuid.UUID) -> str:
 
 
 _CANCEL_ERROR = "Couldn&#39;t stop the export. Try again."
+_STOP_CONFIRM = 'hx-confirm="Stop export? Tracks already added stay on Spotify."'
 
 
 class TestCancelExportRoute:
@@ -597,6 +599,38 @@ class TestCancelExportRoute:
         assert ">Stop</button>" not in resp.text
         assert "HX-Retarget" not in resp.headers
         # Focus moves to the swapped row's status element.
+        assert f'id="export-status-{task.id}" tabindex="-1" autofocus' in resp.text
+
+    async def test_running_export_is_stopped_and_job_aborted(
+        self, user_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        aborted: list[tuple[Any, uuid.UUID, str]] = []
+
+        async def fake_abort(arq_redis: Any, task_id: uuid.UUID, job_id: str) -> bool:
+            aborted.append((arq_redis, task_id, job_id))
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "abort_job", fake_abort)
+        playlist_id = uuid.uuid4()
+        task = _export_task(user_id, playlist_id)
+        task.arq_job_id = "job-123"
+        db = TaskStoreSession([task])
+        app, cookies = _app(db, user_id)
+        arq_redis = object()
+        app.state.arq_redis = arq_redis
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            cookies=cookies,
+        ) as client:
+            resp = await client.post(
+                _cancel_url(playlist_id, task.id), headers={"HX-Request": "true"}
+            )
+        assert resp.status_code == 200
+        assert task.status == types_module.SyncStatus.CANCELLED
+        assert aborted == [(arq_redis, task.id, "job-123")]
+        assert '<span class="text-muted">Stopped</span>' in resp.text
+        assert ">Stop</button>" not in resp.text
         assert f'id="export-status-{task.id}" tabindex="-1" autofocus' in resp.text
 
     async def test_already_finished_shows_real_state_and_notice(
@@ -700,6 +734,64 @@ class TestExportRowPartial:
         assert 'aria-busy="true"' in html
         assert "autofocus" not in html
 
+    def test_running_row_is_stoppable_with_spotify_confirm(
+        self, user_id: uuid.UUID
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        task = _export_task(user_id, playlist_id)
+        html = _render(
+            "partials/export_row.html",
+            row=playlists_ui._export_row(task),
+            playlist_id=str(playlist_id),
+        )
+        assert ">Stop</button>" in html
+        assert _STOP_CONFIRM in html
+        assert "Exporting…" in html
+        assert "Can&#39;t be stopped" not in html
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            types_module.SyncStatus.PENDING,
+            types_module.SyncStatus.RUNNING,
+            types_module.SyncStatus.DEFERRED,
+        ],
+    )
+    def test_every_cancellable_row_uses_the_same_confirm(
+        self, user_id: uuid.UUID, status: types_module.SyncStatus
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        task = _export_task(user_id, playlist_id, status=status)
+        html = _render(
+            "partials/export_row.html",
+            row=playlists_ui._export_row(task),
+            playlist_id=str(playlist_id),
+        )
+        assert ">Stop</button>" in html
+        assert _STOP_CONFIRM in html
+        assert "Stop this export?" not in html
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            types_module.SyncStatus.COMPLETED,
+            types_module.SyncStatus.FAILED,
+            types_module.SyncStatus.CANCELLED,
+        ],
+    )
+    def test_terminal_rows_have_no_stop(
+        self, user_id: uuid.UUID, status: types_module.SyncStatus
+    ) -> None:
+        playlist_id = uuid.uuid4()
+        task = _export_task(user_id, playlist_id, status=status)
+        html = _render(
+            "partials/export_row.html",
+            row=playlists_ui._export_row(task),
+            playlist_id=str(playlist_id),
+        )
+        assert ">Stop</button>" not in html
+        assert "hx-confirm" not in html
+
     def test_unknown_status_renders_like_failed_with_raw_status(
         self, user_id: uuid.UUID
     ) -> None:
@@ -739,8 +831,9 @@ class TestPlaylistDetailExportSection:
         assert 'aria-live="polite" aria-atomic="false"' in html
         assert f'id="export-row-{pending.id}"' in html
         assert f'id="export-row-{running.id}"' in html
-        assert html.count(">Stop</button>") == 1
-        assert "Can't be stopped once it has started." in html
+        assert html.count(">Stop</button>") == 2
+        assert _STOP_CONFIRM in html
+        assert "Can&#39;t be stopped" not in html
         assert "View progress" in html
 
 

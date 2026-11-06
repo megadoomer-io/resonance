@@ -123,12 +123,8 @@ async def trigger_sync(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.commit()
-
-    # Enqueue arq job for background processing
-    arq_redis = request.app.state.arq_redis
-    await arq_redis.enqueue_job(
-        "plan_sync", str(task.id), _job_id=f"plan_sync:{task.id}"
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, "plan_sync", str(task.id)
     )
 
     return {"status": "started", "sync_task_id": str(task.id)}
@@ -266,6 +262,7 @@ async def trigger_sync_by_connection(
 
     # 4. Create task
     task = task_models.Task(
+        id=uuid.uuid4(),
         user_id=user_id,
         service_connection_id=connection.id,
         task_type=(
@@ -276,21 +273,15 @@ async def trigger_sync_by_connection(
         status=types_module.SyncStatus.PENDING,
     )
     db.add(task)
-    await db.flush()
 
     # 5. Enqueue — plan_sync takes (task_id,), others take (connection_id, task_id)
-    arq_redis = request.app.state.arq_redis
     if config.sync_function == "plan_sync":
         args: tuple[str, ...] = (str(task.id),)
     else:
         args = (str(connection.id), str(task.id))
-    await arq_redis.enqueue_job(
-        config.sync_function,
-        *args,
-        _job_id=f"{config.sync_function}:{task.id}",
+    await lifecycle_module.enqueue_task(
+        db, request.app.state.arq_redis, task, config.sync_function, *args
     )
-
-    await db.commit()
     return {"status": "started", "task_id": str(task.id)}
 
 
@@ -299,17 +290,24 @@ async def trigger_sync_by_connection(
     summary="Cancel sync",
     description=(
         "Cancel one of your pending, deferred or running tasks and its unfinished"
-        " children. A running task is not interrupted: its in-flight run can still"
-        " overwrite the cancelled status when it finishes."
+        " children. A running task's job is aborted and the task stays cancelled;"
+        " work it already finished is not rolled back (for example, tracks an"
+        " export already added stay on Spotify)."
     ),
 )
 async def cancel_sync(
     job_id: uuid.UUID,
+    request: fastapi.Request,
     user_id: Annotated[uuid.UUID, fastapi.Depends(deps_module.get_current_user_id)],
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, Any]:
     """Cancel a task (any type) owned by the caller."""
-    result = await lifecycle_module.request_cancel(db, job_id, user_id)
+    result = await lifecycle_module.request_cancel(
+        db,
+        job_id,
+        user_id,
+        arq_redis=getattr(request.app.state, "arq_redis", None),
+    )
 
     if result.outcome == lifecycle_module.CancelOutcome.NOT_FOUND:
         raise fastapi.HTTPException(status_code=404, detail="Sync task not found")

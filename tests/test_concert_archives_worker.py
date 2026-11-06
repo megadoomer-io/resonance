@@ -346,6 +346,7 @@ Start Date,End Date,Status,Concert Name,Bands Seen,Bands Not Seen,Venue,Location
         pending_child = MagicMock()
         pending_child.id = uuid.uuid4()
         pending_child.status = types_module.SyncStatus.PENDING
+        pending_child.enqueued_at = None
         session = AsyncMock()
         _setup_session_queries(session, task, None, [pending_child])
         ctx = _make_ctx(session)

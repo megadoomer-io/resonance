@@ -2,23 +2,121 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
 import enum
+import uuid
 from typing import TYPE_CHECKING
 
+import arq.jobs as arq_jobs
 import sqlalchemy as sa
 import structlog
 
 import resonance.models.task as task_models
+import resonance.sync.dispatch as dispatch_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
-    import uuid
-
+    import arq
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Delivery: handing a task row to arq
+# ---------------------------------------------------------------------------
+
+
+def new_job_id(job_name: str, task_id: uuid.UUID) -> str:
+    """A fresh arq job id for one delivery of a task.
+
+    arq silently drops ``enqueue_job`` while a job with the same id (or its
+    result key) exists, so every delivery gets its own id.
+    """
+    return f"{job_name}:{task_id}:{uuid.uuid4().hex}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Delivery:
+    """One arq job for a task, stamped on the row and enqueued after commit."""
+
+    task_id: uuid.UUID
+    job_name: str
+    args: tuple[object, ...]
+    job_id: str
+    defer_by: datetime.timedelta | None = None
+
+
+def stamp_delivery(
+    task: task_models.Task,
+    job_name: str,
+    *args: object,
+    defer_by: datetime.timedelta | None = None,
+    job_id: str | None = None,
+) -> Delivery:
+    """Record a delivery on the row; the caller commits, then calls ``deliver``.
+
+    Stamping in the same transaction that inserts or advances the row means a
+    crash between commit and enqueue leaves a row whose job arq doesn't know,
+    which the reaper re-delivers.
+    """
+    if task.id is None:
+        # The column default only fires at flush; the job id needs it now.
+        task.id = uuid.uuid4()
+    delivery = Delivery(
+        task_id=task.id,
+        job_name=job_name,
+        args=args,
+        job_id=job_id or new_job_id(job_name, task.id),
+        defer_by=defer_by,
+    )
+    task.enqueued_at = datetime.datetime.now(datetime.UTC)
+    task.arq_job_id = delivery.job_id
+    return delivery
+
+
+async def deliver(arq_redis: arq.ArqRedis | None, delivery: Delivery) -> bool:
+    """Enqueue a stamped delivery. Never raises: the reaper covers a failure."""
+    log = logger.bind(
+        task_id=str(delivery.task_id),
+        job=delivery.job_name,
+        job_id=delivery.job_id,
+    )
+    if arq_redis is None:
+        log.warning("task_enqueue_skipped_no_redis")
+        return False
+    try:
+        job = await arq_redis.enqueue_job(
+            delivery.job_name,
+            *delivery.args,
+            _job_id=delivery.job_id,
+            _defer_by=delivery.defer_by,
+        )
+    except Exception:
+        log.exception("task_enqueue_failed")
+        return False
+    if job is None:
+        log.warning("task_enqueue_dropped")
+        return False
+    return True
+
+
+async def enqueue_task(
+    session: AsyncSession,
+    arq_redis: arq.ArqRedis | None,
+    task: task_models.Task,
+    job_name: str,
+    *args: object,
+    defer_by: datetime.timedelta | None = None,
+    job_id: str | None = None,
+) -> Delivery:
+    """Stamp a delivery on *task*, commit the session, then enqueue the job."""
+    delivery = stamp_delivery(task, job_name, *args, defer_by=defer_by, job_id=job_id)
+    await session.commit()
+    await deliver(arq_redis, delivery)
+    return delivery
 
 
 async def complete_task(
@@ -130,19 +228,18 @@ async def is_cancelled(
 async def cancel_active_children(
     session: AsyncSession,
     parent_id: object,
-) -> int:
+) -> list[tuple[task_models.Task, types_module.SyncStatus]]:
     """Cancel every non-terminal child of a cancelled parent.
 
     PENDING and DEFERRED children are never picked up afterwards. A RUNNING
-    child is marked too, but its in-flight run still overwrites the status
-    when it finishes (no hard abort yet).
+    child is marked too; ``request_cancel`` aborts its arq job.
 
     Args:
         session: Active database session.
         parent_id: The parent task ID whose children should be cancelled.
 
     Returns:
-        Number of children cancelled.
+        Each cancelled child with the status it had before.
     """
     active_result = await session.execute(
         sa.select(task_models.Task).where(
@@ -150,17 +247,16 @@ async def cancel_active_children(
             task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
         )
     )
-    active_children = active_result.scalars().all()
-    for child in active_children:
+    cancelled = [(child, child.status) for child in active_result.scalars().all()]
+    for child, _ in cancelled:
         await cancel_task(session, child, "Parent task was cancelled")
-    count = len(active_children)
-    if count > 0:
+    if cancelled:
         logger.info(
             "active_children_cancelled",
             parent_id=str(parent_id),
-            count=count,
+            count=len(cancelled),
         )
-    return count
+    return cancelled
 
 
 class CancelOutcome(enum.StrEnum):
@@ -185,17 +281,20 @@ async def request_cancel(
     task_id: uuid.UUID,
     user_id: uuid.UUID,
     reason: str = "Cancelled by user",
+    arq_redis: arq.ArqRedis | None = None,
 ) -> CancelResult:
     """Cancel a user's task and its non-terminal children, then commit.
 
     Shared by the API and UI cancel routes. Only the owning user's tasks are
-    visible; another user's task reads as not found.
+    visible; another user's task reads as not found. After the commit, the
+    arq jobs of anything that was RUNNING are aborted (bounded wait).
 
     Args:
         session: Active database session.
         task_id: The task to cancel.
         user_id: The requesting user (ownership scope).
         reason: Stored in ``error_message`` on the cancelled task.
+        arq_redis: arq pool used to abort running jobs; ``None`` skips aborts.
 
     Returns:
         A ``CancelResult``: CANCELLED, ALREADY_TERMINAL (task untouched), or
@@ -213,14 +312,80 @@ async def request_cancel(
     if is_terminal(task):
         return CancelResult(CancelOutcome.ALREADY_TERMINAL, task=task)
 
+    was_running = task.status == types_module.SyncStatus.RUNNING
     await cancel_task(session, task, reason)
-    children_cancelled = await cancel_active_children(session, task.id)
+    children = await cancel_active_children(session, task.id)
     await session.commit()
     logger.info(
         "task_cancelled",
         task_id=str(task.id),
-        children_cancelled=children_cancelled,
+        children_cancelled=len(children),
     )
+
+    running = [task] if was_running else []
+    running += [c for c, prior in children if prior == types_module.SyncStatus.RUNNING]
+    await asyncio.gather(
+        *(
+            abort_job(arq_redis, row.id, row.arq_job_id)
+            for row in running
+            if row.arq_job_id is not None
+        )
+    )
+    if was_running and task.parent_id is not None:
+        await _redeliver_to_advance_parent(session, arq_redis, task)
     return CancelResult(
-        CancelOutcome.CANCELLED, task=task, children_cancelled=children_cancelled
+        CancelOutcome.CANCELLED, task=task, children_cancelled=len(children)
     )
+
+
+async def _redeliver_to_advance_parent(
+    session: AsyncSession,
+    arq_redis: arq.ArqRedis | None,
+    task: task_models.Task,
+) -> None:
+    """Hand an aborted child back to arq so its pipeline doesn't stall.
+
+    An aborted job exits with CancelledError and never reaches its sibling
+    advance. A fresh delivery hits the entry guard, which sees CANCELLED and
+    advances the next sibling or settles the parent.
+    """
+    job = dispatch_module.job_for(task)
+    if job is None:
+        return
+    await enqueue_task(session, arq_redis, task, job[0], *job[1])
+    logger.info("cancelled_child_redelivered_to_advance", task_id=str(task.id))
+
+
+# arq's abort waits for the job's result unless bounded; a cancel request must
+# return promptly. The row is already CANCELLED, so a slow abort only delays
+# when the job notices.
+ABORT_TIMEOUT_SECONDS = 2.0
+_ABORT_POLL_SECONDS = 0.25
+
+
+async def abort_job(
+    arq_redis: arq.ArqRedis | None, task_id: uuid.UUID, job_id: str
+) -> bool:
+    """Ask arq to abort a running job; never raises.
+
+    Returns:
+        True if arq confirmed the abort within the timeout.
+    """
+    log = logger.bind(task_id=str(task_id), job_id=job_id)
+    if arq_redis is None:
+        log.warning("task_abort_skipped_no_redis")
+        return False
+    job = arq_jobs.Job(job_id, arq_redis, _queue_name=arq_redis.default_queue_name)
+    try:
+        aborted = await asyncio.wait_for(
+            job.abort(timeout=ABORT_TIMEOUT_SECONDS, poll_delay=_ABORT_POLL_SECONDS),
+            timeout=ABORT_TIMEOUT_SECONDS + 1,
+        )
+    except TimeoutError:
+        log.info("task_abort_pending")
+        return False
+    except Exception:
+        log.exception("task_abort_failed")
+        return False
+    log.info("task_abort_requested", confirmed=aborted)
+    return aborted

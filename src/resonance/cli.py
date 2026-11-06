@@ -11,7 +11,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import sqlalchemy as sa
@@ -87,6 +87,7 @@ Commands:
   backfill-genres [opts]       Backfill artist genre tags (#136)
   task <task_id>               Check task status
   cancel <task_id>             Cancel a task and its unfinished children
+  tasks health [--json]        Reaper liveness, queue backlog, running tasks
   track <query>                Search tracks by title
   profile <subcommand>         Manage generator profiles
   generate <profile-id>        Generate a playlist from a profile
@@ -124,7 +125,24 @@ def _get_api_config() -> tuple[str, str]:
 def _api_request(
     method: str, path: str, timeout: float = 300.0, **kwargs: object
 ) -> httpx.Response:
-    """Make an authenticated API request."""
+    """Make an authenticated API request, exiting 1 on an HTTP error."""
+    response = _send_request(method, path, timeout, **kwargs)
+    if response.status_code >= 400:
+        print(f"Error: HTTP {response.status_code}")
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text[:500]
+        print(f"  {detail}")
+        sys.exit(1)
+
+    return response
+
+
+def _send_request(
+    method: str, path: str, timeout: float = 300.0, **kwargs: object
+) -> httpx.Response:
+    """Make an authenticated API request and return the response as-is."""
     base_url, token = _get_api_config()
     url = f"{base_url}{path}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -148,16 +166,6 @@ def _api_request(
     except httpx.TimeoutException:
         print(f"Error: Request to {url} timed out")
         sys.exit(1)
-
-    if response.status_code >= 400:
-        print(f"Error: HTTP {response.status_code}")
-        try:
-            detail = response.json().get("detail", response.text)
-        except Exception:
-            detail = response.text[:500]
-        print(f"  {detail}")
-        sys.exit(1)
-
     return response
 
 
@@ -218,6 +226,129 @@ def _cmd_sync() -> None:
         print(f"Triggering incremental sync for {service}...")
     resp = _api_request("POST", f"/api/v1/sync/{service}", json=body)
     print(json.dumps(resp.json(), indent=2))
+
+
+_TASKS_USAGE = """\
+Usage: resonance-api tasks <subcommand>
+
+Subcommands:
+  health [--json]   Reaper liveness, queue backlog and running tasks
+"""
+
+
+def _humanize_seconds(seconds: object) -> str:
+    """``95`` -> ``1m 35s``; the two largest units, ``0s`` for zero."""
+    if not isinstance(seconds, int | float):
+        return "unknown"
+    remaining = int(seconds)
+    parts: list[str] = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
+        if remaining >= size:
+            parts.append(f"{remaining // size}{unit}")
+            remaining %= size
+    return " ".join(parts[:2]) or "0s"
+
+
+def _utc_label(iso: object) -> str:
+    """An ISO timestamp as ``YYYY-MM-DD HH:MM:SS UTC``."""
+    if not isinstance(iso, str):
+        return "unknown"
+    parsed = datetime.datetime.fromisoformat(iso)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(datetime.UTC)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _print_labeled(rows: list[tuple[str, str]]) -> None:
+    """Aligned ``Label: value`` lines; an empty label continues the row above."""
+    width = max(len(label) for label, _ in rows) + 1
+    for label, value in rows:
+        prefix = f"{label}:" if label else ""
+        print(f"{prefix:<{width}} {value}")
+
+
+def _cmd_tasks() -> None:
+    args = sys.argv[2:]
+    if not args or args[0] != "health":
+        print(_TASKS_USAGE)
+        sys.exit(0 if args and args[0] in ("--help", "-h") else 1)
+
+    response = _send_request("GET", "/api/v1/admin/tasks/health")
+    if response.status_code == 403:
+        print("Admin role required")
+        return
+    if response.status_code >= 400:
+        print(f"Error: HTTP {response.status_code}")
+        return
+    data = response.json()
+    if "--json" in args[1:]:
+        print(json.dumps(data, indent=2))
+        return
+    _print_tasks_health(data)
+
+
+def _print_tasks_health(data: dict[str, Any]) -> None:
+    rows: list[tuple[str, str]] = []
+
+    reaper = data.get("reaper") or {}
+    if reaper.get("last_tick_at") is None:
+        rows.append(("Reaper last tick", "Reaper has never run"))
+    else:
+        stale = " STALE" if reaper.get("stale") else ""
+        rows.append(
+            (
+                "Reaper last tick",
+                f"{_utc_label(reaper['last_tick_at'])} "
+                f"({_humanize_seconds(reaper.get('age_seconds'))} ago){stale}",
+            )
+        )
+
+    oldest = data.get("oldest_pending")
+    if oldest is None:
+        rows.append(("Oldest pending", "No pending tasks"))
+    else:
+        rows.append(
+            (
+                "Oldest pending",
+                f"{_humanize_seconds(oldest.get('age_seconds'))} old, "
+                f"{oldest.get('task_type')} {oldest.get('task_id')} "
+                f"({oldest.get('status')})",
+            )
+        )
+
+    counts = data.get("counts") or {}
+    rows.append(
+        ("Counts", ", ".join(f"{status} {count}" for status, count in counts.items()))
+    )
+
+    running = data.get("running") or []
+    if not running:
+        rows.append(("Running", "No running tasks"))
+    for i, task in enumerate(running):
+        total = task.get("progress_total")
+        current = task.get("progress_current", 0)
+        progress = f"{current}/{total}" if total else str(current)
+        rows.append(
+            (
+                "Running" if i == 0 else "",
+                f"{task.get('task_type')} {task.get('task_id')}, "
+                f"{_humanize_seconds(task.get('age_seconds'))}, progress {progress}",
+            )
+        )
+
+    decisions = data.get("recent_decisions") or []
+    if not decisions:
+        rows.append(("Reaper decisions", "No reaper decisions yet"))
+    for i, decision in enumerate(decisions):
+        rows.append(
+            (
+                "Reaper decisions" if i == 0 else "",
+                f"{_utc_label(decision.get('at'))} {decision.get('action')} "
+                f"{decision.get('task_type')} {decision.get('task_id')}",
+            )
+        )
+
+    _print_labeled(rows)
 
 
 _ACTIVE_STATUS_VALUES = frozenset(s.value for s in types_module.ACTIVE_STATUSES)
@@ -1500,6 +1631,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     ),
     "task": ("Check task status", _cmd_task),
     "cancel": ("Cancel a task", _cmd_cancel),
+    "tasks": ("Task queue health", _cmd_tasks),
     "track": ("Search tracks by title", _cmd_track),
     "taste": ("Genre discovery & taste stats", _cmd_taste),
     "profile": ("Manage generator profiles", _cmd_profile),

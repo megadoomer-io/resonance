@@ -4,7 +4,6 @@ venue/event management, dedup, and stats."""
 from __future__ import annotations
 
 import datetime
-import time
 import uuid
 from typing import TYPE_CHECKING, Annotated
 
@@ -20,6 +19,7 @@ import resonance.models.concert as concert_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.normalize as normalize_module
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 import resonance.ui.common as common
 
@@ -194,19 +194,20 @@ async def clone_task(
         progress_total=original.progress_total,
     )
     db.add(cloned)
-    await db.commit()
-
-    # Enqueue via arq if available (not present in web-only mode)
-    arq_redis = getattr(request.app.state, "arq_redis", None)
-    if arq_redis:
-        job_name = (
-            "plan_sync"
-            if original.task_type == types_module.TaskType.SYNC_JOB
-            else "sync_range"
-        )
-        await arq_redis.enqueue_job(
-            job_name, str(cloned.id), _job_id=f"{job_name}:{cloned.id}"
-        )
+    job_name = (
+        "plan_sync"
+        if original.task_type == types_module.TaskType.SYNC_JOB
+        else "sync_range"
+    )
+    # arq_redis is absent in web-only mode; the row still records the delivery
+    # so the reaper picks it up once a worker runs.
+    await lifecycle_module.enqueue_task(
+        db,
+        getattr(request.app.state, "arq_redis", None),
+        cloned,
+        job_name,
+        str(cloned.id),
+    )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
 
@@ -232,14 +233,9 @@ async def resume_task(
     if task.status == types_module.SyncStatus.DEFERRED:
         # Resume a deferred task directly
         task.status = types_module.SyncStatus.PENDING
-        await db.commit()
-        if arq_redis:
-            job_id = f"sync_range:{task.id}:{int(time.time())}"
-            await arq_redis.enqueue_job(
-                "sync_range",
-                str(task.id),
-                _job_id=job_id,
-            )
+        await lifecycle_module.enqueue_task(
+            db, arq_redis, task, "sync_range", str(task.id)
+        )
     else:
         # Step mode: find the next pending child or sibling
         # If this is a parent (SYNC_JOB), look for pending children
@@ -263,14 +259,9 @@ async def resume_task(
                 task.completed_at = datetime.datetime.now(datetime.UTC)
                 await db.commit()
             return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
-        if arq_redis:
-            # Use a unique job ID to avoid arq dedup with previous runs
-            job_id = f"sync_range:{next_task.id}:{int(time.time())}"
-            await arq_redis.enqueue_job(
-                "sync_range",
-                str(next_task.id),
-                _job_id=job_id,
-            )
+        await lifecycle_module.enqueue_task(
+            db, arq_redis, next_task, "sync_range", str(next_task.id)
+        )
 
     return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
 

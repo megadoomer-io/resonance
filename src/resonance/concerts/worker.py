@@ -316,14 +316,17 @@ async def sync_concert_archives(
                         c
                         for c in existing_children
                         if c.status == types_module.SyncStatus.PENDING
+                        and c.enqueued_at is None
                     ),
                     None,
                 )
                 if first_pending is not None:
-                    await arq_redis.enqueue_job(
+                    await lifecycle_module.enqueue_task(
+                        session,
+                        arq_redis,
+                        first_pending,
                         "sync_concert_archives_chunk",
                         str(first_pending.id),
-                        _job_id=f"sync_concert_archives_chunk:{first_pending.id}",
                     )
                     log.info(
                         "orphan_recovery_resumed_chunk",
@@ -404,15 +407,17 @@ async def sync_concert_archives(
                 if i == 0:
                     first_child = child
 
-            await session.commit()
-
-            # Enqueue the first chunk (sequential dispatch)
+            # Sequential dispatch: only the first chunk is delivered now.
             if first_child is not None:
-                await arq_redis.enqueue_job(
+                await lifecycle_module.enqueue_task(
+                    session,
+                    arq_redis,
+                    first_child,
                     "sync_concert_archives_chunk",
                     str(first_child.id),
-                    _job_id=f"sync_concert_archives_chunk:{first_child.id}",
                 )
+            else:
+                await session.commit()
 
             log.info(
                 "concert_archives_import_planned",
@@ -458,6 +463,8 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
             if lifecycle_module.is_duplicate_delivery(
                 task, "sync_concert_archives_chunk"
             ):
+                if task.status == types_module.SyncStatus.CANCELLED:
+                    await _check_parent_completion(session, task, arq_redis, log)
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
