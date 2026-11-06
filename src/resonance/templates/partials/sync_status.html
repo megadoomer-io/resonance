@@ -1,3 +1,4 @@
+{% from "components/macros.html" import error_state %}
 {% if sync_jobs %}
 {% if has_active_sync %}
 <div hx-get="/partials/sync-status" hx-trigger="every 3s" hx-swap="outerHTML">
@@ -27,6 +28,8 @@
                     Deferred{% if job.deferred_until %} until {{ (job.deferred_until | localtime(user_tz)).strftime('%H:%M') }}{% endif %}
                     {% elif job.status.value in ('pending', 'running') %}
                     <span aria-busy="true">{{ job.status.value | capitalize }}</span>
+                    {% elif job.status.value == 'cancelled' %}
+                    <span class="text-muted">Cancelled</span>
                     {% else %}
                     {{ job.status.value | capitalize }}
                     {% endif %}
@@ -92,6 +95,8 @@
                         {% else %}
                         Done
                         {% endif %}
+                    {% elif job.status.value == 'cancelled' %}
+                        <small class="text-muted">{{ (job.error_message or 'Cancelled')[:80] }}</small>
                     {% elif job.status.value == 'failed' %}
                         {% if job.error_message %}
                         <small>{{ job.error_message[:80] }}</small>
@@ -115,11 +120,15 @@
                     {% if job.status.value in ('pending', 'running', 'deferred') %}
                     <button
                         hx-post="/api/v1/sync/cancel/{{ job.id }}"
-                        hx-target="#sync-status"
-                        hx-swap="innerHTML"
+                        hx-swap="none"
+                        hx-disabled-elt="this"
                         hx-confirm="Cancel this sync job?"
+                        data-after-success-refresh="#sync-status"
+                        data-after-error-show="#sync-cancel-error-{{ job.id }}"
+                        data-after-error-fallback="Couldn't cancel. Try again."
                         class="outline secondary btn-sm"
                     >Cancel</button>
+                    <div id="sync-cancel-error-{{ job.id }}" class="sync-cancel-error" hidden>{{ error_state("Couldn't cancel. Try again.") }}</div>
                     {% endif %}
                 </td>
             </tr>

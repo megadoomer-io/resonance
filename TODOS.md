@@ -2,30 +2,6 @@
 
 Deferred work items with full context. Each entry explains what, why, and where to start.
 
-## Re-decide the task framework after the queue spike
-
-**Status:** Deferred 2026-11-04. Re-decide (do not build by default) once the queue spike result is recorded in `docs/plans/2026-11-02-task-framework-extraction-design.md`.
-
-**What:** Decide whether to build, adopt a library for, or drop each of these deferred pieces of the task framework design:
-- `taskkit` runner, registry and `submit()` API with `dedup_key` (design steps 2-4)
-- Typed params / `ctx.checkpoint` / `ctx.defer`, splitting `worker.py` into `jobs/`, and `@scheduled` cron with slot-based dedup (steps 6-8)
-- Row leases, attempt fencing (conditional writes at all 22 hand-written status assignments), periodic recovery of RUNNING tasks, `max_tries=1` + shutdown release, and the log-only/active reaper rollout
-- A Redis-backed `TaskStore`
-- The `ShutdownRequest` checkpoint (`worker.py` sync_range, `sync/lastfm.py`, `sync/listenbrainz.py`): wire it or delete it. It never fires on SIGTERM because arq cancels in-flight jobs before `on_shutdown` sets `shutdown_requested`; the RUNNING-retry watermark resume recovers instead.
-
-**Why:** The reliability-first slice (deferral fix, CANCELLED + cancel, export idempotency, PENDING/DEFERRED reaper that checks arq job status, tasks health endpoint) fixes every stuck-task bug found. The rest is code health and a reusable framework whose cost is roughly the original 10+ PRs. It was deferred so the spike's evidence decides it, not momentum from the earlier design review.
-
-**Pros:** One evidence-based decision instead of building a homegrown durable-execution layer by default.
-**Cons:** The stalled-but-alive worker double-run gap (no fencing) stays open until then, as it is today.
-
-**Context:** The spike compares procrastinate, PgQueuer and DBOS against arq + `taskkit` on parent/child fan-out, cancellation, leases/recovery, cron, progress on existing `sync_tasks` rows, and the Joey (Redis-only, employer repo) lift. Before any lift into Joey, settle where shared code should live (personal vs employer repo). arq is in maintenance-only mode upstream.
-
-**Effort:** human L / CC M for the spike + decision; the deferred build itself is XL / L if chosen.
-**Priority:** P2
-**Depends on / blocked by:** the queue spike; the reliability-first PRs landing first.
-
-**Source:** /plan-eng-review + /plan-ceo-review, 2026-11-03/04.
-
 ## Investigate capability-scoped tables for ServiceConnection
 
 **Status:** Investigated 2026-05-28. Deferred — revisit when adding a 3rd+ identity-only connector.

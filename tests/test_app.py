@@ -6,10 +6,20 @@ debug), and #11 (component playground not registered in production).
 
 from __future__ import annotations
 
+import datetime
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
+
 import httpx
 
 import resonance.app as app_module
 import resonance.config as config_module
+import resonance.types as types_module
+
+if TYPE_CHECKING:
+    import pytest
+
+    from tests.conftest import TaskDB
 
 
 def _prod_settings(**overrides: object) -> config_module.Settings:
@@ -83,3 +93,45 @@ class TestPlaygroundGating:
         # Registered in dev, but still admin-gated -> redirect to login.
         assert resp.status_code == 307
         assert resp.headers["location"] == "/login"
+
+
+class TestLifespanLeavesTasksAlone:
+    """The worker owns task recovery; API startup must not reset RUNNING rows."""
+
+    async def test_running_row_untouched(
+        self, task_db: TaskDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+        task = await task_db.add(
+            status=types_module.SyncStatus.RUNNING, started_at=started
+        )
+        engine = MagicMock(dispose=AsyncMock())
+        monkeypatch.setattr(
+            app_module.database_module, "create_async_engine", lambda _s: engine
+        )
+        monkeypatch.setattr(
+            app_module.database_module,
+            "create_session_factory",
+            lambda _e: task_db.factory,
+        )
+        monkeypatch.setattr(
+            app_module.migrations_module, "assert_schema_current", AsyncMock()
+        )
+        monkeypatch.setattr(
+            app_module.aioredis,
+            "from_url",
+            lambda *a, **k: MagicMock(aclose=AsyncMock()),
+        )
+        monkeypatch.setattr(
+            app_module.arq_connections,
+            "create_pool",
+            AsyncMock(return_value=MagicMock(aclose=AsyncMock())),
+        )
+        application = app_module.create_app(_prod_settings())
+
+        async with app_module.lifespan(application):
+            pass
+
+        row = await task_db.get(task.id)
+        assert row.status == types_module.SyncStatus.RUNNING
+        assert row.started_at is not None

@@ -17,19 +17,13 @@ import resonance.generators.parameters as params_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
 
 router = fastapi.APIRouter(
     prefix="/generator-profiles", tags=["generators"], redirect_slashes=False
-)
-
-# Task statuses that count as "in flight" for the mutual-exclusion guard.
-_ACTIVE_TASK_STATUSES = (
-    types_module.SyncStatus.PENDING,
-    types_module.SyncStatus.RUNNING,
-    types_module.SyncStatus.DEFERRED,
 )
 
 # Both task types mutate the profile's pool (generation re-resolves it; enrichment
@@ -150,7 +144,7 @@ async def _trigger_profile_task(
         task_models.Task.user_id == user_id,
         task_models.Task.task_type.in_(_PROFILE_MUTATING_TASK_TYPES),
         task_models.Task.params["profile_id"].as_string() == str(profile_id),
-        task_models.Task.status.in_(_ACTIVE_TASK_STATUSES),
+        task_models.Task.status.in_(types_module.ACTIVE_STATUSES),
     )
     running_result = await db.execute(running_stmt)
     if running_result.scalar_one_or_none() is not None:
@@ -168,13 +162,7 @@ async def _trigger_profile_task(
         params=params,
     )
     db.add(task)
-    await db.commit()
-
-    await arq_redis.enqueue_job(
-        job_name,
-        str(task.id),
-        _job_id=f"{job_name}:{task.id}",
-    )
+    await lifecycle_module.enqueue_task(db, arq_redis, task, job_name, str(task.id))
     return str(task.id)
 
 
