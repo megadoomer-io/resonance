@@ -2415,18 +2415,41 @@ _HTTP_ERROR_MESSAGES: dict[int, str] = {
 }
 
 
-def _set_spotify_export_link(
+async def _merge_spotify_export_link(
+    session: sa_async.AsyncSession,
     playlist: playlist_models.Playlist,
     connection_id: str,
     link: dict[str, object],
 ) -> None:
-    """Set ``service_links["spotify"][connection_id]`` (copy-on-write for JSON)."""
-    links = dict(playlist.service_links or {})
+    """Set ``service_links["spotify"][connection_id]`` on the stored links.
+
+    Reads the column fresh rather than trusting the loaded object, so another
+    connection's export (or a retry) that committed meanwhile isn't overwritten
+    by a stale copy of the whole dict.
+    """
+    stored = await session.scalar(
+        sa.select(playlist_models.Playlist.service_links).where(
+            playlist_models.Playlist.id == playlist.id
+        )
+    )
+    links = dict(stored) if isinstance(stored, dict) else {}
     current = links.get("spotify")
     spotify_section = dict(current) if isinstance(current, dict) else {}
     spotify_section[connection_id] = link
     links["spotify"] = spotify_section
     playlist.service_links = links
+
+
+async def _export_cancelled(session: sa_async.AsyncSession, task_id: uuid.UUID) -> bool:
+    """Whether the stored task row is CANCELLED.
+
+    A column select bypasses the identity map, so this sees a cancel another
+    session committed (e.g. a stall retry whose job abort didn't land).
+    """
+    status = await session.scalar(
+        sa.select(task_module.Task.status).where(task_module.Task.id == task_id)
+    )
+    return status == types_module.SyncStatus.CANCELLED
 
 
 def _friendly_http_error(exc: httpx.HTTPStatusError, service: str) -> str:
@@ -2681,6 +2704,9 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 spotify_playlist_id = str(existing_export["playlist_id"])
                 replace_first = True
             else:
+                if await _export_cancelled(session, task.id):
+                    log.info("export_playlist_cancelled", before="create_playlist")
+                    return
                 await progress.phase(export_phase.CREATING_PLAYLIST, **counts)
                 spotify_playlist_id = await connector.create_playlist(
                     access_token,
@@ -2690,8 +2716,11 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 # Persist the id before anything else can fail, so a retry
                 # replaces tracks on this playlist instead of creating another.
                 # No exported_at yet: the page reads it as not yet synced.
-                _set_spotify_export_link(
-                    playlist, connection_id_str, {"playlist_id": spotify_playlist_id}
+                await _merge_spotify_export_link(
+                    session,
+                    playlist,
+                    connection_id_str,
+                    {"playlist_id": spotify_playlist_id},
                 )
                 await session.commit()
                 replace_first = False
@@ -2703,6 +2732,9 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 export_phase.ADDING_TRACKS, total=len(spotify_uris), **counts
             )
             for start in range(0, len(spotify_uris), _SPOTIFY_WRITE_CHUNK):
+                if await _export_cancelled(session, task.id):
+                    log.info("export_playlist_cancelled", before="push", at=start)
+                    return
                 chunk = spotify_uris[start : start + _SPOTIFY_WRITE_CHUNK]
                 if start == 0 and replace_first:
                     await connector.replace_playlist_tracks(
@@ -2720,7 +2752,11 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 spotify_playlist_id=spotify_playlist_id,
             )
 
-            _set_spotify_export_link(
+            if await _export_cancelled(session, task.id):
+                log.info("export_playlist_cancelled", before="final_writes")
+                return
+            await _merge_spotify_export_link(
+                session,
                 playlist,
                 connection_id_str,
                 {
