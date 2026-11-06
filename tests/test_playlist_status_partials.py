@@ -1070,6 +1070,72 @@ class TestExportProgressRendering:
         assert 'id="export-headline"' in html
 
 
+class _SubmitSession:
+    """Records lock/select/add/commit order for the export form submit."""
+
+    def __init__(self, playlist: Any, connections: list[Any]) -> None:
+        self.playlist = playlist
+        self.connections = connections
+        self.log: list[str] = []
+
+    async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> FakeResult:
+        sql = str(stmt.compile())
+        self.log.append("lock" if "FOR UPDATE" in sql else "select")
+        if "FROM service_connections" in sql:
+            return FakeResult(self.connections)
+        if "FROM sync_tasks" in sql:
+            return FakeResult([])
+        return FakeResult([self.playlist])
+
+    def add(self, obj: Any) -> None:
+        self.log.append("add")
+
+    async def commit(self) -> None:
+        self.log.append("commit")
+
+    async def rollback(self) -> None:
+        pass
+
+    async def __aenter__(self) -> _SubmitSession:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        pass
+
+
+class TestExportSubmitLocking:
+    async def test_form_submit_locks_playlist_before_check_and_insert(
+        self, user_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import resonance.models.user as user_models
+
+        async def fake_deliver(arq_redis: Any, delivery: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "deliver", fake_deliver)
+        playlist = _playlist(user_id, "P")
+        conn = user_models.ServiceConnection(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            service_type=types_module.ServiceType.SPOTIFY,
+        )
+        db = _SubmitSession(playlist, [conn])
+        app, cookies = _app(db, user_id)  # type: ignore[arg-type]
+        app.state.arq_redis = None
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            cookies=cookies,
+        ) as client:
+            resp = await client.post(f"/playlists/{playlist.id}/export")
+        assert resp.status_code == 303
+        lock_at = db.log.index("lock")
+        assert db.log.index("add") > lock_at
+        # The in-flight lookup runs under the lock too.
+        assert "select" in db.log[lock_at + 1 : db.log.index("add")]
+        assert db.log.count("commit") == 1
+
+
 class TestRetryExportRoute:
     async def test_retry_redirects_to_new_tasks_progress(
         self, user_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch

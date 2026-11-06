@@ -169,6 +169,78 @@ class TestExportStatusEndpoint:
         assert "phase" in body[0]
 
 
+class _ExportDB:
+    """Records statements, inserts and commits for the export submit path."""
+
+    def __init__(self, playlist: Any, connections: list[Any]) -> None:
+        self.playlist = playlist
+        self.connections = connections
+        self.log: list[str] = []
+        self.added: list[Any] = []
+
+    async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> _Result:
+        sql = str(stmt.compile())
+        self.log.append("lock" if "FOR UPDATE" in sql else "select")
+        if "FROM service_connections" in sql:
+            return _Result(self.connections)
+        if "FROM sync_tasks" in sql:
+            return _Result([])
+        return _Result([self.playlist])
+
+    def add(self, obj: Any) -> None:
+        self.log.append("add")
+        self.added.append(obj)
+
+    async def commit(self) -> None:
+        self.log.append("commit")
+
+
+class TestExportSubmitLocking:
+    async def test_locks_playlist_then_inserts_all_then_commits_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import resonance.models.playlist as playlist_models
+        import resonance.models.user as user_models
+        import resonance.sync.lifecycle as lifecycle_module
+
+        delivered: list[Any] = []
+
+        async def fake_deliver(arq_redis: Any, delivery: Any) -> bool:
+            delivered.append(delivery)
+            db.log.append("deliver")
+            return True
+
+        monkeypatch.setattr(lifecycle_module, "deliver", fake_deliver)
+        user_id = uuid.uuid4()
+        playlist = playlist_models.Playlist(id=uuid.uuid4(), user_id=user_id, name="P")
+        conns = [
+            user_models.ServiceConnection(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                service_type=types_module.ServiceType.SPOTIFY,
+            )
+            for _ in range(2)
+        ]
+        db = _ExportDB(playlist, conns)
+        resp = await _call(
+            db,  # type: ignore[arg-type]
+            user_id,
+            "POST",
+            f"/api/v1/playlists/{playlist.id}/export",
+        )
+        assert resp.status_code == 202
+        lock_at = db.log.index("lock")
+        # Lock precedes the in-flight check and every insert; one commit holds
+        # it until all tasks exist, and delivery happens after the commit.
+        assert db.log.index("add") > lock_at
+        assert db.log.count("commit") == 1
+        commit_at = db.log.index("commit")
+        assert all(i < commit_at for i, e in enumerate(db.log) if e == "add")
+        assert all(i > commit_at for i, e in enumerate(db.log) if e == "deliver")
+        assert len(delivered) == 2
+        assert all(t.enqueued_at is not None for t in db.added)
+
+
 class TestExportRetryEndpoint:
     async def test_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
         user_id, playlist_id = uuid.uuid4(), uuid.uuid4()

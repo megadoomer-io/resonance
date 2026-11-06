@@ -428,6 +428,7 @@ async def export_playlist(
     # Skip connections that already have an in-flight export -- a duplicate
     # request (e.g. an impatient re-click) must not create a second Spotify
     # playlist. Already-running tasks are reported back as already_running.
+    await playlist_export_module.lock_playlist(db, user_id, playlist_id)
     active_tasks = await playlist_export_module.in_progress_export_tasks(
         db, user_id, playlist_id
     )
@@ -441,9 +442,10 @@ async def export_playlist(
     ]
     connections = [c for c in connections if c.id not in busy_connection_ids]
 
-    # Create one task per connection and enqueue
+    # One commit for every task, so the playlist lock is held until all of
+    # them exist; delivery happens after it.
     tasks_info: list[dict[str, str]] = []
-    arq_redis = request.app.state.arq_redis
+    deliveries: list[lifecycle_module.Delivery] = []
 
     for connection in connections:
         task = task_models.Task(
@@ -457,8 +459,8 @@ async def export_playlist(
             },
         )
         db.add(task)
-        await lifecycle_module.enqueue_task(
-            db, arq_redis, task, "export_playlist", str(task.id)
+        deliveries.append(
+            lifecycle_module.stamp_delivery(task, "export_playlist", str(task.id))
         )
 
         tasks_info.append(
@@ -476,6 +478,8 @@ async def export_playlist(
         )
 
     await db.commit()
+    for delivery in deliveries:
+        await lifecycle_module.deliver(request.app.state.arq_redis, delivery)
 
     return {"tasks": tasks_info, "already_running": already_running}
 

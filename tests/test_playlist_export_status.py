@@ -289,8 +289,11 @@ class _RetrySession:
         self.active = active
         self.added: list[Any] = []
         self.commits = 0
+        self.statements: list[str] = []
+        self.locked_before_insert: bool | None = None
 
     async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> Any:
+        self.statements.append(str(stmt.compile()))
         result = MagicMock()
         result.scalar_one_or_none.return_value = self.task
         scalars = MagicMock()
@@ -299,6 +302,7 @@ class _RetrySession:
         return result
 
     def add(self, obj: Any) -> None:
+        self.locked_before_insert = any("FOR UPDATE" in s for s in self.statements)
         self.added.append(obj)
 
     async def commit(self) -> None:
@@ -359,6 +363,18 @@ class TestRetryExport:
         assert session.added == [new]
         assert session.commits == 1
         assert [d.task_id for d in delivered] == [new.id]
+
+    async def test_playlist_row_is_locked_before_the_in_flight_check(
+        self, delivered: list[Any]
+    ) -> None:
+        """A double-click can't start two exports: the second retry waits on
+        the playlist row lock, then sees the first one's task."""
+        old = self._failed()
+        session = _RetrySession(old, active=[])
+        await _retry(session, old)
+        assert session.locked_before_insert is True
+        lock = next(s for s in session.statements if "FOR UPDATE" in s)
+        assert "FROM playlists" in lock
 
     async def test_stalled_running_export_is_cancelled_then_retried(
         self, monkeypatch: pytest.MonkeyPatch, delivered: list[Any]

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 
+import resonance.models.playlist as playlist_models
 import resonance.models.task as task_models
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
@@ -303,6 +304,25 @@ class RetryOutcome:
     task: task_models.Task | None = None
 
 
+async def lock_playlist(
+    db: sa_async.AsyncSession, user_id: uuid.UUID, playlist_id: uuid.UUID
+) -> None:
+    """Row-lock the playlist until the transaction ends.
+
+    Every path that checks for an in-flight export and then inserts one takes
+    this first, so concurrent requests (a double-click) serialize and the
+    second sees the first one's task instead of starting another.
+    """
+    await db.execute(
+        sa.select(playlist_models.Playlist.id)
+        .where(
+            playlist_models.Playlist.id == playlist_id,
+            playlist_models.Playlist.user_id == user_id,
+        )
+        .with_for_update()
+    )
+
+
 def is_playlist_export(task: task_models.Task, playlist_id: uuid.UUID) -> bool:
     """Whether ``task`` is an export of this playlist."""
     return task.task_type == types_module.TaskType.PLAYLIST_EXPORT and str(
@@ -357,6 +377,9 @@ async def retry_export(
             arq_redis=arq_redis,
         )
 
+    # request_cancel commits, so the lock comes after it and is held until
+    # the commit below.
+    await lock_playlist(db, user_id, playlist_id)
     connection_id = str((old.params or {}).get("connection_id"))
     for active in await in_progress_export_tasks(db, user_id, playlist_id):
         if str((active.params or {}).get("connection_id")) == connection_id:

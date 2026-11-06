@@ -808,6 +808,7 @@ async def export_playlist_submit(
     # Don't start a second export for a connection that's already exporting --
     # re-clicking while one is in flight is what produces duplicate Spotify
     # playlists. Land the user on the in-progress page for those instead.
+    await playlist_export_module.lock_playlist(db, user_id, playlist_id)
     active_tasks = await playlist_export_module.in_progress_export_tasks(
         db, user_id, playlist_id
     )
