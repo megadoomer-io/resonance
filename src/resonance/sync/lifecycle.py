@@ -6,11 +6,13 @@ import asyncio
 import dataclasses
 import datetime
 import enum
+import functools
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import arq.jobs as arq_jobs
 import sqlalchemy as sa
+import sqlalchemy.orm as orm
 import structlog
 
 import resonance.models.task as task_models
@@ -18,6 +20,8 @@ import resonance.sync.dispatch as dispatch_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
+    import collections.abc
+
     import arq
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -165,7 +169,7 @@ def is_terminal(task: task_models.Task) -> bool:
 
 
 def is_duplicate_delivery(task: task_models.Task, job: str) -> bool:
-    """Entry guard for arq jobs: True (and logged) when the row is already terminal.
+    """True (and logged) when the row is already terminal.
 
     arq can deliver a job more than once (SIGTERM retry, re-enqueue). A delivery
     whose task already finished must not run the work again.
@@ -179,6 +183,188 @@ def is_duplicate_delivery(task: task_models.Task, job: str) -> bool:
         status=task.status.value,
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Claims: one delivery at a time owns a task row
+# ---------------------------------------------------------------------------
+
+_CLAIMABLE = (types_module.SyncStatus.PENDING, types_module.SyncStatus.DEFERRED)
+# A lost race re-reads the row and tries again; more than a couple of rounds
+# means it keeps changing under us, and the reaper will redeliver if needed.
+_CLAIM_ROUNDS = 3
+
+
+@dataclasses.dataclass(frozen=True)
+class Claim:
+    """A won claim: the attempt this delivery owns and the status it took over."""
+
+    attempt: int
+    previous_status: types_module.SyncStatus
+
+
+def _claimable(task: task_models.Task, job_id: str | None) -> bool:
+    if task.status in _CLAIMABLE:
+        return True
+    # arq's in-progress lock keeps one job id from running twice at once, so a
+    # RUNNING row is only taken over by a retry of the delivery that claimed it.
+    return (
+        task.status == types_module.SyncStatus.RUNNING
+        and job_id is not None
+        and task.arq_job_id == job_id
+    )
+
+
+def _remember_claim(task_id: uuid.UUID, attempt: int) -> None:
+    claims = task_models.claimed_attempts.get()
+    if claims is None:
+        claims = {}
+        task_models.claimed_attempts.set(claims)
+    claims[task_id] = attempt
+
+
+async def claim(
+    session: AsyncSession,
+    task: task_models.Task,
+    job_id: str | None,
+) -> Claim | None:
+    """Move *task* to RUNNING for this delivery, or return None if it can't.
+
+    One conditional UPDATE on the (status, attempt) this delivery read, so of
+    two concurrent claimers exactly one matches. The winner bumps ``attempt``,
+    which fences every earlier claimer's writes, and records its job id so a
+    stray delivery can't take over a live RUNNING row. Commits on success.
+    """
+    for _ in range(_CLAIM_ROUNDS):
+        if not _claimable(task, job_id):
+            return None
+        seen_status, seen_attempt = task.status, task.attempt
+        now = datetime.datetime.now(datetime.UTC)
+        row = (
+            await session.execute(
+                sa.update(task_models.Task)
+                .where(
+                    task_models.Task.id == task.id,
+                    task_models.Task.status == seen_status,
+                    task_models.Task.attempt == seen_attempt,
+                )
+                .values(
+                    status=types_module.SyncStatus.RUNNING,
+                    attempt=task_models.Task.attempt + 1,
+                    started_at=now,
+                    arq_job_id=sa.func.coalesce(job_id, task_models.Task.arq_job_id),
+                )
+                .returning(task_models.Task.attempt, task_models.Task.arq_job_id)
+                .execution_options(synchronize_session=False)
+            )
+        ).one_or_none()
+        if row is None:
+            await session.rollback()
+            await session.refresh(task)
+            continue
+        await session.commit()
+        for key, value in (
+            ("status", types_module.SyncStatus.RUNNING),
+            ("attempt", row.attempt),
+            ("started_at", now),
+            ("arq_job_id", row.arq_job_id),
+        ):
+            orm.attributes.set_committed_value(task, key, value)
+        _remember_claim(task.id, row.attempt)
+        return Claim(attempt=row.attempt, previous_status=seen_status)
+    return None
+
+
+async def claim_delivery(
+    session: AsyncSession,
+    task: task_models.Task,
+    job: str,
+    job_id: str | None,
+) -> Claim | None:
+    """Entry guard for every task job: claim the row or say why not (logged).
+
+    A terminal row is a duplicate delivery and touches nothing. An active row
+    another delivery owns, or one that changed while claiming, loses.
+    """
+    if is_duplicate_delivery(task, job):
+        return None
+    won = await claim(session, task, job_id)
+    if won is None:
+        logger.info(
+            "task_claim_lost",
+            job=job,
+            task_id=str(task.id),
+            status=task.status.value,
+            attempt=task.attempt,
+            job_id=job_id,
+            owner_job_id=task.arq_job_id,
+        )
+    return won
+
+
+async def release_for_redelivery(
+    session: AsyncSession,
+    task: task_models.Task,
+) -> bool:
+    """Reset a recovered row to PENDING and fence whoever held it.
+
+    Recovery (reaper, startup) calls this before stamping a new delivery. The
+    bump means a stalled-but-alive holder can't write past this point, even
+    before the new delivery claims. Conditional on the attempt read, so a claim
+    that lands in between wins; the caller commits.
+
+    Returns:
+        False when the row changed since it was read; skip redelivery.
+    """
+    row = (
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(
+                task_models.Task.id == task.id,
+                task_models.Task.status == task.status,
+                task_models.Task.attempt == task.attempt,
+            )
+            .values(
+                status=types_module.SyncStatus.PENDING,
+                attempt=task_models.Task.attempt + 1,
+            )
+            .returning(task_models.Task.attempt)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    orm.attributes.set_committed_value(task, "status", types_module.SyncStatus.PENDING)
+    orm.attributes.set_committed_value(task, "attempt", row)
+    return True
+
+
+def task_job[**P](
+    fn: collections.abc.Callable[P, collections.abc.Awaitable[None]],
+) -> collections.abc.Callable[P, collections.abc.Coroutine[Any, Any, None]]:
+    """Wrap an arq task job: scope its claims, and stop it once fenced.
+
+    A fenced write means a newer delivery owns the row; this one exits without
+    touching it again (the session rolls back as the exception unwinds).
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        token = task_models.claimed_attempts.set({})
+        try:
+            await fn(*args, **kwargs)
+        except task_models.TaskFenced as fenced:
+            logger.warning(
+                "task_write_fenced",
+                job=fn.__name__,
+                task_id=str(fenced.task_id),
+                attempt=fenced.mine,
+                current_attempt=fenced.current,
+            )
+        finally:
+            task_models.claimed_attempts.reset(token)
+
+    return wrapper
 
 
 async def is_cancelled(

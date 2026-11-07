@@ -232,7 +232,8 @@ async def resume_task(
 
     if task.status == types_module.SyncStatus.DEFERRED:
         # Resume a deferred task directly
-        task.status = types_module.SyncStatus.PENDING
+        if not await lifecycle_module.release_for_redelivery(db, task):
+            return fastapi.responses.RedirectResponse(url="/admin", status_code=303)
         await lifecycle_module.enqueue_task(
             db, arq_redis, task, "sync_range", str(task.id)
         )
