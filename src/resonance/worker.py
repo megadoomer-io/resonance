@@ -357,16 +357,6 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                     retry_after=defer.retry_after,
                     deferred_until=str(task.deferred_until),
                 )
-            except sync_base.ShutdownRequest as shutdown_req:
-                task.status = types_module.SyncStatus.PENDING
-                task.params = {**task.params, **shutdown_req.resume_params}
-                task.started_at = None
-                await session.commit()
-                log.info(
-                    "sync_range_shutdown_checkpoint",
-                    resume_params=shutdown_req.resume_params,
-                )
-                return
 
         except Exception:
             log.exception("sync_range_failed")
@@ -3348,17 +3338,14 @@ async def startup(ctx: dict[str, Any]) -> None:
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
-    """Signal graceful shutdown, then dispose of resources.
+    """Unregister the worker and dispose of resources.
 
-    Called by arq when the worker process shuts down. Sets the
-    shutdown_requested event so in-flight sync tasks can checkpoint
-    their progress before the process exits.
+    arq cancels in-flight jobs before this runs and retries them; a retried
+    sync_range resumes from the watermark (see ``resume.apply_watermark_resume``).
 
     Args:
         ctx: arq worker context dict.
     """
-    sync_base.shutdown_requested.set()
-
     wctx = typing.cast("WorkerContext", ctx)
 
     # Cancel idle heartbeat and unregister from worker registry
