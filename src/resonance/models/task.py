@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextvars
 import datetime
 import uuid
+from typing import Any
 
 import sqlalchemy as sa
 import sqlalchemy.ext.compiler as sa_compiler
@@ -136,28 +137,31 @@ class Task(base_module.Base):
 
 
 class db_clock_offset(sa_expression.FunctionElement[datetime.datetime]):  # noqa: N801
-    """The database's clock plus *offset*, so leases never trust a worker clock."""
+    """The database's wall clock at statement time plus *offset*.
+
+    Postgres ``now()`` is the transaction's start, so a renewal that waited on a
+    row lock would write a lease that had already expired; ``clock_timestamp()``
+    doesn't have that problem. The offset is a bound parameter, so statements
+    differing only in offset share a cache entry without sharing the value.
+    """
 
     type = sa.DateTime(timezone=True)
     inherit_cache = True
 
     def __init__(self, offset: datetime.timedelta) -> None:
-        self.offset = offset
-        super().__init__()
+        super().__init__(sa.literal(offset.total_seconds(), sa.Float))
 
 
 @sa_compiler.compiles(db_clock_offset)
-def _db_clock_offset_pg(element: db_clock_offset, compiler: object, **_: object) -> str:
-    seconds = element.offset.total_seconds()
-    return f"(now() + interval '{seconds} seconds')"
+def _db_clock_offset_pg(element: db_clock_offset, compiler: Any, **kw: Any) -> str:
+    seconds = compiler.process(element.clauses, **kw)
+    return f"(clock_timestamp() + make_interval(secs => {seconds}))"
 
 
 @sa_compiler.compiles(db_clock_offset, "sqlite")
-def _db_clock_offset_sqlite(
-    element: db_clock_offset, compiler: object, **_: object
-) -> str:
-    seconds = element.offset.total_seconds()
-    return f"datetime('now', '{seconds:+} seconds')"
+def _db_clock_offset_sqlite(element: db_clock_offset, compiler: Any, **kw: Any) -> str:
+    seconds = compiler.process(element.clauses, **kw)
+    return f"datetime('now', printf('%+f seconds', {seconds}))"
 
 
 @sa.event.listens_for(Task, "init")
