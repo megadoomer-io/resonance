@@ -513,6 +513,11 @@ class TestSyncWatermarkOverride:
             response = await c.post("/api/v1/sync/spotify")
 
         assert response.status_code == 200
+        task = db_session._added[0]
+        assert response.json()["sync_task_id"] == str(task.id)
+        enqueue = application.state.arq_redis.enqueue_job
+        enqueue.assert_awaited_once()
+        assert enqueue.await_args.args == ("plan_sync", str(task.id))
         # Watermark should be unchanged
         assert fake_conn.sync_watermark == {
             "saved_tracks": {"last_saved_at": "2026-04-05T12:00:00Z"}

@@ -565,6 +565,10 @@ class TestAdminDedup:
         assert "task_id" in data
         assert data["status"] == "started"
         assert len(db_session._added) == 1
+        task = db_session._added[0]
+        assert data["task_id"] == str(task.id)
+        fake_arq.enqueue_job.assert_awaited_once()
+        assert fake_arq.enqueue_job.await_args.args == ("run_bulk_job", str(task.id))
 
 
 class TestAdminBackfillMbids:
@@ -590,6 +594,7 @@ class TestAdminBackfillMbids:
         assert task.task_type == types_module.TaskType.MBID_BACKFILL
         assert task.params.get("retry") is True
         fake_arq.enqueue_job.assert_awaited_once()
+        assert fake_arq.enqueue_job.await_args.args == ("backfill_mbids", str(task.id))
 
     async def test_entity_types_param(self) -> None:
         db_session = FakeAsyncSession()

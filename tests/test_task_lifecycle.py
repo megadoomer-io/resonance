@@ -364,9 +364,23 @@ class TestEnqueueTask:
             task_type=types_module.TaskType.BULK_JOB,
             status=types_module.SyncStatus.PENDING,
         )
-        delivery = lifecycle_module.stamp_delivery(task, "run_bulk_job")
         assert task.id is not None
+        delivery = lifecycle_module.stamp_delivery(task, "run_bulk_job", str(task.id))
+        assert delivery.args == (str(task.id),)
         assert delivery.job_id.startswith(f"run_bulk_job:{task.id}:")
+
+    @pytest.mark.parametrize("bad_arg", [None, "None"])
+    async def test_rejects_none_arg(self, bad_arg: object) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        with pytest.raises(ValueError, match="None"):
+            lifecycle_module.stamp_delivery(task, "run_bulk_job", bad_arg)
+        assert task.arq_job_id is None
+
+    async def test_rejects_args_without_task_id(self) -> None:
+        task = _make_task(status=types_module.SyncStatus.PENDING)
+        with pytest.raises(ValueError, match=str(task.id)):
+            lifecycle_module.stamp_delivery(task, "run_bulk_job", str(uuid.uuid4()))
+        assert task.arq_job_id is None
 
     async def test_passes_defer_by(self) -> None:
         task = _make_task(status=types_module.SyncStatus.DEFERRED)
@@ -401,7 +415,7 @@ class TestEnqueueTask:
     async def test_no_redis_still_stamps(self) -> None:
         task = _make_task(status=types_module.SyncStatus.PENDING)
         delivered = await lifecycle_module.deliver(
-            None, lifecycle_module.stamp_delivery(task, "sync_range")
+            None, lifecycle_module.stamp_delivery(task, "sync_range", str(task.id))
         )
         assert delivered is False
         assert task.arq_job_id is not None

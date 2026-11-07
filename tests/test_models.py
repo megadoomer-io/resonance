@@ -586,12 +586,18 @@ class TestTask:
             task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.PENDING,
         )
+        assert isinstance(task.id, uuid.UUID)
         assert task.parent_id is None
         assert task.params == {}
         assert task.result == {}
         assert task.progress_current == 0
         assert task.progress_total is None
         assert task.error_message is None
+
+    def test_explicit_id_is_kept(self) -> None:
+        task_id = uuid.uuid4()
+        task = task_module.Task(id=task_id, task_type=types_module.TaskType.BULK_JOB)
+        assert task.id == task_id
 
     def test_sync_task_tablename(self) -> None:
         assert task_module.Task.__tablename__ == "sync_tasks"
