@@ -113,6 +113,11 @@ class Task(base_module.Base):
     arq_job_id: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(255), nullable=True, default=None
     )
+    # Bumped by every claim; a delivery's writes apply only while it still
+    # holds the latest attempt.
+    attempt: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),
