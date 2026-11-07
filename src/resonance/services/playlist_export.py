@@ -268,9 +268,13 @@ class ExportProgressRecorder:
         matched: int | None = None,
         skipped: int | None = None,
         commit: bool = False,
-    ) -> None:
+    ) -> bool:
         """Record a step; commits once a batch fills, the interval passes, or
-        ``commit`` is set (for steps that are each a slow API call)."""
+        ``commit`` is set (for steps that are each a slow API call).
+
+        Returns:
+            Whether this step committed, so callers can check for a cancel.
+        """
         self._task.progress_current = current
         self._write(self._counts(matched, skipped))
         self._pending += 1
@@ -280,6 +284,8 @@ class ExportProgressRecorder:
             or self._clock() - self._last_commit >= self._min_interval
         ):
             await self._commit()
+            return True
+        return False
 
     async def flush(self) -> None:
         """Commit any recorded steps that haven't been committed yet."""

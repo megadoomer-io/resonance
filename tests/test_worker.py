@@ -3808,6 +3808,43 @@ class TestExportPlaylistProgress:
         assert "spotify_playlist_id" not in task.result
 
     @pytest.mark.asyncio
+    async def test_cancel_mid_search_stops_at_next_progress_commit(self) -> None:
+        import resonance.services.playlist_export as playlist_export_module
+
+        batch = playlist_export_module.PROGRESS_BATCH_SIZE
+        pts = [self._track(title=f"t{i}") for i in range(batch * 3)]
+        task, session, spotify_conn, ctx, snapshots, _ = self._run_setup(pts)
+        spotify_conn.search_track.return_value = "hit"
+        self._cancel_when(session, spotify_conn.search_track, after_calls=3)
+
+        await self._run(ctx, task)
+
+        assert spotify_conn.search_track.await_count == batch
+        spotify_conn.create_playlist.assert_not_called()
+        assert session.playlist.service_links is None
+        assert all(pt.spotify_synced_at is None for pt in pts)
+        assert "spotify_playlist_id" not in task.result
+        assert snapshots[-1]["current"] == batch
+
+    @pytest.mark.asyncio
+    async def test_cancel_mid_mbid_matching_stops_before_search(self) -> None:
+        import resonance.connectors.listenbrainz as listenbrainz_module
+        import resonance.services.playlist_export as playlist_export_module
+
+        batch = playlist_export_module.PROGRESS_BATCH_SIZE
+        pts = [self._track(mbid=f"mb-{i}") for i in range(batch * 2)]
+        lb = MagicMock(spec=listenbrainz_module.ListenBrainzConnector)
+        lb.get_recording_spotify_id = AsyncMock(return_value=None)
+        task, session, spotify_conn, ctx, _snapshots, _ = self._run_setup(pts, lb=lb)
+        self._cancel_when(session, lb.get_recording_spotify_id, after_calls=1)
+
+        await self._run(ctx, task)
+
+        assert lb.get_recording_spotify_id.await_count == batch
+        spotify_conn.search_track.assert_not_called()
+        spotify_conn.create_playlist.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancel_mid_push_stops_before_next_chunk_and_final_writes(
         self,
     ) -> None:

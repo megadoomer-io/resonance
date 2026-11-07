@@ -2438,6 +2438,9 @@ async def _merge_spotify_export_link(
     spotify_section[connection_id] = link
     links["spotify"] = spotify_section
     playlist.service_links = links
+    # Export bookkeeping isn't a content change: keep the stored updated_at so
+    # onupdate doesn't make the playlist read as changed since this export.
+    playlist.updated_at = playlist_models.Playlist.updated_at
 
 
 async def _export_cancelled(session: sa_async.AsyncSession, task_id: uuid.UUID) -> bool:
@@ -2631,7 +2634,11 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                     if found_id is not None:
                         _record_match(idx, found_id)
                         mb_matched += 1
-                    await progress.advance(current=done, matched=len(resolved))
+                    if await progress.advance(
+                        current=done, matched=len(resolved)
+                    ) and await _export_cancelled(session, task.id):
+                        log.info("export_playlist_cancelled", during="matching_mbid")
+                        return
                 await progress.flush()
 
             search_todo = [idx for idx in range(len(pts)) if idx not in resolved]
@@ -2655,11 +2662,13 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                         search_matched += 1
                     else:
                         skipped_tracks.append(track.title)
-                    await progress.advance(
+                    if await progress.advance(
                         current=done,
                         matched=len(resolved),
                         skipped=len(skipped_tracks),
-                    )
+                    ) and await _export_cancelled(session, task.id):
+                        log.info("export_playlist_cancelled", during="matching_search")
+                        return
                 await progress.flush()
 
             # Per-track sync status (#spotify-sync-visibility): which PlaylistTrack
