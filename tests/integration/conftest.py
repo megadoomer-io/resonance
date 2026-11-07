@@ -10,8 +10,13 @@ import arq
 import arq.connections as arq_connections
 import pytest
 import redis.exceptions
+import sqlalchemy as sa
+import sqlalchemy.ext.asyncio as sa_async
 
 import resonance.config as config_module
+import resonance.database as database_module
+import resonance.models as models
+from tests.conftest import TaskDB
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -48,3 +53,31 @@ async def arq_redis() -> AsyncIterator[arq.ArqRedis]:
         keys = [f"arq:job:{jid.decode()}" for jid in job_ids]
         await pool.delete(queue_name, *keys)
         await pool.aclose()
+
+
+@pytest.fixture
+async def pg_task_db() -> AsyncIterator[TaskDB]:
+    """A TaskDB on real Postgres, in a throwaway schema dropped afterwards."""
+    settings = config_module.Settings()
+    schema = f"test_{uuid.uuid4().hex}"
+    admin = sa_async.create_async_engine(settings.database_url)
+    try:
+        async with admin.begin() as conn:
+            await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+    except OSError as exc:
+        await admin.dispose()
+        _unavailable(f"PostgreSQL unavailable at {settings.pghost}: {exc}")
+        raise
+    engine = sa_async.create_async_engine(
+        settings.database_url,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(models.Base.metadata.create_all)
+        yield TaskDB(database_module.create_session_factory(engine))
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
+        await admin.dispose()

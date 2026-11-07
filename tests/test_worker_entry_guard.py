@@ -135,3 +135,63 @@ class TestIsDuplicateDelivery:
         for status in types_module.TERMINAL_STATUSES:
             task = task_module.Task(id=uuid.uuid4(), status=status)
             assert lifecycle_module.is_duplicate_delivery(task, "job")
+
+
+@pytest.mark.parametrize(
+    ("owner", "job", "args"),
+    _ENTRY_POINTS,
+    ids=[job.__name__ for _o, job, _a in _ENTRY_POINTS],
+)
+async def test_running_row_owned_by_another_job_is_not_claimed(
+    owner: Any,
+    job: Callable[..., Awaitable[None]],
+    args: tuple[str, ...],
+) -> None:
+    task = task_module.Task(
+        id=uuid.UUID(_TASK_ID),
+        user_id=uuid.uuid4(),
+        task_type=types_module.TaskType.SYNC_JOB,
+        status=types_module.SyncStatus.RUNNING,
+        attempt=1,
+        arq_job_id="owner-job",
+        params={},
+    )
+    session = AsyncMock()
+    ctx = _ctx(session)
+    ctx["job_id"] = "duplicate-job"
+
+    with (
+        patch.object(owner, "_load_task", AsyncMock(return_value=task)),
+        patch.object(
+            lifecycle_module, "is_cancelled", AsyncMock(return_value=False)
+        ) as is_cancelled,
+        patch.object(lifecycle_module, "logger") as log,
+    ):
+        await job(ctx, *args)
+
+    assert (task.status, task.attempt) == (types_module.SyncStatus.RUNNING, 1)
+    session.commit.assert_not_called()
+    is_cancelled.assert_not_called()
+    assert log.info.call_args.args[0] == "task_claim_lost"
+
+
+class TestTaskJob:
+    async def test_fenced_write_is_logged_not_raised(self) -> None:
+        async def job() -> None:
+            raise task_module.TaskFenced(uuid.uuid4(), 1, 2)
+
+        with patch.object(lifecycle_module, "logger") as log:
+            await lifecycle_module.task_job(job)()
+
+        assert log.warning.call_args.args[0] == "task_write_fenced"
+
+    async def test_claims_are_scoped_to_one_job(self) -> None:
+        seen: list[object] = []
+
+        async def job() -> None:
+            seen.append(task_module.claimed_attempts.get())
+
+        await lifecycle_module.task_job(job)()
+
+        assert seen == [{}]
+        assert task_module.claimed_attempts.get() is None

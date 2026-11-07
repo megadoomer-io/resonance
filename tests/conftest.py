@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import uuid
 from typing import TYPE_CHECKING, Any
+from unittest import mock
 
 import pytest
 import sqlalchemy as sa
@@ -12,6 +13,7 @@ import sqlalchemy.ext.asyncio as sa_async
 
 import resonance.models as models
 import resonance.models.task as task_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -68,3 +70,32 @@ async def task_db() -> AsyncIterator[TaskDB]:
         yield TaskDB(sa_async.async_sessionmaker(engine, expire_on_commit=False))
     finally:
         await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _simulated_claim_on_mock_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Win the claim in memory when a job runs against a mocked session.
+
+    Mocked-session tests script each ``session.execute`` result for the job's
+    own queries; the claim's UPDATE isn't part of that script. Real sessions
+    (SQLite ``task_db``, Postgres) still go through the real claim.
+    """
+    real_claim = lifecycle_module.claim
+
+    async def claim(
+        session: Any, task: task_models.Task, job_id: str | None
+    ) -> lifecycle_module.Claim | None:
+        if not isinstance(session, mock.Mock):
+            return await real_claim(session, task, job_id)
+        if not lifecycle_module._claimable(task, job_id):
+            return None
+        previous = task.status
+        task.status = types_module.SyncStatus.RUNNING
+        task.attempt = (task.attempt or 0) + 1
+        task.started_at = datetime.datetime.now(datetime.UTC)
+        await session.commit()
+        return lifecycle_module.Claim(attempt=task.attempt, previous_status=previous)
+
+    monkeypatch.setattr(lifecycle_module, "claim", claim)
