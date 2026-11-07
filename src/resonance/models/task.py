@@ -186,7 +186,8 @@ def _fence_claimed_writes(
         .execute(
             sa.select(Task.id, Task.attempt)
             .where(Task.id.in_([obj.id for obj in changed]))
-            .with_for_update()
+            # NO KEY UPDATE: doesn't block child-row inserts taking KEY SHARE.
+            .with_for_update(key_share=True)
         )
         .tuples()
         .all()
