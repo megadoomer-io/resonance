@@ -124,7 +124,12 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("plan_sync_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "plan_sync"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "plan_sync", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             # Check if this task was cancelled before we start
@@ -142,10 +147,6 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
             if existing_children > 0:
                 log.info("plan_sync_skipped_has_children", children=existing_children)
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             # Load the service connection
             conn_result = await session.execute(
@@ -274,9 +275,8 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
             if task is None:
                 log.error("sync_range_task_not_found")
                 return
-            if await _skip_duplicate_child_delivery(
-                session, task, wctx["redis"], log, "sync_range"
-            ):
+            claim = await _claim_child_delivery(session, task, ctx, log, "sync_range")
+            if claim is None:
                 return
 
             # Check if this task or its parent was cancelled
@@ -291,12 +291,8 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
                 await _check_parent_completion(session, task, arq_redis, log)
                 return
 
-            # Detect retry: task is still RUNNING from a previous crashed attempt
-            is_retry = task.status == types_module.SyncStatus.RUNNING
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
+            # Retry of a crashed run: arq redelivered the job that held the row.
+            is_retry = claim.previous_status == types_module.SyncStatus.RUNNING
 
             # Load the service connection
             conn_result = await session.execute(
@@ -429,7 +425,12 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("bulk_job_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "run_bulk_job"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "run_bulk_job", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -440,10 +441,6 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.info("bulk_job_cancelled")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             operation = str(task.params.get("operation", ""))
             log = log.bind(operation=operation)
@@ -525,7 +522,12 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("mbid_backfill_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "backfill_mbids"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "backfill_mbids", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -544,10 +546,6 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.error("mbid_backfill_no_connector")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             params = task.params or {}
             raw_types = params.get("entity_types")
@@ -636,7 +634,12 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("popularity_backfill_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "backfill_popularity"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "backfill_popularity", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -655,10 +658,6 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.error("popularity_backfill_no_connector")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             log.info("popularity_backfill_started")
             counts = await backfill_module.run_popularity_backfill(
@@ -702,7 +701,12 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("genre_backfill_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "backfill_genres"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "backfill_genres", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -711,10 +715,6 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
                 )
                 await session.commit()
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             log.info("genre_backfill_started")
             counts = await backfill_module.run_genre_backfill(session, settings, client)
@@ -925,7 +925,12 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("generate_playlist_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "generate_playlist"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "generate_playlist", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -936,10 +941,6 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.info("generate_playlist_cancelled")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             profile_id = str(task.params.get("profile_id", ""))
             log = log.bind(profile_id=profile_id)
@@ -1124,9 +1125,10 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("discover_tracks_task_not_found")
                 return
-            if await _skip_duplicate_child_delivery(
-                session, task, wctx["redis"], log, "discover_tracks_for_artist"
-            ):
+            claim = await _claim_child_delivery(
+                session, task, ctx, log, "discover_tracks_for_artist"
+            )
+            if claim is None:
                 return
 
             # Check if this task or its parent was cancelled
@@ -1140,10 +1142,6 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
                 arq_redis = wctx["redis"]
                 await _check_parent_completion(session, task, arq_redis, log)
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             artist_id_str = str(task.params.get("artist_id", ""))
             artist_name = str(task.params.get("artist_name", ""))
@@ -1712,7 +1710,12 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("enrich_related_artists_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "enrich_related_artists"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "enrich_related_artists", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -1722,10 +1725,6 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.info("enrich_related_artists_cancelled")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             profile_id = str(task.params.get("profile_id", ""))
             scope_param = task.params.get("seed_artist_ids")
@@ -2075,9 +2074,10 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("score_and_build_task_not_found")
                 return
-            if await _skip_duplicate_child_delivery(
-                session, task, wctx["redis"], log, "score_and_build_playlist"
-            ):
+            claim = await _claim_child_delivery(
+                session, task, ctx, log, "score_and_build_playlist"
+            )
+            if claim is None:
                 return
 
             # Check if this task or its parent was cancelled
@@ -2092,9 +2092,6 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 return
 
             generation_start = time_module.monotonic()
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             profile_id = str(task.params.get("profile_id", ""))
             log = log.bind(profile_id=profile_id)
@@ -2489,7 +2486,12 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
             if task is None:
                 log.error("export_playlist_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "export_playlist"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "export_playlist", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -2500,10 +2502,6 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
                 log.info("export_playlist_cancelled")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             playlist_id_str = str(task.params.get("playlist_id", ""))
             connection_id_str = str(task.params.get("connection_id", ""))
@@ -3050,23 +3048,22 @@ async def _check_parent_completion(
 # ---------------------------------------------------------------------------
 
 
-async def _skip_duplicate_child_delivery(
+async def _claim_child_delivery(
     session: sa_async.AsyncSession,
     task: task_module.Task,
-    arq_redis: arq.ArqRedis,
+    ctx: dict[str, Any],
     log: structlog.stdlib.BoundLogger,
     job: str,
-) -> bool:
+) -> lifecycle_module.Claim | None:
     """Entry guard for child jobs that drive a sibling pipeline.
 
-    Like ``lifecycle.is_duplicate_delivery``, but a child cancelled on its own
-    still advances its parent, so sequential siblings don't stall behind it.
+    Like ``lifecycle.claim_delivery``, but a child cancelled on its own still
+    advances its parent, so sequential siblings don't stall behind it.
     """
-    if not lifecycle_module.is_duplicate_delivery(task, job):
-        return False
-    if task.status == types_module.SyncStatus.CANCELLED:
-        await _check_parent_completion(session, task, arq_redis, log)
-    return True
+    claim = await lifecycle_module.claim_delivery(session, task, job, ctx.get("job_id"))
+    if claim is None and task.status == types_module.SyncStatus.CANCELLED:
+        await _check_parent_completion(session, task, ctx["redis"], log)
+    return claim
 
 
 async def _child_count(session: sa_async.AsyncSession, parent_id: uuid.UUID) -> int:
@@ -3158,22 +3155,29 @@ async def _fail_stale_children(
     parent_alias: type[task_module.Task],
     now: datetime.datetime,
 ) -> None:
-    stale_result = await session.execute(
-        sa.select(task_module.Task)
-        .join(parent_alias, task_module.Task.parent_id == parent_alias.id)
+    # One conditional UPDATE so a child claimed meanwhile is left alone.
+    stale = (
+        sa.update(task_module.Task)
         .where(
             task_module.Task.status == types_module.SyncStatus.PENDING,
-            parent_alias.status.in_(types_module.TERMINAL_STATUSES),
+            task_module.Task.parent_id.in_(
+                sa.select(parent_alias.id).where(
+                    parent_alias.status.in_(types_module.TERMINAL_STATUSES)
+                )
+            ),
         )
+        .values(
+            status=types_module.SyncStatus.FAILED,
+            error_message="Parent task already terminal",
+            completed_at=now,
+        )
+        .returning(task_module.Task.id)
+        .execution_options(synchronize_session=False)
     )
-    stale_tasks = list(stale_result.scalars().all())
-    for task in stale_tasks:
-        task.status = types_module.SyncStatus.FAILED
-        task.error_message = "Parent task already terminal"
-        task.completed_at = now
-    if stale_tasks:
-        await session.commit()
-        logger.info("cleaned_stale_orphans", count=len(stale_tasks))
+    cleaned = (await session.execute(stale)).scalars().all()
+    await session.commit()
+    if cleaned:
+        logger.info("cleaned_stale_orphans", count=len(cleaned))
 
 
 async def _recover_running(
@@ -3213,8 +3217,11 @@ async def _recover_running(
                 continue
             log.info("running_job_gone", arq_status=status.value)
 
-        # Preserve started_at so the UI shows continuous elapsed time.
-        task.status = types_module.SyncStatus.PENDING
+        # Fences the job that held the row, in case it is stalled, not dead.
+        # Preserves started_at so the UI shows continuous elapsed time.
+        if not await lifecycle_module.release_for_redelivery(session, task):
+            log.info("running_recovery_row_changed")
+            continue
         if task.task_type == types_module.TaskType.TIME_RANGE:
             conn_result = await session.execute(
                 sa.select(user_models.ServiceConnection).where(
@@ -3262,12 +3269,11 @@ async def _deliver_legacy_unstamped(
         )
     )
     legacy = list(legacy_result.scalars().all())
-    for task in legacy:
-        task.status = types_module.SyncStatus.PENDING
     if legacy:
         logger.info("legacy_unstamped_tasks", count=len(legacy))
     for task in legacy:
-        await _deliver_unless_planned(session, arq_redis, task)
+        if await lifecycle_module.release_for_redelivery(session, task):
+            await _deliver_unless_planned(session, arq_redis, task)
 
 
 async def _deliver_unless_planned(
@@ -3404,6 +3410,10 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _task_job(fn: Any) -> Any:
+    return heartbeat_module.with_heartbeat(lifecycle_module.task_job(fn))
+
+
 class WorkerSettings:
     """arq worker configuration.
 
@@ -3412,33 +3422,29 @@ class WorkerSettings:
     """
 
     functions: typing.ClassVar[list[typing.Any]] = [
-        arq.func(heartbeat_module.with_heartbeat(plan_sync), timeout=3600),
-        arq.func(heartbeat_module.with_heartbeat(sync_range), timeout=3600),
-        arq.func(heartbeat_module.with_heartbeat(run_bulk_job), timeout=3600),
+        arq.func(_task_job(plan_sync), timeout=3600),
+        arq.func(_task_job(sync_range), timeout=3600),
+        arq.func(_task_job(run_bulk_job), timeout=3600),
         arq.func(
-            heartbeat_module.with_heartbeat(concert_worker.sync_calendar_feed),
+            _task_job(concert_worker.sync_calendar_feed),
             timeout=3600,
         ),
         arq.func(
-            heartbeat_module.with_heartbeat(concert_worker.sync_concert_archives),
+            _task_job(concert_worker.sync_concert_archives),
             timeout=3600,
         ),
         arq.func(
-            heartbeat_module.with_heartbeat(concert_worker.sync_concert_archives_chunk),
+            _task_job(concert_worker.sync_concert_archives_chunk),
             timeout=600,
         ),
-        arq.func(heartbeat_module.with_heartbeat(generate_playlist), timeout=3600),
-        arq.func(
-            heartbeat_module.with_heartbeat(discover_tracks_for_artist), timeout=600
-        ),
-        arq.func(
-            heartbeat_module.with_heartbeat(score_and_build_playlist), timeout=600
-        ),
-        arq.func(heartbeat_module.with_heartbeat(export_playlist), timeout=600),
-        arq.func(heartbeat_module.with_heartbeat(backfill_mbids), timeout=3600),
-        arq.func(heartbeat_module.with_heartbeat(backfill_popularity), timeout=3600),
-        arq.func(heartbeat_module.with_heartbeat(enrich_related_artists), timeout=3600),
-        arq.func(heartbeat_module.with_heartbeat(backfill_genres), timeout=3600),
+        arq.func(_task_job(generate_playlist), timeout=3600),
+        arq.func(_task_job(discover_tracks_for_artist), timeout=600),
+        arq.func(_task_job(score_and_build_playlist), timeout=600),
+        arq.func(_task_job(export_playlist), timeout=600),
+        arq.func(_task_job(backfill_mbids), timeout=3600),
+        arq.func(_task_job(backfill_popularity), timeout=3600),
+        arq.func(_task_job(enrich_related_artists), timeout=3600),
+        arq.func(_task_job(backfill_genres), timeout=3600),
     ]
     cron_jobs: typing.ClassVar[list[typing.Any]] = [
         arq.cron(

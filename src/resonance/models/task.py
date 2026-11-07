@@ -5,6 +5,7 @@ Note: The underlying table is ``sync_tasks`` (historical name).
 
 from __future__ import annotations
 
+import contextvars
 import datetime
 import uuid
 
@@ -113,6 +114,11 @@ class Task(base_module.Base):
     arq_job_id: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(255), nullable=True, default=None
     )
+    # Bumped by every claim (lifecycle.claim); writes from a delivery whose
+    # claim is no longer the latest are refused (see _fence_claimed_writes).
+    attempt: orm.Mapped[int] = orm.mapped_column(
+        sa.Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),
@@ -131,6 +137,64 @@ def _set_python_defaults(
         if attr not in kwargs:
             value = default() if callable(default) else default
             setattr(target, attr, value)
+
+
+class TaskFenced(BaseException):
+    """A delivery tried to write a task row another delivery has since claimed.
+
+    A BaseException so the handlers' ``except Exception`` blocks can't catch it
+    and record a failure; ``lifecycle.task_job`` stops the job instead.
+    """
+
+    def __init__(self, task_id: uuid.UUID, mine: int, current: int | None) -> None:
+        super().__init__(f"task {task_id}: attempt {mine} fenced by {current}")
+        self.task_id = task_id
+        self.mine = mine
+        self.current = current
+
+
+# task id -> attempt this job claimed. Each arq job runs in its own asyncio
+# task, so the claims are per job.
+claimed_attempts: contextvars.ContextVar[dict[uuid.UUID, int] | None] = (
+    contextvars.ContextVar("claimed_attempts", default=None)
+)
+
+
+@sa.event.listens_for(orm.Session, "before_flush")
+def _fence_claimed_writes(
+    session: orm.Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """Refuse writes to a row this job claimed once a newer claim exists.
+
+    FOR UPDATE holds the row until this transaction ends, so a claim can't land
+    between the check and the write.
+    """
+    claims = claimed_attempts.get()
+    if not claims:
+        return
+    changed = [
+        obj
+        for obj in session.dirty
+        if isinstance(obj, Task) and obj.id in claims and session.is_modified(obj)
+    ]
+    if not changed:
+        return
+    current = dict(
+        session.connection()
+        .execute(
+            sa.select(Task.id, Task.attempt)
+            .where(Task.id.in_([obj.id for obj in changed]))
+            # NO KEY UPDATE: doesn't block child-row inserts taking KEY SHARE.
+            .with_for_update(key_share=True)
+        )
+        .tuples()
+        .all()
+    )
+    for obj in changed:
+        if current.get(obj.id) != claims[obj.id]:
+            raise TaskFenced(obj.id, claims[obj.id], current.get(obj.id))
 
 
 @sa.event.listens_for(orm.Session, "before_flush")

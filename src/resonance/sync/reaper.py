@@ -199,7 +199,9 @@ async def _redeliver(
             await session.rollback()
             return decide(Action.NO_DISPATCH, seen_job_id)
 
-        task.status = types_module.SyncStatus.PENDING
+        if not await lifecycle_module.release_for_redelivery(session, task):
+            await session.rollback()
+            return decide(Action.ROW_CHANGED, seen_job_id)
         delivery = lifecycle_module.stamp_delivery(task, job[0], *job[1])
         await session.commit()
         delivered = await lifecycle_module.deliver(arq_redis, delivery)

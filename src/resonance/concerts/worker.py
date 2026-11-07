@@ -134,7 +134,12 @@ async def sync_calendar_feed(
             if task is None:
                 log.error("calendar_sync_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "sync_calendar_feed"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "sync_calendar_feed", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             # Check if this task or its parent was cancelled
@@ -145,10 +150,6 @@ async def sync_calendar_feed(
                 await session.commit()
                 log.info("calendar_sync_cancelled")
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             # Load the service connection
             connection = await _load_connection(session, connection_id)
@@ -291,7 +292,12 @@ async def sync_concert_archives(
             if task is None:
                 log.error("concert_archives_import_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(task, "sync_concert_archives"):
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "sync_concert_archives", ctx.get("job_id")
+                )
+                is None
+            ):
                 return
 
             if await lifecycle_module.is_cancelled(session, task):
@@ -345,10 +351,6 @@ async def sync_concert_archives(
                 )
                 await session.commit()
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             connection = await _load_connection(
                 session, str(task.service_connection_id)
@@ -460,8 +462,11 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
             if task is None:
                 log.error("concert_archives_chunk_task_not_found")
                 return
-            if lifecycle_module.is_duplicate_delivery(
-                task, "sync_concert_archives_chunk"
+            if (
+                await lifecycle_module.claim_delivery(
+                    session, task, "sync_concert_archives_chunk", ctx.get("job_id")
+                )
+                is None
             ):
                 if task.status == types_module.SyncStatus.CANCELLED:
                     await _check_parent_completion(session, task, arq_redis, log)
@@ -473,10 +478,6 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
                 )
                 await session.commit()
                 return
-
-            task.status = types_module.SyncStatus.RUNNING
-            task.started_at = datetime.datetime.now(datetime.UTC)
-            await session.commit()
 
             # Load parent to get parsed events
             parent = await _load_task(session, str(task.parent_id))

@@ -12,6 +12,7 @@ import sqlalchemy.ext.asyncio as sa_async
 
 import resonance.models as models
 import resonance.models.task as task_models
+import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -68,3 +69,46 @@ async def task_db() -> AsyncIterator[TaskDB]:
         yield TaskDB(sa_async.async_sessionmaker(engine, expire_on_commit=False))
     finally:
         await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _simulated_claim_on_mock_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Win the claim (and cancel's attempt bump) in memory on fake sessions.
+
+    Mock and fake-session tests script each ``session.execute`` result for the job's
+    own queries; these UPDATEs aren't part of that script. Recording the claim
+    for the fence would be pointless there: a fake session never flushes, so
+    the ``before_flush`` fence can't run. Real sessions (SQLite ``task_db``,
+    Postgres) use the real code, and the fence is tested on Postgres.
+    """
+    real_claim = lifecycle_module.claim
+
+    async def claim(
+        session: Any, task: task_models.Task, job_id: str | None
+    ) -> lifecycle_module.Claim | None:
+        if isinstance(session, sa_async.AsyncSession):
+            return await real_claim(session, task, job_id)
+        if not lifecycle_module._claimable(task, job_id):
+            return None
+        previous = task.status
+        task.status = types_module.SyncStatus.RUNNING
+        task.attempt = (task.attempt or 0) + 1
+        task.started_at = datetime.datetime.now(datetime.UTC)
+        await session.commit()
+        return lifecycle_module.Claim(attempt=task.attempt, previous_status=previous)
+
+    monkeypatch.setattr(lifecycle_module, "claim", claim)
+
+    # Cancel's attempt bump is the same kind of unscripted UPDATE.
+    real_fence_out = lifecycle_module._fence_out_holders
+
+    async def fence_out(session: Any, tasks: list[task_models.Task]) -> None:
+        if isinstance(session, sa_async.AsyncSession):
+            await real_fence_out(session, tasks)
+            return
+        for task in tasks:
+            task.attempt = (task.attempt or 0) + 1
+
+    monkeypatch.setattr(lifecycle_module, "_fence_out_holders", fence_out)

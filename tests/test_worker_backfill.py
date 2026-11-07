@@ -40,6 +40,8 @@ def _task(params: dict[str, Any] | None = None) -> MagicMock:
     task = MagicMock()
     task.id = uuid.uuid4()
     task.params = params or {}
+    task.status = types_module.SyncStatus.PENDING
+    task.attempt = 0
     return task
 
 

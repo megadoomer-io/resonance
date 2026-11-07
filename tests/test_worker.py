@@ -707,13 +707,14 @@ class TestPlanSync:
 
     @pytest.mark.asyncio
     async def test_redelivery_for_parent_with_children_does_not_replan(self) -> None:
-        """A re-delivered plan_sync for a RUNNING parent with children is a no-op."""
+        """arq's retry of the job that planned a parent doesn't re-plan it."""
         task = task_module.Task(
             id=uuid.uuid4(),
             user_id=uuid.uuid4(),
             service_connection_id=uuid.uuid4(),
             task_type=types_module.TaskType.SYNC_JOB,
             status=types_module.SyncStatus.RUNNING,
+            arq_job_id="plan_sync:job-1",
         )
         session = AsyncMock()
         task_result = MagicMock()
@@ -729,6 +730,7 @@ class TestPlanSync:
             "strategies": {types_module.ServiceType.SPOTIFY: strategy},
             "connector_registry": MagicMock(),
             "redis": arq_redis,
+            "job_id": "plan_sync:job-1",
         }
 
         with patch.object(worker_module, "logger") as log:
@@ -737,7 +739,6 @@ class TestPlanSync:
 
         strategy.plan.assert_not_called()
         session.add.assert_not_called()
-        session.commit.assert_not_called()
         arq_redis.enqueue_job.assert_not_called()
         assert task.status == types_module.SyncStatus.RUNNING
         log.info.assert_any_call("plan_sync_skipped_has_children", children=3)
@@ -911,6 +912,7 @@ class TestSyncRangeWatermarkResume:
             status=types_module.SyncStatus.RUNNING,
             params={"username": "testuser", "min_ts": 1700000000},
             progress_current=15000,
+            arq_job_id="sync_range:retry",
         )
 
         connection = MagicMock(spec=user_models.ServiceConnection)
@@ -986,6 +988,7 @@ class TestSyncRangeWatermarkResume:
                 types_module.ServiceType.LISTENBRAINZ: mock_strategy,
             },
             "redis": AsyncMock(),
+            "job_id": "sync_range:retry",
         }
 
         await worker_module.sync_range(ctx, str(task_id))
