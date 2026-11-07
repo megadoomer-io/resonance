@@ -206,8 +206,13 @@ class Claim:
 def _claimable(task: task_models.Task, job_id: str | None) -> bool:
     if task.status in _CLAIMABLE:
         return True
-    # arq's in-progress lock keeps one job id from running twice at once, so a
-    # RUNNING row is only taken over by a retry of the delivery that claimed it.
+    # A RUNNING row is only taken over by a delivery with the same job id: arq's
+    # retry of the job that claimed it. arq's in-progress key normally keeps
+    # that id from running twice at once, but heartbeat.py rewrites it with a
+    # 60s TTL, so a loop stalled longer lets another worker start the same id.
+    # The claim then fences the stale run's DB writes; its external side
+    # effects can still happen twice. Legacy RUNNING rows with no arq_job_id
+    # never match and wait for startup recovery (worker._recover_running).
     return (
         task.status == types_module.SyncStatus.RUNNING
         and job_id is not None
@@ -436,6 +441,7 @@ async def cancel_active_children(
     cancelled = [(child, child.status) for child in active_result.scalars().all()]
     for child, _ in cancelled:
         await cancel_task(session, child, "Parent task was cancelled")
+    await _fence_out_holders(session, [child for child, _ in cancelled])
     if cancelled:
         logger.info(
             "active_children_cancelled",
@@ -443,6 +449,32 @@ async def cancel_active_children(
             count=len(cancelled),
         )
     return cancelled
+
+
+async def _fence_out_holders(
+    session: AsyncSession, tasks: list[task_models.Task]
+) -> None:
+    """Bump ``attempt`` on rows cancelled from outside their job.
+
+    A run whose abort missed would otherwise still pass the fence, and its
+    DEFERRED or PENDING write (both active, so ``_keep_cancelled`` lets them
+    through) would revive the task. Not part of ``cancel_task``, which a
+    claimer also calls on its own row.
+    """
+    if not tasks:
+        return
+    bumped = (
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(task_models.Task.id.in_([t.id for t in tasks]))
+            .values(attempt=task_models.Task.attempt + 1)
+            .returning(task_models.Task.id, task_models.Task.attempt)
+            .execution_options(synchronize_session=False)
+        )
+    ).tuples()
+    by_id = {t.id: t for t in tasks}
+    for task_id, attempt in bumped:
+        orm.attributes.set_committed_value(by_id[task_id], "attempt", attempt)
 
 
 class CancelOutcome(enum.StrEnum):
@@ -500,6 +532,7 @@ async def request_cancel(
 
     was_running = task.status == types_module.SyncStatus.RUNNING
     await cancel_task(session, task, reason)
+    await _fence_out_holders(session, [task])
     children = await cancel_active_children(session, task.id)
     await session.commit()
     logger.info(
