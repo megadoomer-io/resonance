@@ -12,6 +12,7 @@ jobs:
       packages: write
     outputs:
       image-tag: ${{ steps.image-tag.outputs.tag }}
+      is-head: ${{ steps.head.outputs.is-head }}
     steps:
       - uses: actions/checkout@v7
 
@@ -48,30 +49,82 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Runs before update-config joins its concurrency group: a superseded run
+      # entering the group late would replace (cancel) a newer pending run.
+      - name: Check commit is still main head
+        id: head
+        run: |
+          head_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$head_sha" = "$GITHUB_SHA" ]; then
+            echo "is-head=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$GITHUB_SHA is no longer main head ($head_sha); the newer run publishes config"
+            echo "is-head=false" >> "$GITHUB_OUTPUT"
+          fi
+
   update-config:
     needs: build-and-push
+    if: needs.build-and-push.outputs.is-head == 'true'
     runs-on: ubuntu-latest
+    # Queue behind a running push, never cancel it. GitHub keeps one pending
+    # run per group and cancels older pending ones; the newer tag supersedes them.
+    concurrency:
+      group: update-config-resonance
+      cancel-in-progress: false
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
           repository: megadoomer-io/megadoomer-config
           token: ${{ secrets.GH_TOKEN_MEGADOOMER_CONFIG_WRITE }}
 
-      - name: Update image tag
+      # Each retry redoes the edit on fresh config main, since other writers push there too.
+      - name: Update image tag, commit, and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+          KUSTOMIZE_DIR: applications/resonance/resonance/do
         run: |
-          cd applications/resonance/resonance/do
-          docker run --rm \
-            -v "$(pwd)":/work \
-            --workdir /work \
-            registry.k8s.io/kustomize/kustomize:v5.8.1 \
-            edit set image app=ghcr.io/megadoomer-io/resonance:${{ needs.build-and-push.outputs.image-tag }}
-
-      - name: Commit and push
-        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add applications/resonance/resonance/do/kustomization.yaml
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git pull --rebase --autostash
-          git commit -m "chore: update resonance image to ${{ needs.build-and-push.outputs.image-tag }}"
-          git push
+
+          max_attempts=5
+          for attempt in $(seq 1 "$max_attempts"); do
+            if [ "$attempt" -gt 1 ]; then
+              sleep $(( attempt * 2 + RANDOM % 3 ))
+              git fetch --depth=1 origin main
+              git reset --hard FETCH_HEAD
+            fi
+
+            # Never move config backwards: skip if it already pins this commit or a descendant.
+            deployed_tag="$(yq '.images[] | select(.name == "app") | .newTag' "$KUSTOMIZE_DIR/kustomization.yaml")"
+            deployed_sha="${deployed_tag##*-}"
+            if [ -n "$deployed_sha" ] && [ "$deployed_tag" != "null" ]; then
+              status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$deployed_sha...$GITHUB_SHA" --jq .status)" || status=unknown
+              if [ "$status" = "identical" ] || [ "$status" = "behind" ]; then
+                echo "::notice::config already pins $deployed_tag (this commit is $status); skipping"
+                exit 0
+              fi
+            fi
+
+            docker run --rm \
+              -v "$PWD/$KUSTOMIZE_DIR":/work \
+              --workdir /work \
+              registry.k8s.io/kustomize/kustomize:v5.8.1 \
+              edit set image "app=ghcr.io/megadoomer-io/resonance:$IMAGE_TAG"
+
+            git add "$KUSTOMIZE_DIR/kustomization.yaml"
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+            git commit -m "chore: update resonance image to $IMAGE_TAG"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "::warning::push attempt $attempt/$max_attempts failed; retrying on fresh main"
+          done
+          echo "::error::could not push after $max_attempts attempts"
+          exit 1
