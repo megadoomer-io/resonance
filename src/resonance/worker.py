@@ -2438,6 +2438,9 @@ async def _merge_spotify_export_link(
     spotify_section[connection_id] = link
     links["spotify"] = spotify_section
     playlist.service_links = links
+    # Export bookkeeping isn't a content change: keep the stored updated_at so
+    # onupdate doesn't make the playlist read as changed since this export.
+    playlist.updated_at = playlist_models.Playlist.updated_at
 
 
 async def _export_cancelled(session: sa_async.AsyncSession, task_id: uuid.UUID) -> bool:
