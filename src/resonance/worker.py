@@ -77,6 +77,7 @@ import resonance.sync.lastfm as lastfm_sync
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.listenbrainz as lb_sync
 import resonance.sync.reaper as reaper_module
+import resonance.sync.resume as resume_module
 import resonance.sync.spotify as spotify_sync
 import resonance.sync.test as test_sync
 import resonance.types as types_module
@@ -308,7 +309,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
             # On retry, resume from watermark to avoid re-processing pages
             if is_retry:
-                _apply_watermark_resume(task, connection)
+                resume_module.apply_watermark_resume(task, connection)
 
             log.info("sync_range_started")
 
@@ -3095,44 +3096,10 @@ async def _load_task(
     return result.scalar_one_or_none()
 
 
-def _apply_watermark_resume(
-    task: task_module.Task,
-    connection: user_models.ServiceConnection,
-) -> None:
-    """Inject watermark position into task params for crash recovery.
-
-    For ListenBrainz TIME_RANGE tasks, reads ``oldest_synced_at`` from
-    the connection's sync watermark and sets it as ``max_ts`` so the
-    task resumes from where the previous run left off instead of
-    re-processing all pages.
-
-    Args:
-        task: The orphaned task being re-enqueued.
-        connection: The task's ServiceConnection with current watermark.
-    """
-    if connection.service_type != types_module.ServiceType.LISTENBRAINZ:
-        return
-
-    listens_watermark = connection.sync_watermark.get("listens", {})
-    oldest_synced_at = listens_watermark.get("oldest_synced_at")
-    if oldest_synced_at is not None:
-        items_so_far = int(task.progress_current or 0)
-        task.params = {
-            **task.params,
-            "max_ts": int(str(oldest_synced_at)),
-            "items_so_far": items_so_far,
-        }
-        logger.info(
-            "watermark_resume_applied",
-            task_id=str(task.id),
-            max_ts=oldest_synced_at,
-            items_so_far=items_so_far,
-        )
-
-
 async def _reenqueue_orphaned_tasks(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     arq_redis: arq.ArqRedis,
+    lease_recovery: reaper_module.LeaseRecovery = reaper_module.LeaseRecovery.LOG,
 ) -> None:
     """Recover tasks whose arq delivery was lost, on worker startup.
 
@@ -3147,7 +3114,7 @@ async def _reenqueue_orphaned_tasks(
         await _recover_running(session, arq_redis, parent_alias)
         await _deliver_legacy_unstamped(session, arq_redis, now)
 
-    await reaper_module.reap(session_factory, arq_redis)
+    await reaper_module.reap(session_factory, arq_redis, lease_recovery=lease_recovery)
 
 
 async def _fail_stale_children(
@@ -3222,15 +3189,7 @@ async def _recover_running(
         if not await lifecycle_module.release_for_redelivery(session, task):
             log.info("running_recovery_row_changed")
             continue
-        if task.task_type == types_module.TaskType.TIME_RANGE:
-            conn_result = await session.execute(
-                sa.select(user_models.ServiceConnection).where(
-                    user_models.ServiceConnection.id == task.service_connection_id
-                )
-            )
-            connection = conn_result.scalar_one_or_none()
-            if connection is not None:
-                _apply_watermark_resume(task, connection)
+        await resume_module.resume_recovered(session, task)
         reset.append(task)
 
     if not reset:
@@ -3308,9 +3267,18 @@ async def _deliver_unless_planned(
 
 
 async def reap_tasks(ctx: dict[str, Any]) -> None:
-    """arq cron entry: re-deliver PENDING/DEFERRED tasks whose job was lost."""
+    """arq cron entry: re-deliver lost jobs and handle expired RUNNING leases."""
     wctx = typing.cast("WorkerContext", ctx)
-    await reaper_module.reap(wctx["session_factory"], wctx["redis"])
+    await reaper_module.reap(
+        wctx["session_factory"], wctx["redis"], lease_recovery=_lease_recovery(wctx)
+    )
+
+
+def _lease_recovery(wctx: WorkerContext) -> reaper_module.LeaseRecovery:
+    settings = wctx.get("settings")
+    if settings is None:
+        return reaper_module.LeaseRecovery.LOG
+    return reaper_module.LeaseRecovery(settings.task_lease_recovery)
 
 
 # ---------------------------------------------------------------------------
@@ -3372,7 +3340,9 @@ async def startup(ctx: dict[str, Any]) -> None:
         logger.info("startup_cleaned_stale_locks", count=cleaned)
 
     # Re-enqueue orphaned tasks that lost their arq jobs
-    await _reenqueue_orphaned_tasks(session_factory, wctx["redis"])
+    await _reenqueue_orphaned_tasks(
+        session_factory, wctx["redis"], _lease_recovery(wctx)
+    )
 
     logger.info("worker_started")
 

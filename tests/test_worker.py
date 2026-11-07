@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import arq.jobs as arq_jobs
 import pytest
 
+import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
@@ -93,7 +94,29 @@ class TestWorkerSettings:
 
         await worker_module.reap_tasks(ctx)
 
-        reap.assert_awaited_once_with(ctx["session_factory"], ctx["redis"])
+        reap.assert_awaited_once_with(
+            ctx["session_factory"],
+            ctx["redis"],
+            lease_recovery=worker_module.reaper_module.LeaseRecovery.LOG,
+        )
+
+    @pytest.mark.parametrize("mode", ["log", "active"])
+    async def test_reap_tasks_passes_lease_recovery_setting(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        reap = AsyncMock()
+        monkeypatch.setattr(worker_module.reaper_module, "reap", reap)
+        settings = config_module.Settings(task_lease_recovery=mode)  # type: ignore[arg-type]
+        ctx: dict[str, Any] = {
+            "session_factory": MagicMock(),
+            "redis": MagicMock(),
+            "settings": settings,
+        }
+
+        await worker_module.reap_tasks(ctx)
+
+        assert reap.await_args is not None
+        assert reap.await_args.kwargs["lease_recovery"] == mode
 
     def test_abort_jobs_allowed(self) -> None:
         assert worker_module.WorkerSettings.allow_abort_jobs is True
