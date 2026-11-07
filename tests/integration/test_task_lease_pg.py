@@ -61,6 +61,7 @@ async def _expired_running(db: TaskDB, **fields: Any) -> task_models.Task:
 async def _reap(db: TaskDB, mode: Mode) -> list[reaper_module.Decision]:
     arq = AsyncMock()
     arq.default_queue_name = "arq:queue"
+    arq.exists.return_value = 0
     with patch.object(
         reaper_module,
         "job_status",
@@ -348,6 +349,7 @@ async def test_reaper_and_startup_recovery_race_one_winner(
     task = await _expired_running(pg_task_db)
     arq = AsyncMock()
     arq.default_queue_name = "arq:queue"
+    arq.exists.return_value = 0
 
     with patch.object(
         reaper_module,
@@ -520,6 +522,7 @@ async def test_active_recovery_leaves_jobs_arq_will_run(
     task = await _expired_running(pg_task_db)
     arq = AsyncMock()
     arq.default_queue_name = "arq:queue"
+    arq.exists.return_value = 0
     with patch.object(reaper_module, "job_status", AsyncMock(return_value=arq_status)):
         decisions = await reaper_module.reap(
             pg_task_db.factory, arq, lease_recovery=Mode.ACTIVE
@@ -559,3 +562,163 @@ async def test_cancel_during_renewer_teardown_reaches_the_job(
     with pytest.raises(asyncio.CancelledError):
         await run
     release.assert_not_called()
+
+
+async def test_live_holder_blocking_its_own_renewal_is_not_recovered(
+    pg_task_db: TaskDB, arq_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live failure: a handler holds its row lock past TTL + grace, so the
+    DB lease expires; it commits, and the next reaper tick must not recover it."""
+    monkeypatch.setattr(lifecycle_module, "LEASE_TTL", datetime.timedelta(seconds=2))
+    monkeypatch.setattr(
+        lifecycle_module, "LEASE_RENEW_INTERVAL", datetime.timedelta(seconds=0.3)
+    )
+    monkeypatch.setattr(
+        lifecycle_module, "LEASE_RENEW_LOCK_TIMEOUT", datetime.timedelta(seconds=0.2)
+    )
+    monkeypatch.setattr(reaper_module, "LEASE_GRACE", datetime.timedelta(seconds=1))
+    task = await pg_task_db.add(status=S.PENDING)
+    committed = asyncio.Event()
+    finish = asyncio.Event()
+
+    @lifecycle_module.task_job
+    async def job(_ctx: dict[str, Any]) -> None:
+        async with pg_task_db.factory() as session:
+            loaded = await session.get(task_models.Task, task.id)
+            assert loaded is not None
+            assert await lifecycle_module.claim(session, loaded, "live")
+            loaded.progress_current = 1
+            await session.flush()
+            await asyncio.sleep(4)
+            await session.commit()
+            committed.set()
+            await finish.wait()
+            await lifecycle_module.complete_task(session, loaded, {"ok": True})
+            await session.commit()
+
+    run = asyncio.create_task(
+        job({"session_factory": pg_task_db.factory, "redis": arq_redis})
+    )
+    await committed.wait()
+    assert (await pg_task_db.get(task.id)).lease_expires_at < await _db_wall_clock(
+        pg_task_db
+    ) - reaper_module.LEASE_GRACE
+
+    with patch.object(
+        reaper_module,
+        "job_status",
+        AsyncMock(return_value=arq_jobs.JobStatus.in_progress),
+    ):
+        decisions = await reaper_module.reap(
+            pg_task_db.factory, arq_redis, lease_recovery=Mode.ACTIVE
+        )
+    finish.set()
+    await run
+
+    assert Action.LEASE_RECOVERED not in [d.action for d in decisions]
+    row = await pg_task_db.get(task.id)
+    assert (row.status, row.attempt) == (S.COMPLETED, 1)
+    assert not await arq_redis.exists(lifecycle_module.alive_key(task.id, 1))
+
+
+async def test_expired_lease_without_liveness_key_is_recovered(
+    pg_task_db: TaskDB, arq_redis: Any
+) -> None:
+    task = await _expired_running(pg_task_db)
+    await arq_redis.delete(lifecycle_module.alive_key(task.id, 1))
+    with patch.object(
+        reaper_module,
+        "job_status",
+        AsyncMock(return_value=arq_jobs.JobStatus.in_progress),
+    ):
+        decisions = await reaper_module.reap(
+            pg_task_db.factory, arq_redis, lease_recovery=Mode.ACTIVE
+        )
+
+    assert [d.action for d in decisions] == [Action.LEASE_RECOVERED]
+    assert (await pg_task_db.get(task.id)).status == S.PENDING
+
+
+async def test_expired_lease_with_liveness_key_is_left_alone(
+    pg_task_db: TaskDB, arq_redis: Any
+) -> None:
+    task = await _expired_running(pg_task_db)
+    key = lifecycle_module.alive_key(task.id, 1)
+    await arq_redis.psetex(key, 60_000, b"1")
+    try:
+        decisions = await _reap_with(pg_task_db, arq_redis)
+    finally:
+        await arq_redis.delete(key)
+
+    assert [d.action for d in decisions] == [Action.HOLDER_ALIVE]
+    assert (await pg_task_db.get(task.id)).status == S.RUNNING
+
+
+async def _reap_with(db: TaskDB, arq: Any) -> list[reaper_module.Decision]:
+    with patch.object(
+        reaper_module,
+        "job_status",
+        AsyncMock(return_value=arq_jobs.JobStatus.in_progress),
+    ):
+        return await reaper_module.reap(db.factory, arq, lease_recovery=Mode.ACTIVE)
+
+
+async def test_liveness_check_error_never_recovers(pg_task_db: TaskDB) -> None:
+    task = await _expired_running(pg_task_db)
+    arq = AsyncMock()
+    arq.default_queue_name = "arq:queue"
+    arq.exists.side_effect = ConnectionError("redis down")
+
+    decisions = await _reap_with(pg_task_db, arq)
+
+    assert [d.action for d in decisions] == [Action.LIVENESS_ERROR]
+    assert (await pg_task_db.get(task.id)).status == S.RUNNING
+
+
+async def test_locked_expired_row_is_skipped_this_tick(pg_task_db: TaskDB) -> None:
+    task = await _expired_running(pg_task_db)
+    arq = AsyncMock()
+    arq.default_queue_name = "arq:queue"
+    arq.exists.return_value = 0
+    held, release = asyncio.Event(), asyncio.Event()
+    holder = asyncio.create_task(_hold_row_lock(pg_task_db, task.id, held, release))
+    await held.wait()
+    try:
+        decisions = await asyncio.wait_for(_reap_with(pg_task_db, arq), timeout=5)
+    finally:
+        release.set()
+        await holder
+
+    assert [d.action for d in decisions] == [Action.ROW_CHANGED]
+    row = await pg_task_db.get(task.id)
+    assert (row.status, row.attempt) == (S.RUNNING, 1)
+
+
+async def test_job_commit_renews_the_lease_promptly(
+    pg_task_db: TaskDB, arq_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit wakes the renewer, so the lease catches up without waiting a
+    full interval (and its own renewals don't keep waking it)."""
+    monkeypatch.setattr(
+        lifecycle_module, "LEASE_RENEW_INTERVAL", datetime.timedelta(seconds=60)
+    )
+    task = await pg_task_db.add(status=S.PENDING)
+    renew = AsyncMock(wraps=lifecycle_module.renew_lease)
+    monkeypatch.setattr(lifecycle_module, "renew_lease", renew)
+
+    @lifecycle_module.task_job
+    async def job(_ctx: dict[str, Any]) -> None:
+        async with pg_task_db.factory() as session:
+            loaded = await session.get(task_models.Task, task.id)
+            assert loaded is not None
+            assert await lifecycle_module.claim(session, loaded, "a")
+            await asyncio.sleep(0.3)
+            renew.reset_mock()
+            loaded.progress_current = 3
+            await session.commit()
+            await asyncio.sleep(0.5)
+
+    await job({"session_factory": pg_task_db.factory, "redis": arq_redis})
+
+    assert renew.await_count == 1
+    assert not await arq_redis.exists(lifecycle_module.alive_key(task.id, 1))

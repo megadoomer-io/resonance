@@ -94,11 +94,13 @@ class Action(enum.StrEnum):
     NO_DISPATCH = "no_dispatch"
     LEASE_EXPIRED = "lease_expired"
     LEASE_RECOVERED = "lease_recovered"
+    HOLDER_ALIVE = "holder_alive"
+    LIVENESS_ERROR = "liveness_error"
 
 
 # Recorded for the health endpoint; ARQ_HOLDS_JOB repeats every tick for a
 # queued backlog, so it is only logged.
-_RECORDED_ACTIONS = frozenset(Action) - {Action.ARQ_HOLDS_JOB}
+_RECORDED_ACTIONS = frozenset(Action) - {Action.ARQ_HOLDS_JOB, Action.HOLDER_ALIVE}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -288,7 +290,9 @@ async def _recover_expired_lease(
                     task_models.Task.attempt == seen_attempt,
                     _lease_expired(task_models.Task),
                 )
-                .with_for_update()
+                # Locked means someone is writing it right now (normally its
+                # live holder); look again next tick rather than queue behind.
+                .with_for_update(skip_locked=True)
             )
         ).scalar_one_or_none()
         if task is None:
@@ -351,6 +355,21 @@ async def _reap_expired_leases(
                 _attempt,
             )
 
+        # An expired DB lease alone isn't death: the holder's own transaction
+        # can block its renewal. Its Redis liveness key says it's still running.
+        try:
+            alive = bool(
+                await arq_redis.exists(
+                    lifecycle_module.alive_key(task_id, seen_attempt)
+                )
+            )
+        except Exception:
+            logger.exception("reaper_liveness_check_failed", task_id=str(task_id))
+            decisions.append(decide(Action.LIVENESS_ERROR, seen_job_id))
+            continue
+        if alive:
+            decisions.append(decide(Action.HOLDER_ALIVE, seen_job_id))
+            continue
         if lease_recovery == LeaseRecovery.LOG:
             decisions.append(decide(Action.LEASE_EXPIRED, seen_job_id))
             continue
@@ -438,8 +457,12 @@ async def reap(
     decisions += await _reap_expired_leases(
         session_factory, arq_redis, lease_recovery, now
     )
+    recorded = await _to_record(arq_redis, decisions)
     for decision in decisions:
-        logger.info(
+        quiet = decision.action in _QUIET_ACTIONS or (
+            decision.action == Action.LEASE_EXPIRED and decision not in recorded
+        )
+        (logger.debug if quiet else logger.info)(
             "reaper_decision",
             task_id=decision.task_id,
             task_type=decision.task_type,
@@ -447,7 +470,7 @@ async def reap(
             arq_status=decision.arq_status,
             job_id=decision.job_id,
         )
-    await _record_tick(arq_redis, now, len(candidates), decisions)
+    await _record_tick(arq_redis, now, len(candidates), decisions, recorded)
     return decisions
 
 
@@ -456,13 +479,8 @@ async def _record_tick(
     now: datetime.datetime,
     candidates: int,
     decisions: list[Decision],
+    recorded: list[Decision],
 ) -> None:
-    recorded = [
-        d
-        for d in decisions
-        if d.action in _RECORDED_ACTIONS
-        and (d.action != Action.LEASE_EXPIRED or await _first_sighting(arq_redis, d))
-    ]
     tick = {
         "at": now.isoformat(),
         "candidates": candidates,
@@ -479,6 +497,20 @@ async def _record_tick(
             await pipe.execute()
     except Exception:
         logger.exception("reaper_state_record_failed")
+
+
+_QUIET_ACTIONS = frozenset({Action.HOLDER_ALIVE})
+
+
+async def _to_record(
+    arq_redis: arq.ArqRedis, decisions: list[Decision]
+) -> list[Decision]:
+    return [
+        d
+        for d in decisions
+        if d.action in _RECORDED_ACTIONS
+        and (d.action != Action.LEASE_EXPIRED or await _first_sighting(arq_redis, d))
+    ]
 
 
 async def _first_sighting(arq_redis: arq.ArqRedis, decision: Decision) -> bool:
