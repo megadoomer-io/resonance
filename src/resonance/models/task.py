@@ -121,6 +121,11 @@ class Task(base_module.Base):
     attempt: orm.Mapped[int] = orm.mapped_column(
         sa.Integer, nullable=False, default=0, server_default="0"
     )
+    # Set by the claim and renewed while the job runs (DB clock); NULL when no
+    # delivery holds the row. The reaper recovers RUNNING rows past it.
+    lease_expires_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),
