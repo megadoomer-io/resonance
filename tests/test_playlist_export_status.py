@@ -266,6 +266,11 @@ class TestExportProgressRecorder:
         await recorder.flush()
         session.commit.assert_not_awaited()
 
+    async def test_advance_reports_whether_it_committed(self) -> None:
+        _task, _session, recorder = self._recorder(batch=2)
+        assert await recorder.advance(current=1) is False
+        assert await recorder.advance(current=2) is True
+
     async def test_forced_commit_on_advance(self) -> None:
         _task, session, recorder = self._recorder(batch=100)
         await recorder.advance(current=1, commit=True)
