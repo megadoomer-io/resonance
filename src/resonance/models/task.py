@@ -10,7 +10,9 @@ import datetime
 import uuid
 
 import sqlalchemy as sa
+import sqlalchemy.ext.compiler as sa_compiler
 import sqlalchemy.orm as orm
+import sqlalchemy.sql.expression as sa_expression
 
 import resonance.models.base as base_module
 import resonance.models.user as user_models
@@ -133,6 +135,31 @@ class Task(base_module.Base):
     )
 
 
+class db_clock_offset(sa_expression.FunctionElement[datetime.datetime]):  # noqa: N801
+    """The database's clock plus *offset*, so leases never trust a worker clock."""
+
+    type = sa.DateTime(timezone=True)
+    inherit_cache = True
+
+    def __init__(self, offset: datetime.timedelta) -> None:
+        self.offset = offset
+        super().__init__()
+
+
+@sa_compiler.compiles(db_clock_offset)
+def _db_clock_offset_pg(element: db_clock_offset, compiler: object, **_: object) -> str:
+    seconds = element.offset.total_seconds()
+    return f"(now() + interval '{seconds} seconds')"
+
+
+@sa_compiler.compiles(db_clock_offset, "sqlite")
+def _db_clock_offset_sqlite(
+    element: db_clock_offset, compiler: object, **_: object
+) -> str:
+    seconds = element.offset.total_seconds()
+    return f"datetime('now', '{seconds:+} seconds')"
+
+
 @sa.event.listens_for(Task, "init")
 def _set_python_defaults(
     target: Task,
@@ -202,6 +229,24 @@ def _fence_claimed_writes(
     for obj in changed:
         if current.get(obj.id) != claims[obj.id]:
             raise TaskFenced(obj.id, claims[obj.id], current.get(obj.id))
+
+
+@sa.event.listens_for(orm.Session, "before_flush")
+def _clear_lease_off_running(
+    session: orm.Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """A row that leaves RUNNING has no holder, so it keeps no lease."""
+    for obj in session.dirty:
+        if (
+            isinstance(obj, Task)
+            and obj.status != types_module.SyncStatus.RUNNING
+            and sa.inspect(obj).attrs.status.history.has_changes()
+        ):
+            obj.lease_expires_at = None
+            # The loaded value may already be a stale None; write it anyway.
+            orm.attributes.flag_modified(obj, "lease_expires_at")
 
 
 @sa.event.listens_for(orm.Session, "before_flush")

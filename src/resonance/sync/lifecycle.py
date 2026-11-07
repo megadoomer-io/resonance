@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import datetime
 import enum
 import functools
+import typing
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
     import collections.abc
 
     import arq
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger()
 
@@ -268,6 +270,7 @@ async def claim(
                     attempt=task_models.Task.attempt + 1,
                     started_at=now,
                     arq_job_id=sa.func.coalesce(job_id, task_models.Task.arq_job_id),
+                    lease_expires_at=task_models.db_clock_offset(LEASE_TTL),
                 )
                 .returning(task_models.Task.attempt, task_models.Task.arq_job_id)
                 .execution_options(synchronize_session=False)
@@ -342,6 +345,7 @@ async def release_for_redelivery(
             .values(
                 status=types_module.SyncStatus.PENDING,
                 attempt=task_models.Task.attempt + 1,
+                lease_expires_at=None,
             )
             .returning(task_models.Task.attempt)
             .execution_options(synchronize_session=False)
@@ -351,23 +355,154 @@ async def release_for_redelivery(
         return False
     orm.attributes.set_committed_value(task, "status", types_module.SyncStatus.PENDING)
     orm.attributes.set_committed_value(task, "attempt", row)
+    orm.attributes.set_committed_value(task, "lease_expires_at", None)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Leases: a claimed delivery proves it is alive by renewing its row
+# ---------------------------------------------------------------------------
+
+# Four renewals per TTL, so one or two slow or failed renewals (a DB blip, a
+# GC pause) don't expire a live run; the reaper adds its own grace on top.
+LEASE_TTL = datetime.timedelta(seconds=120)
+LEASE_RENEW_INTERVAL = datetime.timedelta(seconds=30)
+
+
+async def renew_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    task_id: uuid.UUID,
+    attempt: int,
+) -> bool:
+    """Extend this delivery's lease, in a session of its own.
+
+    Only the claimer's attempt on a RUNNING row matches, so a fenced run can't
+    renew. Never the handler's session: committing there would commit the
+    handler's half-done state.
+
+    Returns:
+        False once the lease is gone: fenced (logged ``task_lease_lost``), or
+        the row left RUNNING under this attempt.
+    """
+    async with session_factory() as session:
+        renewed = (
+            await session.execute(
+                sa.update(task_models.Task)
+                .where(
+                    task_models.Task.id == task_id,
+                    task_models.Task.attempt == attempt,
+                    task_models.Task.status == types_module.SyncStatus.RUNNING,
+                )
+                .values(lease_expires_at=task_models.db_clock_offset(LEASE_TTL))
+                .returning(task_models.Task.id)
+                .execution_options(synchronize_session=False)
+            )
+        ).scalar_one_or_none()
+        await session.commit()
+        if renewed is not None:
+            return True
+        current = (
+            await session.execute(
+                sa.select(task_models.Task.attempt).where(
+                    task_models.Task.id == task_id
+                )
+            )
+        ).scalar_one_or_none()
+    if current != attempt:
+        logger.warning(
+            "task_lease_lost",
+            task_id=str(task_id),
+            attempt=attempt,
+            current_attempt=current,
+        )
+    return False
+
+
+async def release_leases(
+    session_factory: async_sessionmaker[AsyncSession],
+    claims: dict[uuid.UUID, int],
+) -> None:
+    """Drop the leases a finished job still holds; a fenced attempt matches none.
+
+    A row can stay RUNNING after its job returns (a parent waiting on its
+    children). Nobody holds it then, so its lease must not expire into a
+    reaper recovery.
+    """
+    if not claims:
+        return
+    async with session_factory() as session:
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(
+                sa.tuple_(task_models.Task.id, task_models.Task.attempt).in_(
+                    list(claims.items())
+                )
+            )
+            .values(lease_expires_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+
+
+async def _renew_leases_forever(
+    session_factory: async_sessionmaker[AsyncSession],
+    claims: dict[uuid.UUID, int],
+) -> None:
+    lost: set[tuple[uuid.UUID, int]] = set()
+    while True:
+        await asyncio.sleep(LEASE_RENEW_INTERVAL.total_seconds())
+        for task_id, attempt in list(claims.items()):
+            if (task_id, attempt) in lost:
+                continue
+            try:
+                if not await renew_lease(session_factory, task_id, attempt):
+                    lost.add((task_id, attempt))
+            except Exception:
+                logger.warning(
+                    "task_lease_renew_failed", task_id=str(task_id), attempt=attempt
+                )
+
+
+def _session_factory_of(
+    args: tuple[object, ...],
+) -> async_sessionmaker[AsyncSession] | None:
+    ctx = args[0] if args else None
+    if isinstance(ctx, dict):
+        factory = ctx.get("session_factory")
+        if factory is not None:
+            return typing.cast("async_sessionmaker[AsyncSession]", factory)
+    return None
 
 
 def task_job[**P](
     fn: collections.abc.Callable[P, collections.abc.Awaitable[None]],
 ) -> collections.abc.Callable[P, collections.abc.Coroutine[Any, Any, None]]:
-    """Wrap an arq task job: scope its claims, and stop it once fenced.
+    """Wrap an arq task job: scope its claims, keep their leases, stop once fenced.
 
     A fenced write means a newer delivery owns the row; this one exits without
-    touching it again (the session rolls back as the exception unwinds).
+    touching it again (the session rolls back as the exception unwinds). While
+    the job runs, its claims' leases are renewed from the worker context's
+    session factory; when it ends, they are released.
     """
 
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        token = task_models.claimed_attempts.set({})
+        claims: dict[uuid.UUID, int] = {}
+        token = task_models.claimed_attempts.set(claims)
+        session_factory = _session_factory_of(args)
+        renewer = (
+            asyncio.create_task(_renew_leases_forever(session_factory, claims))
+            if session_factory is not None
+            else None
+        )
+        cancelled = False
         try:
             await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            # arq retries or aborts a cancelled job. Leave its leases to expire
+            # so the reaper still covers a retry that never comes.
+            cancelled = True
+            raise
         except task_models.TaskFenced as fenced:
             logger.warning(
                 "task_write_fenced",
@@ -378,6 +513,15 @@ def task_job[**P](
             )
         finally:
             task_models.claimed_attempts.reset(token)
+            if renewer is not None and session_factory is not None:
+                renewer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await renewer
+            if session_factory is not None and not cancelled:
+                try:
+                    await release_leases(session_factory, claims)
+                except Exception:
+                    logger.warning("task_lease_release_failed", claims=len(claims))
 
     return wrapper
 
