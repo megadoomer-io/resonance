@@ -53,6 +53,18 @@ class Delivery:
     defer_by: datetime.timedelta | None = None
 
 
+def _check_job_args(
+    task: task_models.Task, job_name: str, args: tuple[object, ...]
+) -> None:
+    """Fail at enqueue, not in the worker, when the job can't find its task."""
+    if task.id is None or any(arg is None or arg == "None" for arg in args):
+        msg = f"{job_name}: None job arg for task {task.id}: {args!r}"
+        raise ValueError(msg)
+    if str(task.id) not in args:
+        msg = f"{job_name}: job args {args!r} don't include task id {task.id}"
+        raise ValueError(msg)
+
+
 def stamp_delivery(
     task: task_models.Task,
     job_name: str,
@@ -66,9 +78,7 @@ def stamp_delivery(
     crash between commit and enqueue leaves a row whose job arq doesn't know,
     which the reaper re-delivers.
     """
-    if task.id is None:
-        # The column default only fires at flush; the job id needs it now.
-        task.id = uuid.uuid4()
+    _check_job_args(task, job_name, args)
     delivery = Delivery(
         task_id=task.id,
         job_name=job_name,

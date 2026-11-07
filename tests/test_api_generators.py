@@ -403,8 +403,9 @@ class TestEnrichEndpoint:
         assert task.params["n"] == 7
         assert result["task_id"] == str(task.id)
         req.app.state.arq_redis.enqueue_job.assert_awaited_once()
-        assert req.app.state.arq_redis.enqueue_job.await_args.args[0] == (
-            "enrich_related_artists"
+        assert req.app.state.arq_redis.enqueue_job.await_args.args == (
+            "enrich_related_artists",
+            str(task.id),
         )
 
     async def test_success_per_seed_stores_str_ids(self) -> None:

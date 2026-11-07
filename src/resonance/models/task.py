@@ -16,8 +16,10 @@ import resonance.models.base as base_module
 import resonance.models.user as user_models
 import resonance.types as types_module
 
-# Python-side defaults for mutable/computed fields applied via init event.
+# Python-side defaults applied via init event. ``id`` is assigned at
+# construction so callers can pass ``str(task.id)`` as a job arg before flush.
 _PYTHON_DEFAULTS: dict[str, object] = {
+    "id": uuid.uuid4,
     "params": dict,
     "result": dict,
     "progress_current": 0,
