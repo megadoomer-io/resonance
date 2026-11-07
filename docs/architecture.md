@@ -519,6 +519,17 @@ that finished or was re-delivered meanwhile is skipped. Every decision is
 logged; the last tick and recent decisions are kept in Redis
 (`resonance:reaper:*`) for `GET /api/v1/admin/tasks/health`.
 
+The reaper also handles RUNNING rows whose **row lease** expired. Each claim sets
+`lease_expires_at` (DB clock, 120s TTL) and the job renews it every 30s from a
+separate session, conditional on its own `attempt`. A row whose lease is more
+than 30s past expiry, with no children and a live parent, is a stalled or dead
+holder. With `TASK_LEASE_RECOVERY=log` (the default) the reaper records a
+`lease_expired` decision only. With `active` it resets the row with
+`release_for_redelivery` (which fences the old holder), applies the
+watermark resume, and redelivers with a fresh job id. A RUNNING row with a
+NULL lease (claimed by code without leases, or a parent whose job ended while
+children run) is left to startup recovery.
+
 **Worker startup** (`_reenqueue_orphaned_tasks`):
 
 1. Fails PENDING children of terminal parents.
@@ -536,9 +547,11 @@ to its arq job name and arguments.
 The API server does not touch task status on startup; the worker is the only
 recovery owner.
 
-Accepted gap: if two deliveries of one task are both RUNNING (a stalled but
-alive worker), the task runs twice. The entry guard covers only rows that are
-already terminal.
+Two deliveries of one task can't both write it: each delivery claims the row
+by bumping `attempt`, and writes from an older attempt are refused (see
+CLAUDE.md task conventions). Remaining gap: external side effects (e.g. a
+Spotify export) from a stalled run that wakes after its row was recovered can
+still repeat.
 
 ### Task Lifecycle Helpers
 
