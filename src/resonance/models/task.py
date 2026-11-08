@@ -8,9 +8,12 @@ from __future__ import annotations
 import contextvars
 import datetime
 import uuid
+from typing import Any
 
 import sqlalchemy as sa
+import sqlalchemy.ext.compiler as sa_compiler
 import sqlalchemy.orm as orm
+import sqlalchemy.sql.expression as sa_expression
 
 import resonance.models.base as base_module
 import resonance.models.user as user_models
@@ -121,11 +124,44 @@ class Task(base_module.Base):
     attempt: orm.Mapped[int] = orm.mapped_column(
         sa.Integer, nullable=False, default=0, server_default="0"
     )
+    # Set by the claim and renewed while the job runs (DB clock); NULL when no
+    # delivery holds the row. The reaper recovers RUNNING rows past it.
+    lease_expires_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        sa.DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: orm.Mapped[datetime.datetime] = orm.mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),
         nullable=False,
     )
+
+
+class db_clock_offset(sa_expression.FunctionElement[datetime.datetime]):  # noqa: N801
+    """The database's wall clock at statement time plus *offset*.
+
+    Postgres ``now()`` is the transaction's start, so a renewal that waited on a
+    row lock would write a lease that had already expired; ``clock_timestamp()``
+    doesn't have that problem. The offset is a bound parameter, so statements
+    differing only in offset share a cache entry without sharing the value.
+    """
+
+    type = sa.DateTime(timezone=True)
+    inherit_cache = True
+
+    def __init__(self, offset: datetime.timedelta) -> None:
+        super().__init__(sa.literal(offset.total_seconds(), sa.Float))
+
+
+@sa_compiler.compiles(db_clock_offset)
+def _db_clock_offset_pg(element: db_clock_offset, compiler: Any, **kw: Any) -> str:
+    seconds = compiler.process(element.clauses, **kw)
+    return f"(clock_timestamp() + make_interval(secs => {seconds}))"
+
+
+@sa_compiler.compiles(db_clock_offset, "sqlite")
+def _db_clock_offset_sqlite(element: db_clock_offset, compiler: Any, **kw: Any) -> str:
+    seconds = compiler.process(element.clauses, **kw)
+    return f"datetime('now', printf('%+f seconds', {seconds}))"
 
 
 @sa.event.listens_for(Task, "init")
@@ -197,6 +233,24 @@ def _fence_claimed_writes(
     for obj in changed:
         if current.get(obj.id) != claims[obj.id]:
             raise TaskFenced(obj.id, claims[obj.id], current.get(obj.id))
+
+
+@sa.event.listens_for(orm.Session, "before_flush")
+def _clear_lease_off_running(
+    session: orm.Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """A row that leaves RUNNING has no holder, so it keeps no lease."""
+    for obj in session.dirty:
+        if (
+            isinstance(obj, Task)
+            and obj.status != types_module.SyncStatus.RUNNING
+            and sa.inspect(obj).attrs.status.history.has_changes()
+        ):
+            obj.lease_expires_at = None
+            # The loaded value may already be a stale None; write it anyway.
+            orm.attributes.flag_modified(obj, "lease_expires_at")
 
 
 @sa.event.listens_for(orm.Session, "before_flush")

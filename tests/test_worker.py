@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import arq.jobs as arq_jobs
 import pytest
 
+import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
@@ -93,7 +94,29 @@ class TestWorkerSettings:
 
         await worker_module.reap_tasks(ctx)
 
-        reap.assert_awaited_once_with(ctx["session_factory"], ctx["redis"])
+        reap.assert_awaited_once_with(
+            ctx["session_factory"],
+            ctx["redis"],
+            lease_recovery=worker_module.reaper_module.LeaseRecovery.LOG,
+        )
+
+    @pytest.mark.parametrize("mode", ["log", "active"])
+    async def test_reap_tasks_passes_lease_recovery_setting(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        reap = AsyncMock()
+        monkeypatch.setattr(worker_module.reaper_module, "reap", reap)
+        settings = config_module.Settings(task_lease_recovery=mode)  # type: ignore[arg-type]
+        ctx: dict[str, Any] = {
+            "session_factory": MagicMock(),
+            "redis": MagicMock(),
+            "settings": settings,
+        }
+
+        await worker_module.reap_tasks(ctx)
+
+        assert reap.await_args is not None
+        assert reap.await_args.kwargs["lease_recovery"] == mode
 
     def test_abort_jobs_allowed(self) -> None:
         assert worker_module.WorkerSettings.allow_abort_jobs is True
@@ -1250,83 +1273,6 @@ class TestSyncRangeDeferral:
 
 
 # ---------------------------------------------------------------------------
-# ShutdownRequest tests
-# ---------------------------------------------------------------------------
-
-
-class TestSyncRangeShutdown:
-    """Tests for ShutdownRequest handling in sync_range."""
-
-    @pytest.mark.asyncio
-    async def test_shutdown_request_checkpoints_task_as_pending(self) -> None:
-        """ShutdownRequest reverts task to PENDING with resume params."""
-        task_id = uuid.uuid4()
-        conn_id = uuid.uuid4()
-        user_id = uuid.uuid4()
-        parent_id = uuid.uuid4()
-
-        task = task_module.Task(
-            id=task_id,
-            user_id=user_id,
-            service_connection_id=conn_id,
-            parent_id=parent_id,
-            task_type=types_module.TaskType.TIME_RANGE,
-            status=types_module.SyncStatus.PENDING,
-            params={"data_type": "saved_tracks"},
-        )
-
-        connection = MagicMock(spec=user_models.ServiceConnection)
-        connection.service_type = types_module.ServiceType.SPOTIFY
-        connection.id = conn_id
-
-        session = AsyncMock()
-
-        # 1. _load_task returns the task
-        task_result = MagicMock()
-        task_result.scalar_one_or_none.return_value = task
-
-        # 2. Load connection
-        conn_result = MagicMock()
-        conn_result.scalar_one.return_value = connection
-
-        session.execute.side_effect = [
-            task_result,
-            _not_cancelled_result(parent_id),  # is_cancelled parent lookup
-            conn_result,
-        ]
-
-        # Strategy that raises ShutdownRequest
-        mock_strategy = AsyncMock(spec=sync_base.SyncStrategy)
-        mock_strategy.concurrency = "sequential"
-        mock_strategy.execute.side_effect = sync_base.ShutdownRequest(
-            resume_params={"data_type": "saved_tracks", "offset": 50},
-        )
-
-        mock_connector = MagicMock()
-        mock_connector_registry = MagicMock()
-        mock_connector_registry.get.return_value = mock_connector
-
-        arq_redis = AsyncMock()
-
-        ctx: dict[str, Any] = {
-            "session_factory": _mock_session_factory(session),
-            "connector_registry": mock_connector_registry,
-            "strategies": {types_module.ServiceType.SPOTIFY: mock_strategy},
-            "redis": arq_redis,
-        }
-
-        await worker_module.sync_range(ctx, str(task_id))
-
-        assert task.status == types_module.SyncStatus.PENDING
-        assert task.params["offset"] == 50
-        assert task.params["data_type"] == "saved_tracks"
-        assert task.started_at is None
-        session.commit.assert_called()
-        # Should NOT enqueue anything — task stays PENDING for next worker startup
-        arq_redis.enqueue_job.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
 # Watermark write-back tests
 # ---------------------------------------------------------------------------
 
@@ -1965,34 +1911,12 @@ class TestWorkerShutdown:
     """Tests for worker shutdown hook."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_sets_event(self) -> None:
-        """Shutdown sets the shutdown_requested event."""
-        sync_base.shutdown_requested.clear()
-        try:
-            mock_engine = AsyncMock()
-            ctx: dict[str, Any] = {
-                "engine": mock_engine,
-                "redis": AsyncMock(),
-            }
-            await worker_module.shutdown(ctx)
-            assert sync_base.shutdown_requested.is_set()
-        finally:
-            sync_base.shutdown_requested.clear()
-
-    @pytest.mark.asyncio
     async def test_shutdown_disposes_engine(self) -> None:
         """Shutdown disposes the database engine."""
-        sync_base.shutdown_requested.clear()
-        try:
-            mock_engine = AsyncMock()
-            ctx: dict[str, Any] = {
-                "engine": mock_engine,
-                "redis": AsyncMock(),
-            }
-            await worker_module.shutdown(ctx)
-            mock_engine.dispose.assert_awaited_once()
-        finally:
-            sync_base.shutdown_requested.clear()
+        mock_engine = AsyncMock()
+        ctx: dict[str, Any] = {"engine": mock_engine, "redis": AsyncMock()}
+        await worker_module.shutdown(ctx)
+        mock_engine.dispose.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

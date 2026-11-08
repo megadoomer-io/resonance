@@ -305,6 +305,14 @@ def _print_tasks_health(data: dict[str, Any]) -> None:
                 f"({_humanize_seconds(reaper.get('age_seconds'))} ago){stale}",
             )
         )
+        rows.append(
+            (
+                "Reaper last tick work",
+                f"redelivered {reaper.get('last_redelivered') or 0}, "
+                f"lease expired {reaper.get('last_lease_expired') or 0}, "
+                f"lease recovered {reaper.get('last_lease_recovered') or 0}",
+            )
+        )
 
     oldest = data.get("oldest_pending")
     if oldest is None:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import dataclasses
 import datetime
 import enum
 import functools
+import typing
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
     import collections.abc
 
     import arq
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = structlog.get_logger()
 
@@ -268,6 +271,7 @@ async def claim(
                     attempt=task_models.Task.attempt + 1,
                     started_at=now,
                     arq_job_id=sa.func.coalesce(job_id, task_models.Task.arq_job_id),
+                    lease_expires_at=task_models.db_clock_offset(LEASE_TTL),
                 )
                 .returning(task_models.Task.attempt, task_models.Task.arq_job_id)
                 .execution_options(synchronize_session=False)
@@ -342,6 +346,7 @@ async def release_for_redelivery(
             .values(
                 status=types_module.SyncStatus.PENDING,
                 attempt=task_models.Task.attempt + 1,
+                lease_expires_at=None,
             )
             .returning(task_models.Task.attempt)
             .execution_options(synchronize_session=False)
@@ -351,23 +356,278 @@ async def release_for_redelivery(
         return False
     orm.attributes.set_committed_value(task, "status", types_module.SyncStatus.PENDING)
     orm.attributes.set_committed_value(task, "attempt", row)
+    orm.attributes.set_committed_value(task, "lease_expires_at", None)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Leases: a claimed delivery proves it is alive by renewing its row
+# ---------------------------------------------------------------------------
+
+# Four renewals per TTL, so one or two slow or failed renewals (a DB blip, a
+# GC pause) don't expire a live run; the reaper adds its own grace on top.
+LEASE_TTL = datetime.timedelta(seconds=120)
+LEASE_RENEW_INTERVAL = datetime.timedelta(seconds=30)
+# The row lock a renewal waits on is almost always its own handler's open
+# transaction, so a wait is no sign of death. Bounded well under the renew
+# interval so a cycle never stacks behind the previous one; the next cycle
+# retries, and three more attempts fit in the TTL.
+LEASE_RENEW_LOCK_TIMEOUT = datetime.timedelta(seconds=2)
+
+
+ALIVE_KEY_PREFIX = "resonance:task-alive:"
+
+
+def alive_key(task_id: uuid.UUID | str, attempt: int) -> str:
+    """Redis key a live holder of (task, attempt) keeps fresh.
+
+    Separate from the DB lease because the holder's own open transaction can
+    hold the row lock and block DB renewal; this key proves the process is
+    alive regardless.
+    """
+    return f"{ALIVE_KEY_PREFIX}{task_id}:{attempt}"
+
+
+async def _mark_alive(redis: Any, claims: dict[uuid.UUID, int]) -> None:
+    ttl_ms = int(LEASE_TTL.total_seconds() * 1000)
+    for task_id, attempt in list(claims.items()):
+        try:
+            await redis.psetex(alive_key(task_id, attempt), ttl_ms, b"1")
+        except Exception:
+            logger.warning(
+                "task_alive_refresh_failed", task_id=str(task_id), attempt=attempt
+            )
+
+
+class LeaseRenewBlocked(Exception):  # noqa: N818 — a retryable outcome, not a bug
+    """A renewal gave up waiting on the row lock; retry next cycle."""
+
+
+async def renew_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    task_id: uuid.UUID,
+    attempt: int,
+) -> bool:
+    """Extend this delivery's lease, in a session of its own.
+
+    Only the claimer's attempt on a RUNNING row matches, so a fenced run can't
+    renew. Never the handler's session: committing there would commit the
+    handler's half-done state.
+
+    Returns:
+        False once the lease is gone: fenced (logged ``task_lease_lost``), or
+        the row left RUNNING under this attempt.
+
+    Raises:
+        LeaseRenewBlocked: the row lock wasn't free within
+            ``LEASE_RENEW_LOCK_TIMEOUT``.
+    """
+    async with session_factory() as session:
+        if session.bind.dialect.name == "postgresql":
+            timeout_ms = int(LEASE_RENEW_LOCK_TIMEOUT.total_seconds() * 1000)
+            await session.execute(sa.text(f"SET LOCAL lock_timeout = {timeout_ms}"))
+        try:
+            renewed = await _renew_row(session, task_id, attempt)
+        except sa.exc.DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                raise
+            await session.rollback()
+            raise LeaseRenewBlocked from exc
+        await session.commit()
+        if renewed is not None:
+            return True
+        current = (
+            await session.execute(
+                sa.select(task_models.Task.attempt).where(
+                    task_models.Task.id == task_id
+                )
+            )
+        ).scalar_one_or_none()
+    if current != attempt:
+        logger.warning(
+            "task_lease_lost",
+            task_id=str(task_id),
+            attempt=attempt,
+            current_attempt=current,
+        )
+    return False
+
+
+_LOCK_NOT_AVAILABLE = "55P03"
+
+
+async def _renew_row(
+    session: AsyncSession, task_id: uuid.UUID, attempt: int
+) -> uuid.UUID | None:
+    # Lock first: an UPDATE computes its new values before it waits on a row
+    # lock (and keeps them unless the row changed), so a renewal that queued
+    # behind its handler would write a lease measured from before the wait.
+    await session.execute(
+        sa.select(task_models.Task.id)
+        .where(task_models.Task.id == task_id)
+        .with_for_update(key_share=True)
+    )
+    return (
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(
+                task_models.Task.id == task_id,
+                task_models.Task.attempt == attempt,
+                task_models.Task.status == types_module.SyncStatus.RUNNING,
+            )
+            .values(lease_expires_at=task_models.db_clock_offset(LEASE_TTL))
+            .returning(task_models.Task.id)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one_or_none()
+
+
+async def release_leases(
+    session_factory: async_sessionmaker[AsyncSession],
+    claims: dict[uuid.UUID, int],
+    redis: Any = None,
+) -> None:
+    """Drop the leases a finished job still holds; a fenced attempt matches none.
+
+    A row can stay RUNNING after its job returns (a parent waiting on its
+    children). Nobody holds it then, so its lease must not expire into a
+    reaper recovery.
+    """
+    if not claims:
+        return
+    async with session_factory() as session:
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(
+                sa.tuple_(task_models.Task.id, task_models.Task.attempt).in_(
+                    list(claims.items())
+                )
+            )
+            .values(lease_expires_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    if redis is not None:
+        await redis.delete(*(alive_key(t, a) for t, a in claims.items()))
+
+
+# Set when the job's own session commits, so the DB lease catches up right
+# after a long locked section instead of up to an interval later.
+_job_committed: contextvars.ContextVar[asyncio.Event | None] = contextvars.ContextVar(
+    "job_committed", default=None
+)
+
+
+@sa.event.listens_for(orm.Session, "after_commit")
+def _wake_renewer(_session: orm.Session) -> None:
+    event = _job_committed.get()
+    if event is not None:
+        event.set()
+
+
+async def _until_next_renewal(committed: asyncio.Event | None) -> None:
+    interval = LEASE_RENEW_INTERVAL.total_seconds()
+    if committed is None:
+        await asyncio.sleep(interval)
+        return
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(committed.wait(), timeout=interval)
+    committed.clear()
+
+
+async def _renew_leases_forever(
+    session_factory: async_sessionmaker[AsyncSession],
+    claims: dict[uuid.UUID, int],
+    redis: Any = None,
+    committed: asyncio.Event | None = None,
+) -> None:
+    # This task copied the job's context; its own renewal commits mustn't wake it.
+    _job_committed.set(None)
+    lost: set[tuple[uuid.UUID, int]] = set()
+    while True:
+        await _until_next_renewal(committed)
+        # First and independent of the DB: it must stay fresh while the DB
+        # renewal is blocked on this job's own row lock.
+        if redis is not None:
+            await _mark_alive(
+                redis, {t: a for t, a in claims.items() if (t, a) not in lost}
+            )
+        for task_id, attempt in list(claims.items()):
+            if (task_id, attempt) in lost:
+                continue
+            try:
+                if not await renew_lease(session_factory, task_id, attempt):
+                    lost.add((task_id, attempt))
+            except LeaseRenewBlocked:
+                logger.info(
+                    "task_lease_renew_blocked", task_id=str(task_id), attempt=attempt
+                )
+            except Exception:
+                logger.warning(
+                    "task_lease_renew_failed", task_id=str(task_id), attempt=attempt
+                )
+
+
+async def _reap_renewer(renewer: asyncio.Task[None]) -> None:
+    """Wait out the renewer's own cancellation, but not one aimed at this job."""
+    try:
+        await renewer
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
+
+
+def _session_factory_of(
+    args: tuple[object, ...],
+) -> async_sessionmaker[AsyncSession] | None:
+    ctx = args[0] if args else None
+    if isinstance(ctx, dict):
+        factory = ctx.get("session_factory")
+        if factory is not None:
+            return typing.cast("async_sessionmaker[AsyncSession]", factory)
+    return None
+
+
+def _redis_of(args: tuple[object, ...]) -> Any:
+    ctx = args[0] if args else None
+    return ctx.get("redis") if isinstance(ctx, dict) else None
 
 
 def task_job[**P](
     fn: collections.abc.Callable[P, collections.abc.Awaitable[None]],
 ) -> collections.abc.Callable[P, collections.abc.Coroutine[Any, Any, None]]:
-    """Wrap an arq task job: scope its claims, and stop it once fenced.
+    """Wrap an arq task job: scope its claims, keep their leases, stop once fenced.
 
     A fenced write means a newer delivery owns the row; this one exits without
-    touching it again (the session rolls back as the exception unwinds).
+    touching it again (the session rolls back as the exception unwinds). While
+    the job runs, its claims' leases are renewed from the worker context's
+    session factory; when it ends, they are released.
     """
 
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        token = task_models.claimed_attempts.set({})
+        claims: dict[uuid.UUID, int] = {}
+        token = task_models.claimed_attempts.set(claims)
+        session_factory = _session_factory_of(args)
+        redis = _redis_of(args)
+        committed = asyncio.Event()
+        committed_token = _job_committed.set(committed)
+        renewer = (
+            asyncio.create_task(
+                _renew_leases_forever(session_factory, claims, redis, committed)
+            )
+            if session_factory is not None
+            else None
+        )
+        cancelled = False
         try:
             await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            # arq retries or aborts a cancelled job. Leave its leases to expire
+            # so the reaper still covers a retry that never comes.
+            cancelled = True
+            raise
         except task_models.TaskFenced as fenced:
             logger.warning(
                 "task_write_fenced",
@@ -378,6 +638,15 @@ def task_job[**P](
             )
         finally:
             task_models.claimed_attempts.reset(token)
+            _job_committed.reset(committed_token)
+            if renewer is not None and session_factory is not None:
+                renewer.cancel()
+                await _reap_renewer(renewer)
+            if session_factory is not None and not cancelled:
+                try:
+                    await release_leases(session_factory, claims, redis)
+                except Exception:
+                    logger.warning("task_lease_release_failed", claims=len(claims))
 
     return wrapper
 

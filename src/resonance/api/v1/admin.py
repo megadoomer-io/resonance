@@ -283,6 +283,8 @@ async def get_tasks_health(
             "stale_after_seconds": int(stale_after.total_seconds()),
             "last_candidates": (state.last_tick or {}).get("candidates"),
             "last_redelivered": (state.last_tick or {}).get("redelivered"),
+            "last_lease_expired": (state.last_tick or {}).get("lease_expired"),
+            "last_lease_recovered": (state.last_tick or {}).get("lease_recovered"),
         },
         "oldest_pending": (
             {

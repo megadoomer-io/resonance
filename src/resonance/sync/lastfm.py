@@ -331,16 +331,6 @@ async def _sync_recent_tracks(
     pages_fetched = 0
 
     while True:
-        # Check for graceful shutdown between pages
-        if sync_base.shutdown_requested.is_set():
-            raise sync_base.ShutdownRequest(
-                resume_params={
-                    "page": page,
-                    "items_so_far": items_created,
-                    "last_scrobbled_at": last_scrobbled_at,
-                }
-            )
-
         if pages_fetched >= MAX_PAGES:
             logger.warning(
                 "lastfm_page_limit_reached",
@@ -474,14 +464,6 @@ async def _sync_loved_tracks(
     pages_fetched = 0
 
     while True:
-        if sync_base.shutdown_requested.is_set():
-            raise sync_base.ShutdownRequest(
-                resume_params={
-                    "page": page,
-                    "items_so_far": items_created,
-                }
-            )
-
         if pages_fetched >= MAX_PAGES:
             logger.warning(
                 "lastfm_loved_page_limit_reached",

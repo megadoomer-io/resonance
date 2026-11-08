@@ -1,3 +1,5 @@
+import typing
+
 import pydantic_settings
 
 # Placeholder values shipped as defaults. Safe for local dev, unsafe in
@@ -71,6 +73,10 @@ class Settings(pydantic_settings.BaseSettings):
     # escalation; the flag exists so it can be disabled. Every assumption is
     # audit-logged regardless.
     admin_assume_user_enabled: bool = True
+
+    # Reaper handling of RUNNING tasks whose row lease expired (#183): "log"
+    # records the decision only (rollout soak); "active" recovers the row.
+    task_lease_recovery: typing.Literal["log", "active"] = "log"
 
     # Dex OIDC (GitHub identity via Dex broker)
     dex_client_id: str = ""

@@ -186,7 +186,7 @@ Admin only. Prints one aligned `Label: value` line per item:
 - **Oldest pending**: age, type and id of the oldest PENDING or DEFERRED task, or "No pending tasks".
 - **Counts**: tasks in every status, zeros included.
 - **Running**: each RUNNING task with its age and progress, or "No running tasks".
-- **Reaper decisions**: recent re-deliveries and skips (newest first), or "No reaper decisions yet". Rows whose arq job is still queued are not recorded.
+- **Reaper decisions**: recent re-deliveries and skips (newest first), or "No reaper decisions yet". Rows whose arq job is still queued are not recorded. `lease_expired` means a RUNNING task stopped renewing its lease; with `TASK_LEASE_RECOVERY=log` (the default) nothing was done, and `lease_recovered` means it was reset and redelivered (`active` mode). Each expired task attempt is recorded once. The "Reaper last tick work" line shows the last tick's redelivered, lease-expired and lease-recovered counts. Leave `TASK_LEASE_RECOVERY=log` until no pods from before row leases are running; turning on `active` is a separate step after the log-only soak.
 
 A non-admin token prints "Admin role required". The command always exits 0, so it is safe in scripts that only want the report.
 

@@ -835,6 +835,9 @@ _HEALTH = {
         "age_seconds": 250,
         "stale": True,
         "stale_after_seconds": 120,
+        "last_redelivered": 1,
+        "last_lease_expired": 2,
+        "last_lease_recovered": 0,
     },
     "oldest_pending": {
         "task_id": "abc",
@@ -915,13 +918,14 @@ class TestTasksHealthCommand:
             "url": "http://test-host/api/v1/admin/tasks/health",
         }
         assert capsys.readouterr().out.splitlines() == [
-            "Reaper last tick: 2026-11-05 12:00:00 UTC (4m 10s ago) STALE",
-            "Oldest pending:   2h 1m old, time_range abc (deferred)",
-            "Counts:           pending 1, running 2, completed 9, failed 0,"
+            "Reaper last tick:      2026-11-05 12:00:00 UTC (4m 10s ago) STALE",
+            "Reaper last tick work: redelivered 1, lease expired 2, lease recovered 0",
+            "Oldest pending:        2h 1m old, time_range abc (deferred)",
+            "Counts:                pending 1, running 2, completed 9, failed 0,"
             " deferred 1, cancelled 0",
-            "Running:          playlist_export r1, 1m 5s, progress 4/10",
-            "                  sync_range r2, 5s, progress 7",
-            "Reaper decisions: 2026-11-05 11:59:00 UTC redelivered time_range x",
+            "Running:               playlist_export r1, 1m 5s, progress 4/10",
+            "                       sync_range r2, 5s, progress 7",
+            "Reaper decisions:      2026-11-05 11:59:00 UTC redelivered time_range x",
         ]
 
     def test_fresh_tick_has_no_stale_flag(

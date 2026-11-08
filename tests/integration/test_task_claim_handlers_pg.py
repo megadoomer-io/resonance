@@ -105,20 +105,6 @@ async def test_cancel_fences_a_run_that_then_defers(pg_task_db: TaskDB) -> None:
     ctx["redis"].enqueue_job.assert_not_called()
 
 
-async def test_cancel_fences_a_run_that_then_checkpoints(pg_task_db: TaskDB) -> None:
-    task = await _seed_time_range(pg_task_db)
-    run, resume, _ = await _stalled_run(
-        pg_task_db, task.id, sync_base.ShutdownRequest({"page": 3})
-    )
-    async with pg_task_db.factory() as session:
-        await lifecycle_module.request_cancel(session, task.id, task.user_id)
-    resume.set()
-    await run
-
-    row = await pg_task_db.get(task.id)
-    assert row.status == S.CANCELLED
-
-
 async def test_cancelled_parent_fences_running_child(pg_task_db: TaskDB) -> None:
     task = await _seed_time_range(pg_task_db)
     parent = await pg_task_db.add(
@@ -187,3 +173,65 @@ async def test_reclaimed_run_is_fenced_and_rolled_back(pg_task_db: TaskDB) -> No
         )
         assert connection is not None
         assert connection.sync_watermark == {}
+
+
+async def test_sigterm_mid_sync_retry_resumes_from_watermark(
+    pg_task_db: TaskDB,
+) -> None:
+    """arq cancels a job on SIGTERM and retries the same job id; the retry
+    reclaims the RUNNING row and resumes from the committed watermark."""
+    user = user_models.User(id=uuid.uuid4(), display_name="t")
+    connection = user_models.ServiceConnection(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        service_type=types_module.ServiceType.LISTENBRAINZ,
+        external_user_id="lb",
+    )
+    async with pg_task_db.factory() as session:
+        session.add_all([user, connection])
+        await session.commit()
+    task = await pg_task_db.add(
+        task_type=types_module.TaskType.TIME_RANGE,
+        user_id=user.id,
+        service_connection_id=connection.id,
+        params={"username": "lb", "min_ts": 1700000000},
+    )
+    page_committed = asyncio.Event()
+
+    async def first_run(
+        session: Any, running: Any, _c: Any, conn: Any
+    ) -> dict[str, object]:
+        running.progress_current = 500
+        conn.sync_watermark = {"listens": {"oldest_synced_at": 1700400000}}
+        await session.commit()
+        page_committed.set()
+        await asyncio.Event().wait()
+        return {}
+
+    seen: dict[str, object] = {}
+
+    async def retry(_s: Any, running: Any, *_: Any) -> dict[str, object]:
+        seen.update(running.params)
+        return {"items_created": 0, "items_updated": 0}
+
+    def ctx(execute: Any) -> dict[str, Any]:
+        c = _ctx(pg_task_db, "sync_range:same", execute)
+        c["strategies"] = {
+            types_module.ServiceType.LISTENBRAINZ: c["strategies"][
+                types_module.ServiceType.TEST
+            ]
+        }
+        return c
+
+    run = asyncio.create_task(_sync_range()(ctx(first_run), str(task.id)))
+    await page_committed.wait()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert (await pg_task_db.get(task.id)).status == S.RUNNING
+
+    await _sync_range()(ctx(retry), str(task.id))
+
+    assert (seen["max_ts"], seen["items_so_far"]) == (1700400000, 500)
+    row = await pg_task_db.get(task.id)
+    assert (row.status, row.attempt) == (S.COMPLETED, 2)

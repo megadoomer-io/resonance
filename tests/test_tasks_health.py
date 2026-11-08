@@ -69,7 +69,13 @@ class TestGetTasksHealth:
         await task_db.add(status=types_module.SyncStatus.COMPLETED)
         decision = {"task_id": "t", "action": "redelivered"}
         redis = _FakeRedis(
-            {"at": _ago(seconds=30).isoformat(), "candidates": 2, "redelivered": 1},
+            {
+                "at": _ago(seconds=30).isoformat(),
+                "candidates": 2,
+                "redelivered": 1,
+                "lease_expired": 3,
+                "lease_recovered": 0,
+            },
             [decision],
         )
 
@@ -87,6 +93,8 @@ class TestGetTasksHealth:
             "stale_after_seconds": 120,
             "last_candidates": 2,
             "last_redelivered": 1,
+            "last_lease_expired": 3,
+            "last_lease_recovered": 0,
         }
         assert health["oldest_pending"] == {
             "task_id": str(oldest.id),
