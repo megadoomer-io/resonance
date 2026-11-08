@@ -198,3 +198,131 @@ class TestRequestRateLimitCap:
         response = await connector._request("GET", "https://api.example.com/test")
         assert response.status_code == 200
         assert mock_client.request.call_count == 2
+
+
+class _FakeClock:
+    """Monotonic clock that only moves when the code under test sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _responses(*status_retry_after: tuple[int, str | None]) -> list[httpx.Response]:
+    request = httpx.Request("GET", "https://api.example.com/test")
+    return [
+        httpx.Response(
+            status,
+            headers={"Retry-After": retry} if retry is not None else {},
+            request=request,
+        )
+        for status, retry in status_retry_after
+    ]
+
+
+class TestRequest429Cap:
+    """_request bounds 429 retries by count and by wall time (#200)."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+        fake = _FakeClock()
+        monkeypatch.setattr(base_module.time, "monotonic", fake.monotonic)
+        monkeypatch.setattr(base_module.asyncio, "sleep", fake.sleep)
+        return fake
+
+    def _connector(self, responses: list[httpx.Response]) -> FakeConnector:
+        connector = FakeConnector()
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request.side_effect = responses
+        connector._http_client = mock_client
+        return connector
+
+    def test_defaults(self) -> None:
+        assert base_module.BaseConnector._MAX_RATE_LIMIT_RETRIES == 5
+        assert base_module.BaseConnector._RATE_LIMIT_BUDGET == 600.0
+        assert (
+            base_module.BaseConnector._MAX_RATE_LIMIT_WAIT
+            < base_module.BaseConnector._RATE_LIMIT_BUDGET
+        )
+
+    async def test_raises_after_max_retries(self, clock: _FakeClock) -> None:
+        connector = self._connector(_responses(*[(429, "1")] * 10))
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert connector.http_client.request.call_count == 6  # type: ignore[attr-defined]
+        assert clock.sleeps == [1.0] * 5
+        assert exc_info.value.retry_after == 1.0
+        assert "budget exhausted" in str(exc_info.value)
+
+    async def test_succeeds_within_retry_cap(self, clock: _FakeClock) -> None:
+        connector = self._connector(_responses(*[(429, "1")] * 5, (200, None)))
+
+        response = await connector._request("GET", "https://api.example.com/test")
+
+        assert response.status_code == 200
+        assert clock.sleeps == [1.0] * 5
+
+    async def test_raises_when_wait_would_exceed_wall_budget(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(_responses(*[(429, "100")] * 10))
+        connector._MAX_RATE_LIMIT_RETRIES = 100
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        # Six 100s waits fit in 600s; a seventh would end past the budget.
+        assert clock.sleeps == [100.0] * 6
+        assert exc_info.value.retry_after == 100.0
+
+    async def test_budget_counts_time_outside_429_waits(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(_responses((503, None), (429, "50"), (200, None)))
+        connector._RATE_LIMIT_BUDGET = 50.0
+
+        with pytest.raises(base_module.RateLimitExceededError):
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert clock.sleeps == [2.0]  # the 5xx backoff; the 429 wait never ran
+
+    async def test_retry_after_above_max_wait_raises_immediately(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(_responses((429, "121")))
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert clock.sleeps == []
+        assert exc_info.value.retry_after == 121.0
+        assert exc_info.value.max_wait == 120.0
+
+    async def test_per_connector_override(self, clock: _FakeClock) -> None:
+        connector = self._connector(_responses(*[(429, "1")] * 3))
+        connector._MAX_RATE_LIMIT_RETRIES = 1
+
+        with pytest.raises(base_module.RateLimitExceededError):
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert clock.sleeps == [1.0]
+
+    async def test_429_count_is_per_request(self, clock: _FakeClock) -> None:
+        connector = self._connector(
+            _responses(*[(429, "1")] * 5, (200, None), *[(429, "1")] * 5, (200, None))
+        )
+
+        await connector._request("GET", "https://api.example.com/a")
+        response = await connector._request("GET", "https://api.example.com/b")
+
+        assert response.status_code == 200

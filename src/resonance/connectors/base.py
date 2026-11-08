@@ -4,6 +4,7 @@ import abc
 import asyncio
 import dataclasses
 import enum
+import time
 import typing
 from typing import TYPE_CHECKING, Any
 
@@ -31,14 +32,22 @@ class ConnectionConfig:
 
 
 class RateLimitExceededError(Exception):
-    """Raised when a server's Retry-After exceeds the maximum acceptable wait."""
+    """Raised when a request stops waiting out 429s; callers defer and retry later.
 
-    def __init__(self, retry_after: float, max_wait: float) -> None:
+    ``retry_after`` is the server's last Retry-After, the delay to defer by.
+    """
+
+    def __init__(
+        self, retry_after: float, max_wait: float, reason: str | None = None
+    ) -> None:
         self.retry_after = retry_after
         self.max_wait = max_wait
         super().__init__(
-            f"Rate limit Retry-After ({retry_after:.0f}s) exceeds "
-            f"maximum wait ({max_wait:.0f}s)"
+            reason
+            or (
+                f"Rate limit Retry-After ({retry_after:.0f}s) exceeds "
+                f"maximum wait ({max_wait:.0f}s)"
+            )
         )
 
 
@@ -190,6 +199,10 @@ class BaseConnector(abc.ABC):
     _MAX_TRANSIENT_RETRIES = 5
     _TRANSIENT_BACKOFF_BASE = 2.0  # seconds — doubles each retry
     _MAX_RATE_LIMIT_WAIT = 120.0  # seconds — fail instead of sleeping longer
+    # Per request: give up on 429s after this many retries, or once the next
+    # wait would end past the wall-time budget (counted from the first attempt).
+    _MAX_RATE_LIMIT_RETRIES = 5
+    _RATE_LIMIT_BUDGET = 600.0  # seconds
     _MAX_FORBIDDEN_RETRIES = 3  # Spotify dev mode returns transient 403s
 
     async def _request(
@@ -205,8 +218,9 @@ class BaseConnector(abc.ABC):
         """Make an HTTP request with rate limit pacing and automatic retry.
 
         Handles three retry scenarios:
-        - **429 rate limits**: Respects Retry-After headers, retries
-          indefinitely until the request succeeds.
+        - **429 rate limits**: Respects Retry-After headers, up to
+          _MAX_RATE_LIMIT_RETRIES retries and _RATE_LIMIT_BUDGET seconds of
+          wall time per request, then raises RateLimitExceededError.
         - **Transient errors** (timeouts, disconnects, connection errors):
           Retries with exponential backoff up to _MAX_TRANSIENT_RETRIES.
         - **Transient 403s** (opt-in via ``retry_forbidden``): Spotify dev mode
@@ -226,6 +240,7 @@ class BaseConnector(abc.ABC):
             The HTTP response.
 
         Raises:
+            RateLimitExceededError: When the 429 retry budget is exhausted.
             httpx.HTTPStatusError: On non-429/non-transient HTTP errors.
             httpx.ReadTimeout: After exhausting transient retries.
             httpx.RemoteProtocolError: After exhausting transient retries.
@@ -236,6 +251,8 @@ class BaseConnector(abc.ABC):
         )
         transient_attempt = 0
         forbidden_attempt = 0  # never reset mid-loop; bounds total 403 retries
+        rate_limit_attempt = 0
+        started = time.monotonic()
 
         while True:
             interval = self._budget.paced_interval(high_priority=high_priority)
@@ -364,4 +381,23 @@ class BaseConnector(abc.ABC):
             )
             if retry_after > self._MAX_RATE_LIMIT_WAIT:
                 raise RateLimitExceededError(retry_after, self._MAX_RATE_LIMIT_WAIT)
+            rate_limit_attempt += 1
+            elapsed = time.monotonic() - started
+            if (
+                rate_limit_attempt > self._MAX_RATE_LIMIT_RETRIES
+                or elapsed + retry_after > self._RATE_LIMIT_BUDGET
+            ):
+                logger.warning(
+                    "rate_limit_budget_exhausted",
+                    method=method,
+                    url=url,
+                    retries=rate_limit_attempt - 1,
+                    elapsed_seconds=round(elapsed, 1),
+                )
+                raise RateLimitExceededError(
+                    retry_after,
+                    self._MAX_RATE_LIMIT_WAIT,
+                    f"Rate limit budget exhausted after {rate_limit_attempt - 1} "
+                    f"429 retries in {elapsed:.0f}s",
+                )
             await asyncio.sleep(retry_after)
