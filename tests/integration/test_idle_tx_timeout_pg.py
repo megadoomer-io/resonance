@@ -12,6 +12,7 @@ import sqlalchemy as sa
 
 import resonance.config as config_module
 import resonance.database as database_module
+import resonance.dedup as dedup_module
 import resonance.models as models
 import resonance.models.user as user_models
 import resonance.sync.base as sync_base
@@ -125,3 +126,81 @@ async def test_killed_sync_range_fails_cleanly(
     # The server's FATAL arrives while the client is idle; the next statement
     # sees only a closed connection.
     assert "connection is closed" in (row.error_message or "")
+
+
+async def _unique_violation(session: Any) -> None:
+    """A statement the server rejects, run without a flush (core execute)."""
+    dup = uuid.uuid4()
+    for _ in range(2):
+        await session.execute(
+            sa.insert(user_models.User).values(id=dup, display_name="dup")
+        )
+
+
+async def test_sync_range_server_error_fails_cleanly(pg_task_db: TaskDB) -> None:
+    """A rejected core statement aborts the PG transaction while the session
+    still reports active; the handler must still record FAILED."""
+    user = user_models.User(id=uuid.uuid4(), display_name="t")
+    connection = user_models.ServiceConnection(
+        id=uuid.uuid4(), user_id=user.id, service_type=types_module.ServiceType.TEST
+    )
+    async with pg_task_db.factory() as session:
+        session.add_all([user, connection])
+        await session.commit()
+    task = await pg_task_db.add(
+        task_type=types_module.TaskType.TIME_RANGE,
+        user_id=user.id,
+        service_connection_id=connection.id,
+        params={},
+    )
+
+    async def execute(session: Any, task: Any, *_: Any) -> dict[str, object]:
+        await _unique_violation(session)
+        return {}
+
+    strategy = MagicMock(spec=sync_base.SyncStrategy)
+    strategy.execute = execute
+    registry = MagicMock()
+    registry.get_base_connector.return_value = MagicMock()
+    ctx: dict[str, Any] = {
+        "session_factory": pg_task_db.factory,
+        "redis": AsyncMock(),
+        "job_id": "a",
+        "connector_registry": registry,
+        "strategies": {types_module.ServiceType.TEST: strategy},
+    }
+
+    await lifecycle_module.task_job(worker_module.sync_range)(ctx, str(task.id))
+
+    row = await pg_task_db.get(task.id)
+    assert row.status == S.FAILED
+    assert row.lease_expires_at is None
+    assert "UniqueViolation" in (row.error_message or "")
+
+
+async def test_bulk_job_server_error_fails_cleanly(
+    pg_task_db: TaskDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same, for a handler that fails its in-memory task without reloading."""
+
+    async def boom(session: Any) -> int:
+        await _unique_violation(session)
+        return 0
+
+    monkeypatch.setattr(dedup_module, "delete_cross_service_duplicate_events", boom)
+    task = await pg_task_db.add(
+        task_type=types_module.TaskType.BULK_JOB,
+        params={"operation": "dedup_events"},
+    )
+    ctx: dict[str, Any] = {
+        "session_factory": pg_task_db.factory,
+        "redis": AsyncMock(),
+        "job_id": "a",
+    }
+
+    await lifecycle_module.task_job(worker_module.run_bulk_job)(ctx, str(task.id))
+
+    row = await pg_task_db.get(task.id)
+    assert row.status == S.FAILED
+    assert row.lease_expires_at is None
+    assert "UniqueViolation" in (row.error_message or "")

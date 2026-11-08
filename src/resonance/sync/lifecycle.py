@@ -155,30 +155,28 @@ async def complete_task(
     task.completed_at = datetime.datetime.now(datetime.UTC)
 
 
-async def recover_failed_session(session: AsyncSession) -> bool:
-    """Roll back a session whose transaction can no longer commit.
+async def recover_failed_session(session: AsyncSession) -> None:
+    """Roll back a failed job's transaction so its session can record FAILED.
 
-    Call at the top of a job's failure handler, before it records FAILED. A
-    connection the server ended (``idle_in_transaction_session_timeout``) or a
-    failed flush leaves a transaction that refuses every statement until
-    rolled back. A healthy session is left as is, so its flushed work still
-    commits with the failure.
-
-    Returns:
-        True if the session was rolled back.
+    Call at the top of a job's failure handler. The failure may have left a
+    transaction that refuses every further statement: a connection the server
+    ended (``idle_in_transaction_session_timeout``), a failed flush, or a core
+    statement the server rejected (the session still reports active then). So
+    it always rolls back, dropping the job's uncommitted work, then reloads
+    the task rows the session holds so the handler can keep using them
+    (an async session can't lazy-load the expired attributes).
     """
     if not isinstance(session, sa_async.AsyncSession):
-        return False  # a test double has no transaction to inspect
-    transaction = session.sync_session.get_transaction()
-    connection_lost = False
-    if transaction is not None and transaction.is_active:
-        connection = await session.connection()
-        connection_lost = connection.invalidated
-    if transaction is None or (transaction.is_active and not connection_lost):
-        return False
+        return  # a test double has no transaction
+    if not session.in_transaction():
+        return
     await session.rollback()
-    logger.warning("task_session_rolled_back", connection_lost=connection_lost)
-    return True
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, task_models.Task):
+            try:
+                await session.refresh(obj)
+            except sa.exc.InvalidRequestError:
+                session.expunge(obj)  # the row is gone
 
 
 async def fail_task(
