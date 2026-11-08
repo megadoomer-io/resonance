@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime
+import os
+import socket
 import traceback
 import typing
 import uuid
@@ -3282,6 +3284,25 @@ def _lease_recovery(wctx: WorkerContext) -> reaper_module.LeaseRecovery:
     return reaper_module.LeaseRecovery(settings.task_lease_recovery)
 
 
+WORKER_APPLICATION_NAME_PREFIX = "resonance-worker"
+
+
+def worker_server_settings(settings: config_module.Settings) -> dict[str, str]:
+    """Postgres session parameters for every worker connection.
+
+    ``application_name`` tags the backend as this worker process so a lock
+    holder can be traced to (and terminated for) a specific pod; Postgres
+    truncates it to 63 bytes.
+    """
+    timeout_ms = settings.worker_idle_tx_timeout_seconds * 1000
+    return {
+        "idle_in_transaction_session_timeout": str(timeout_ms),
+        "application_name": (
+            f"{WORKER_APPLICATION_NAME_PREFIX}:{socket.gethostname()}:{os.getpid()}"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # arq startup / shutdown hooks
 # ---------------------------------------------------------------------------
@@ -3300,7 +3321,9 @@ async def startup(ctx: dict[str, Any]) -> None:
     settings = config_module.Settings()
     logging_module.configure_logging(settings.log_level)
 
-    engine = database_module.create_async_engine(settings)
+    engine = database_module.create_async_engine(
+        settings, server_settings=worker_server_settings(settings)
+    )
     session_factory = database_module.create_session_factory(engine)
 
     # Fail fast if the DB schema is behind this image's migrations, rather than
