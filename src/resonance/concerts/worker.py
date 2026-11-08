@@ -253,6 +253,7 @@ async def sync_calendar_feed(
 
         except Exception:
             log.exception("calendar_feed_sync_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 import traceback
 
@@ -429,6 +430,7 @@ async def sync_concert_archives(
 
         except Exception:
             log.exception("concert_archives_import_planning_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 import traceback
 
@@ -547,6 +549,7 @@ async def sync_concert_archives_chunk(ctx: dict[str, Any], task_id: str) -> None
 
         except Exception:
             log.exception("concert_archives_chunk_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 import traceback
 

@@ -239,6 +239,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
         except Exception:
             log.exception("plan_sync_failed")
+            await lifecycle_module.recover_failed_session(session)
             # Re-fetch task in case the session was invalidated
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
@@ -360,6 +361,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
         except Exception:
             log.exception("sync_range_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -474,6 +476,7 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("bulk_job_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -588,6 +591,7 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             log.info("mbid_backfill_done", result=result)
         except Exception:
             log.exception("mbid_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -660,6 +664,7 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             log.info("popularity_backfill_done", result=result)
         except Exception:
             log.exception("popularity_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -715,6 +720,7 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             log.info("genre_backfill_done", result=result)
         except Exception:
             log.exception("genre_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -1085,6 +1091,7 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("generate_playlist_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -1250,6 +1257,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("discover_tracks_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -1971,6 +1979,7 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("enrich_related_artists_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -2372,6 +2381,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("score_and_build_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -2802,6 +2812,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
         except Exception:
             log.exception("export_playlist_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(

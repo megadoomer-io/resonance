@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import arq.jobs as arq_jobs
 import sqlalchemy as sa
+import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as orm
 import structlog
 
@@ -152,6 +153,32 @@ async def complete_task(
     task.status = types_module.SyncStatus.COMPLETED
     task.result = result
     task.completed_at = datetime.datetime.now(datetime.UTC)
+
+
+async def recover_failed_session(session: AsyncSession) -> bool:
+    """Roll back a session whose transaction can no longer commit.
+
+    Call at the top of a job's failure handler, before it records FAILED. A
+    connection the server ended (``idle_in_transaction_session_timeout``) or a
+    failed flush leaves a transaction that refuses every statement until
+    rolled back. A healthy session is left as is, so its flushed work still
+    commits with the failure.
+
+    Returns:
+        True if the session was rolled back.
+    """
+    if not isinstance(session, sa_async.AsyncSession):
+        return False  # a test double has no transaction to inspect
+    transaction = session.sync_session.get_transaction()
+    connection_lost = False
+    if transaction is not None and transaction.is_active:
+        connection = await session.connection()
+        connection_lost = connection.invalidated
+    if transaction is None or (transaction.is_active and not connection_lost):
+        return False
+    await session.rollback()
+    logger.warning("task_session_rolled_back", connection_lost=connection_lost)
+    return True
 
 
 async def fail_task(
