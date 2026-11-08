@@ -310,7 +310,9 @@ def _print_tasks_health(data: dict[str, Any]) -> None:
                 "Reaper last tick work",
                 f"redelivered {reaper.get('last_redelivered') or 0}, "
                 f"lease expired {reaper.get('last_lease_expired') or 0}, "
-                f"lease recovered {reaper.get('last_lease_recovered') or 0}",
+                f"lease recovered {reaper.get('last_lease_recovered') or 0}, "
+                f"holder frozen {reaper.get('last_holder_frozen') or 0}, "
+                f"holder terminated {reaper.get('last_holder_terminated') or 0}",
             )
         )
 

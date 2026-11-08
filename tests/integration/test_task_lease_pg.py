@@ -675,7 +675,10 @@ async def test_liveness_check_error_never_recovers(pg_task_db: TaskDB) -> None:
     assert (await pg_task_db.get(task.id)).status == S.RUNNING
 
 
-async def test_locked_expired_row_is_skipped_this_tick(pg_task_db: TaskDB) -> None:
+async def test_locked_expired_row_is_not_recovered_this_tick(
+    pg_task_db: TaskDB,
+) -> None:
+    """The lock holder isn't a worker connection, so it is left alone."""
     task = await _expired_running(pg_task_db)
     arq = AsyncMock()
     arq.default_queue_name = "arq:queue"
@@ -689,7 +692,9 @@ async def test_locked_expired_row_is_skipped_this_tick(pg_task_db: TaskDB) -> No
         release.set()
         await holder
 
-    assert [d.action for d in decisions] == [Action.ROW_CHANGED]
+    assert [d.action for d in decisions] == [Action.HOLDER_LOCKED]
+    assert decisions[0].detail is not None
+    assert decisions[0].detail["reason"] == "not_worker"
     row = await pg_task_db.get(task.id)
     assert (row.status, row.attempt) == (S.RUNNING, 1)
 

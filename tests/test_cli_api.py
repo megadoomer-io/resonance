@@ -838,6 +838,7 @@ _HEALTH = {
         "last_redelivered": 1,
         "last_lease_expired": 2,
         "last_lease_recovered": 0,
+        "last_holder_frozen": 1,
     },
     "oldest_pending": {
         "task_id": "abc",
@@ -919,7 +920,8 @@ class TestTasksHealthCommand:
         }
         assert capsys.readouterr().out.splitlines() == [
             "Reaper last tick:      2026-11-05 12:00:00 UTC (4m 10s ago) STALE",
-            "Reaper last tick work: redelivered 1, lease expired 2, lease recovered 0",
+            "Reaper last tick work: redelivered 1, lease expired 2, lease recovered 0,"
+            " holder frozen 1, holder terminated 0",
             "Oldest pending:        2h 1m old, time_range abc (deferred)",
             "Counts:                pending 1, running 2, completed 9, failed 0,"
             " deferred 1, cancelled 0",

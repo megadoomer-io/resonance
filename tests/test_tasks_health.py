@@ -74,6 +74,8 @@ class TestGetTasksHealth:
                 "candidates": 2,
                 "redelivered": 1,
                 "lease_expired": 3,
+                "holder_frozen": 1,
+                "holder_terminated": 0,
                 "lease_recovered": 0,
             },
             [decision],
@@ -95,6 +97,8 @@ class TestGetTasksHealth:
             "last_redelivered": 1,
             "last_lease_expired": 3,
             "last_lease_recovered": 0,
+            "last_holder_frozen": 1,
+            "last_holder_terminated": 0,
         }
         assert health["oldest_pending"] == {
             "task_id": str(oldest.id),
