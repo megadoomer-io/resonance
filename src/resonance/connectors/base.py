@@ -202,7 +202,11 @@ class BaseConnector(abc.ABC):
     # Per request: give up on 429s after this many retries, or once the next
     # wait would end past the wall-time budget (counted from the first attempt).
     _MAX_RATE_LIMIT_RETRIES = 5
-    _RATE_LIMIT_BUDGET = 600.0  # seconds
+    _RATE_LIMIT_BUDGET = 600.0  # seconds; transient/5xx/403 backoff counts too
+    # Least delay for the deferral raised when the budget runs out: one
+    # request already spent the budget, so a short server Retry-After would
+    # have the job redeliver straight into the same throttling.
+    _MIN_EXHAUSTED_DEFER = 60.0
     _MAX_FORBIDDEN_RETRIES = 3  # Spotify dev mode returns transient 403s
 
     async def _request(
@@ -222,7 +226,8 @@ class BaseConnector(abc.ABC):
           _MAX_RATE_LIMIT_RETRIES retries and _RATE_LIMIT_BUDGET seconds of
           wall time per request, then raises RateLimitExceededError.
         - **Transient errors** (timeouts, disconnects, connection errors):
-          Retries with exponential backoff up to _MAX_TRANSIENT_RETRIES.
+          Retries with exponential backoff up to _MAX_TRANSIENT_RETRIES, and
+          only while the backoff ends within _RATE_LIMIT_BUDGET.
         - **Transient 403s** (opt-in via ``retry_forbidden``): Spotify dev mode
           intermittently returns 403 on writes that succeed on retry. Retries
           with backoff up to _MAX_FORBIDDEN_RETRIES; a genuine permission error
@@ -252,7 +257,29 @@ class BaseConnector(abc.ABC):
         transient_attempt = 0
         forbidden_attempt = 0  # never reset mid-loop; bounds total 403 retries
         rate_limit_attempt = 0
+        last_retry_after: float | None = None
         started = time.monotonic()
+
+        def within_budget(wait: float) -> bool:
+            """Whether a wait ends within the budget; past it, defer if throttled."""
+            elapsed = time.monotonic() - started
+            if elapsed + wait <= self._RATE_LIMIT_BUDGET:
+                return True
+            logger.warning(
+                "rate_limit_budget_exhausted",
+                method=method,
+                url=url,
+                retries=rate_limit_attempt,
+                elapsed_seconds=round(elapsed, 1),
+            )
+            if last_retry_after is None:
+                return False
+            raise RateLimitExceededError(
+                max(last_retry_after, self._MIN_EXHAUSTED_DEFER),
+                self._MAX_RATE_LIMIT_WAIT,
+                f"Rate limit budget exhausted after {rate_limit_attempt} "
+                f"429 retries in {elapsed:.0f}s",
+            )
 
         while True:
             interval = self._budget.paced_interval(high_priority=high_priority)
@@ -295,6 +322,8 @@ class BaseConnector(abc.ABC):
                     )
                     raise
                 backoff = self._TRANSIENT_BACKOFF_BASE**transient_attempt
+                if not within_budget(backoff):
+                    raise
                 logger.warning(
                     "transient_error_retry",
                     method=method,
@@ -332,6 +361,8 @@ class BaseConnector(abc.ABC):
                     )
                     response.raise_for_status()
                 backoff = self._TRANSIENT_BACKOFF_BASE**transient_attempt
+                if not within_budget(backoff):
+                    response.raise_for_status()
                 logger.warning(
                     "server_error_retry",
                     method=method,
@@ -355,6 +386,8 @@ class BaseConnector(abc.ABC):
                     )
                     response.raise_for_status()
                 backoff = self._TRANSIENT_BACKOFF_BASE**forbidden_attempt
+                if not within_budget(backoff):
+                    response.raise_for_status()
                 logger.warning(
                     "forbidden_retry",
                     method=method,
@@ -381,23 +414,9 @@ class BaseConnector(abc.ABC):
             )
             if retry_after > self._MAX_RATE_LIMIT_WAIT:
                 raise RateLimitExceededError(retry_after, self._MAX_RATE_LIMIT_WAIT)
+            last_retry_after = retry_after
+            if rate_limit_attempt >= self._MAX_RATE_LIMIT_RETRIES:
+                within_budget(float("inf"))  # always raises: a 429 was seen
+            within_budget(retry_after)
             rate_limit_attempt += 1
-            elapsed = time.monotonic() - started
-            if (
-                rate_limit_attempt > self._MAX_RATE_LIMIT_RETRIES
-                or elapsed + retry_after > self._RATE_LIMIT_BUDGET
-            ):
-                logger.warning(
-                    "rate_limit_budget_exhausted",
-                    method=method,
-                    url=url,
-                    retries=rate_limit_attempt - 1,
-                    elapsed_seconds=round(elapsed, 1),
-                )
-                raise RateLimitExceededError(
-                    retry_after,
-                    self._MAX_RATE_LIMIT_WAIT,
-                    f"Rate limit budget exhausted after {rate_limit_attempt - 1} "
-                    f"429 retries in {elapsed:.0f}s",
-                )
             await asyncio.sleep(retry_after)

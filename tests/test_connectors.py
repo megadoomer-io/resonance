@@ -261,8 +261,57 @@ class TestRequest429Cap:
 
         assert connector.http_client.request.call_count == 6  # type: ignore[attr-defined]
         assert clock.sleeps == [1.0] * 5
-        assert exc_info.value.retry_after == 1.0
+        assert exc_info.value.retry_after == 60.0  # floored; the server said 1s
         assert "budget exhausted" in str(exc_info.value)
+
+    async def test_exhausted_defer_honors_larger_retry_after(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(_responses(*[(429, "90")] * 10))
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert exc_info.value.retry_after == 90.0
+
+    async def test_transient_backoff_after_429_counts_against_budget(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(
+            _responses((429, "100"), *[(503, None)] * 50, (200, None))
+        )
+        connector._RATE_LIMIT_BUDGET = 107.0
+
+        with pytest.raises(base_module.RateLimitExceededError) as exc_info:
+            await connector._request("GET", "https://api.example.com/test")
+
+        # Each 5xx response resets the transient counter, so its backoff stays
+        # 2s; the budget is what ends the loop.
+        assert clock.sleeps == [100.0, 2.0, 2.0, 2.0]
+        assert exc_info.value.retry_after == 100.0
+
+    async def test_transient_backoff_without_429_stops_at_budget(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(_responses(*[(503, None)] * 10))
+        connector._RATE_LIMIT_BUDGET = 5.0
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert clock.sleeps == [2.0, 2.0]
+
+    async def test_transient_exception_backoff_stops_at_budget(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector([])
+        connector.http_client.request.side_effect = httpx.ConnectError("down")  # type: ignore[attr-defined]
+        connector._RATE_LIMIT_BUDGET = 10.0
+
+        with pytest.raises(httpx.ConnectError):
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert clock.sleeps == [2.0, 4.0]
 
     async def test_succeeds_within_retry_cap(self, clock: _FakeClock) -> None:
         connector = self._connector(_responses(*[(429, "1")] * 5, (200, None)))
