@@ -15,6 +15,7 @@ import arq.jobs as arq_jobs
 import pytest
 import sqlalchemy as sa
 
+import resonance.config as config_module
 import resonance.models.task as task_models
 import resonance.sync.holder as holder_module
 import resonance.sync.lifecycle as lifecycle_module
@@ -246,66 +247,188 @@ async def test_live_holder_key_skips_holder_check(
 
 
 async def test_terminate_privilege_error_is_recorded(
-    pg_task_db: TaskDB, pg_app_role: AppRole, redis: arq.ArqRedis
+    pg_task_db: TaskDB,
+    pg_app_role: AppRole,
+    pg_other_role: AppRole,
+    redis: arq.ArqRedis,
 ) -> None:
-    """The holder runs as a superuser role the reaper can't signal; the tick
-    records the refusal and carries on."""
+    """A frozen worker backend of another role can't be signalled (42501); the
+    tick records the refusal and carries on.
+
+    pg_read_all_stats lets the reaper role see the other role's state (it would
+    otherwise read NULL and never try) without granting signal rights.
+    """
+    await _grant_read_all_stats(pg_app_role.name)
     task = await _expired_running(pg_task_db)
-    other = await pg_task_db.add(status=S.PENDING)
-    engine = sa.ext.asyncio.create_async_engine(
-        pg_task_db.factory.kw["bind"].url,
-        connect_args={
-            "server_settings": {
-                "application_name": WORKER_APP,
-                "search_path": (await _schema(pg_task_db)),
-            }
-        },
-    )
-    real_find = holder_module.find_holder
-
-    async def visible_state(*args: Any) -> holder_module.Lookup:
-        # A non-superuser can't read another role's state; pretend it can so
-        # the privilege check on termination is what's exercised.
-        lookup = await real_find(*args)
-        assert lookup.holder is not None
-        holder = dataclasses.replace(
-            lookup.holder, state="idle in transaction", idle_seconds=60.0
-        )
-        return holder_module.Lookup(holder)
-
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(
-                sa.update(task_models.Task)
-                .where(task_models.Task.id == task.id)
-                .values(progress_current=7)
-            )
-            await asyncio.sleep(1.5)
-            with (
-                patch.object(holder_module, "find_holder", visible_state),
-                patch.object(
-                    holder_module,
-                    "_TERMINATE",
-                    sa.text("SELECT pg_terminate_backend(:pid, :timeout_ms)"),
-                ),
-            ):
-                decisions = await _reap(pg_app_role, redis, Mode.ACTIVE)
-            await conn.rollback()
-    finally:
-        await engine.dispose()
+    async with _frozen_holder(pg_other_role, task.id) as (pid, _):
+        await asyncio.sleep(1.5)
+        decisions = await _reap(pg_app_role, redis, Mode.ACTIVE)
+        assert await _backend_alive(pg_task_db, pid)
 
     failed = _only(decisions, Action.TERMINATE_FAILED)
     assert failed.detail is not None
     assert failed.detail["reason"] == "insufficient_privilege"
+    assert failed.detail["pid"] == pid
     assert (await pg_task_db.get(task.id)).status == S.RUNNING
-    assert (await pg_task_db.get(other.id)).status == S.PENDING
 
 
-async def _schema(db: TaskDB) -> str:
-    async with db.factory() as session:
-        return str(
-            (await session.execute(sa.text("SELECT current_schema()"))).scalar_one()
+async def _grant_read_all_stats(role: str) -> None:
+    engine = sa.ext.asyncio.create_async_engine(config_module.Settings().database_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(f"GRANT pg_read_all_stats TO {role}"))
+    finally:
+        await engine.dispose()
+
+
+async def _row_state(role: AppRole, task_id: uuid.UUID) -> holder_module.RowState:
+    async with role.factory() as session:
+        attempt, xmax = (
+            await session.execute(
+                sa.text("SELECT attempt, xmax::text FROM sync_tasks WHERE id = :id"),
+                {"id": task_id},
+            )
+        ).one()
+    return holder_module.RowState(task_id, attempt, xmax)
+
+
+async def _terminate(
+    role: AppRole, task_id: uuid.UUID, row: holder_module.RowState
+) -> bool:
+    async with role.factory() as session:
+        lookup = await holder_module.find_holder(session, task_id)
+        await session.rollback()
+        assert lookup.holder is not None
+        return await holder_module.terminate(
+            session,
+            lookup.holder,
+            row,
+            ttl=lifecycle_module.LEASE_TTL,
+            grace=reaper_module.LEASE_GRACE,
+            timeout=reaper_module.TERMINATE_TIMEOUT,
         )
+
+
+@pytest.mark.parametrize("stale", ["attempt", "xmax"])
+async def test_terminate_requires_the_row_state_that_justified_it(
+    pg_task_db: TaskDB, pg_app_role: AppRole, stale: str
+) -> None:
+    """A holder that still looks frozen is spared when the row has moved on
+    from what the lookup saw: a newer attempt or a different xmax."""
+    task = await _expired_running(pg_task_db)
+    async with _frozen_holder(pg_app_role, task.id) as (pid, _):
+        await asyncio.sleep(1.5)
+        row = await _row_state(pg_app_role, task.id)
+        seen = (
+            dataclasses.replace(row, attempt=row.attempt - 1)
+            if stale == "attempt"
+            else dataclasses.replace(row, xmax=str(int(row.xmax) - 1))
+        )
+        assert not await _terminate(pg_app_role, task.id, seen)
+        assert await _backend_alive(pg_task_db, pid)
+
+        assert await _terminate(pg_app_role, task.id, row)
+        assert not await _backend_alive(pg_task_db, pid)
+
+
+async def test_terminate_requires_the_lease_still_expired(
+    pg_task_db: TaskDB, pg_app_role: AppRole
+) -> None:
+    """The holder froze after its lease was renewed and committed: not
+    expired, so it is spared even with every other check met."""
+    task = await _expired_running(pg_task_db)
+    async with pg_task_db.factory() as session:
+        await session.execute(
+            sa.update(task_models.Task)
+            .where(task_models.Task.id == task.id)
+            .values(lease_expires_at=sa.func.now() + datetime.timedelta(hours=1))
+        )
+        await session.commit()
+    async with _frozen_holder(pg_app_role, task.id) as (pid, _):
+        await asyncio.sleep(1.5)
+        row = await _row_state(pg_app_role, task.id)
+        assert not await _terminate(pg_app_role, task.id, row)
+        assert await _backend_alive(pg_task_db, pid)
+
+
+async def test_row_change_between_lookup_and_terminate_is_holder_moved_on(
+    pg_task_db: TaskDB, pg_app_role: AppRole, redis: arq.ArqRedis
+) -> None:
+    """The first holder ends and a new frozen worker transaction locks the
+    row between the reaper's lookup and its terminate: the xmax the kill was
+    judged on is gone, so nothing is killed."""
+    task = await _expired_running(pg_task_db)
+    real_terminate = holder_module.terminate
+    async with _frozen_holder(pg_app_role, task.id) as (_, first):
+        await asyncio.sleep(1.5)
+        swapped: dict[str, Any] = {}
+
+        async def swap_holder_first(*args: Any, **kwargs: Any) -> bool:
+            await first.rollback()
+            ctx = _frozen_holder(pg_app_role, task.id, "resonance-worker:test:3")
+            swapped["pid"], _ = await ctx.__aenter__()
+            swapped["ctx"] = ctx
+            await asyncio.sleep(1.5)
+            return await real_terminate(*args, **kwargs)
+
+        with patch.object(holder_module, "terminate", swap_holder_first):
+            decisions = await _reap(pg_app_role, redis, Mode.ACTIVE)
+        try:
+            assert await _backend_alive(pg_task_db, swapped["pid"])
+        finally:
+            await swapped["ctx"].__aexit__(None, None, None)
+
+    moved = _only(decisions, Action.HOLDER_LOCKED)
+    assert moved.detail is not None
+    assert moved.detail["reason"] == "holder_moved_on"
+
+
+async def test_xmax_matching_both_readings_is_ambiguous(
+    pg_task_db: TaskDB, pg_app_role: AppRole, redis: arq.ArqRedis
+) -> None:
+    task = await _expired_running(pg_task_db)
+    async with _frozen_holder(pg_app_role, task.id) as (pid, _):
+        await asyncio.sleep(1.5)
+
+        async def members_include_xmax(_: Any, xmax: str) -> list[str]:
+            return [xmax]
+
+        with patch.object(holder_module, "_multixact_members", members_include_xmax):
+            decisions = await _reap(pg_app_role, redis, Mode.ACTIVE)
+        assert await _backend_alive(pg_task_db, pid)
+
+    locked = _only(decisions, Action.HOLDER_LOCKED)
+    assert locked.detail is not None
+    assert locked.detail["reason"] == "ambiguous_xmax"
+
+
+async def test_holder_check_error_is_recorded_and_tick_continues(
+    pg_task_db: TaskDB, pg_app_role: AppRole, redis: arq.ArqRedis
+) -> None:
+    first = await _expired_running(pg_task_db)
+    second = await _expired_running(pg_task_db)
+    real_find = holder_module.find_holder
+
+    async def fails_for_first(session: Any, task_id: uuid.UUID) -> Any:
+        if task_id == first.id:
+            await session.execute(sa.text("SELECT 1/0"))
+        return await real_find(session, task_id)
+
+    async with (
+        _frozen_holder(pg_app_role, first.id),
+        _frozen_holder(pg_app_role, second.id, "resonance-worker:test:2"),
+    ):
+        await asyncio.sleep(1.5)
+        with patch.object(holder_module, "find_holder", fails_for_first):
+            decisions = await _reap(pg_app_role, redis, Mode.ACTIVE)
+
+    assert {d.task_id: d.action for d in decisions} == {
+        str(first.id): Action.HOLDER_CHECK_ERROR,
+        str(second.id): Action.HOLDER_TERMINATED,
+    }
+    state = await reaper_module.read_state(redis)
+    assert state.last_tick is not None
+    assert state.last_tick["holder_terminated"] == 1
 
 
 async def _insert_child(

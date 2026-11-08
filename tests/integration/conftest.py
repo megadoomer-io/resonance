@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from typing import TYPE_CHECKING
@@ -109,11 +110,10 @@ class AppRole:
             await engine.dispose()
 
 
-@pytest.fixture
-async def pg_app_role(pg_task_db: TaskDB) -> AsyncIterator[AppRole]:
-    """A non-superuser role with DML on the test schema."""
+@contextlib.asynccontextmanager
+async def _app_role(db: TaskDB) -> AsyncIterator[AppRole]:
     settings = config_module.Settings()
-    async with pg_task_db.factory() as session:
+    async with db.factory() as session:
         schema = (
             await session.execute(sa.text("SELECT current_schema()"))
         ).scalar_one()
@@ -141,3 +141,17 @@ async def pg_app_role(pg_task_db: TaskDB) -> AsyncIterator[AppRole]:
             await conn.execute(sa.text(f"DROP OWNED BY {name}"))
             await conn.execute(sa.text(f"DROP ROLE {name}"))
         await admin.dispose()
+
+
+@pytest.fixture
+async def pg_app_role(pg_task_db: TaskDB) -> AsyncIterator[AppRole]:
+    """A non-superuser role with DML on the test schema."""
+    async with _app_role(pg_task_db) as role:
+        yield role
+
+
+@pytest.fixture
+async def pg_other_role(pg_task_db: TaskDB) -> AsyncIterator[AppRole]:
+    """A second non-superuser role, distinct from ``pg_app_role``."""
+    async with _app_role(pg_task_db) as role:
+        yield role

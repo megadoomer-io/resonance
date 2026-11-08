@@ -50,11 +50,13 @@ _MULTIXACT_MEMBERS = sa.text(
     "SELECT xid::text FROM pg_get_multixact_members(CAST(CAST(:xmax AS text) AS xid))"
 )
 
-# Re-checks every safety condition in the statement that terminates, in a
-# fresh transaction (pg_stat_activity is snapshotted per transaction), so a
-# holder that moved on since the lookup is left alone.
+# Re-checks every safety condition, on both the backend and the task row, in
+# the statement that terminates, in a fresh transaction (pg_stat_activity is
+# snapshotted per transaction), so a holder or row that moved on since the
+# lookup is left alone. Matching the row's xmax also rules out a stale xmax
+# reused as a multixact id.
 _TERMINATE = sa.text(
-    """
+    f"""
     SELECT pg_terminate_backend(a.pid, :timeout_ms)
     FROM pg_stat_activity a
     WHERE a.pid = :pid
@@ -67,6 +69,14 @@ _TERMINATE = sa.text(
           WHERE l.pid = a.pid AND l.locktype = 'transactionid'
             AND l.mode = 'ExclusiveLock' AND l.granted
             AND l.transactionid = CAST(CAST(:xid AS text) AS xid)
+      )
+      AND EXISTS (
+          SELECT 1 FROM {task_models.Task.__tablename__} t
+          WHERE t.id = :task_id AND t.attempt = :attempt
+            AND t.status = 'RUNNING'
+            AND t.lease_expires_at
+                < clock_timestamp() - make_interval(secs => :grace_s)
+            AND t.xmax::text = :xmax
       )
     """
 )
@@ -91,6 +101,7 @@ class Lookup:
     holder: Holder | None
     reason: str | None = None
     multixact: bool = False
+    xmax: str | None = None
 
 
 async def find_holder(session: sa_async.AsyncSession, task_id: uuid.UUID) -> Lookup:
@@ -117,15 +128,15 @@ async def find_holder(session: sa_async.AsyncSession, task_id: uuid.UUID) -> Loo
     members = await _multixact_members(session, xmax)
     via_multixact = await _holders(session, members) if members else []
     if direct and via_multixact:
-        return Lookup(None, "ambiguous_xmax")
+        return Lookup(None, "ambiguous_xmax", xmax=xmax)
     holders = direct or via_multixact
     multixact = not direct and bool(via_multixact)
     pids = {h.pid for h in holders}
     if not pids:
-        return Lookup(None, "no_holder")
+        return Lookup(None, "no_holder", xmax=xmax)
     if len(pids) > 1:
-        return Lookup(None, "multiple_holders", multixact)
-    return Lookup(holders[0], None, multixact)
+        return Lookup(None, "multiple_holders", multixact, xmax)
+    return Lookup(holders[0], None, multixact, xmax)
 
 
 async def _holders(session: sa_async.AsyncSession, xids: list[str]) -> list[Holder]:
@@ -165,16 +176,29 @@ class TerminateError(Exception):
         self.reason = reason
 
 
+@dataclasses.dataclass(frozen=True)
+class RowState:
+    """The task row as it was when its holder was judged frozen."""
+
+    task_id: uuid.UUID
+    attempt: int
+    xmax: str
+
+
 async def terminate(
     session: sa_async.AsyncSession,
     holder: Holder,
+    row: RowState,
+    *,
     ttl: datetime.timedelta,
+    grace: datetime.timedelta,
     timeout: datetime.timedelta,
 ) -> bool:
-    """Terminate ``holder`` if it still passes every safety check.
+    """Terminate ``holder`` if it and ``row`` still pass every safety check.
 
     Returns:
-        True once the backend has exited, False if it no longer qualified.
+        True once the backend has exited, False if the holder or the row no
+        longer qualified.
 
     Raises:
         TerminateError: refused (insufficient privilege) or not exited within
@@ -190,6 +214,10 @@ async def terminate(
                     "timeout_ms": int(timeout.total_seconds() * 1000),
                     "app_prefix": f"{WORKER_APPLICATION_PREFIX}%",
                     "ttl_s": ttl.total_seconds(),
+                    "task_id": row.task_id,
+                    "attempt": row.attempt,
+                    "grace_s": grace.total_seconds(),
+                    "xmax": row.xmax,
                 },
             )
         ).scalar_one_or_none()

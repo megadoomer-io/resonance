@@ -111,6 +111,7 @@ class Action(enum.StrEnum):
     HOLDER_FROZEN = "holder_frozen"
     HOLDER_TERMINATED = "holder_terminated"
     TERMINATE_FAILED = "terminate_failed"
+    HOLDER_CHECK_ERROR = "holder_check_error"
 
 
 # Recorded for the health endpoint; ARQ_HOLDS_JOB repeats every tick for a
@@ -302,7 +303,7 @@ async def _recover_expired_lease(
             task = await _lock_expired(session, task_id, seen_attempt)
         except _RowLockedError:
             return await _handle_locked_row(
-                session_factory, task_id, LeaseRecovery.ACTIVE, decide
+                session_factory, task_id, seen_attempt, LeaseRecovery.ACTIVE, decide
             )
         if task is None:
             await session.rollback()
@@ -379,6 +380,7 @@ async def _row_locked(
 async def _handle_locked_row(
     session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
     task_id: uuid.UUID,
+    seen_attempt: int,
     lease_recovery: LeaseRecovery,
     decide: DecideFn,
 ) -> Decision:
@@ -390,7 +392,12 @@ async def _handle_locked_row(
     """
     ttl = lifecycle_module.LEASE_TTL
     async with session_factory() as session:
-        lookup = await holder_module.find_holder(session, task_id)
+        try:
+            lookup = await holder_module.find_holder(session, task_id)
+        except sa.exc.DBAPIError:
+            logger.exception("reaper_holder_check_failed", task_id=str(task_id))
+            await session.rollback()
+            return decide(Action.HOLDER_CHECK_ERROR, None)
         await session.rollback()
         holder = lookup.holder
         if holder is None:
@@ -417,9 +424,18 @@ async def _handle_locked_row(
             )
         if lease_recovery == LeaseRecovery.LOG:
             return decide(Action.HOLDER_FROZEN, None, detail=detail)
+        if lookup.xmax is None:
+            return decide(
+                Action.HOLDER_LOCKED, None, detail={**detail, "reason": "no_xmax"}
+            )
         try:
             terminated = await holder_module.terminate(
-                session, holder, ttl, TERMINATE_TIMEOUT
+                session,
+                holder,
+                holder_module.RowState(task_id, seen_attempt, lookup.xmax),
+                ttl=ttl,
+                grace=LEASE_GRACE,
+                timeout=TERMINATE_TIMEOUT,
             )
         except holder_module.TerminateError as exc:
             logger.warning(
@@ -500,7 +516,11 @@ async def _reap_expired_leases(
             if await _row_locked(session_factory, task_id, seen_attempt):
                 decisions.append(
                     await _handle_locked_row(
-                        session_factory, task_id, LeaseRecovery.LOG, decide
+                        session_factory,
+                        task_id,
+                        seen_attempt,
+                        LeaseRecovery.LOG,
+                        decide,
                     )
                 )
             continue
