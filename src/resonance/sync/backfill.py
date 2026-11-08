@@ -105,6 +105,18 @@ class Resolution:
     transient: bool = False
 
 
+async def _end_read(session: Any) -> None:
+    """End the batch's read transaction before its external calls.
+
+    A worker session idle inside a transaction past
+    ``idle_in_transaction_session_timeout`` is ended by Postgres, and a batch's
+    external calls can take minutes. Loaded rows stay usable
+    (``expire_on_commit=False``); the batch's writes flush in a new
+    transaction at its closing commit.
+    """
+    await session.commit()
+
+
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
@@ -222,6 +234,7 @@ async def backfill_tracks(
         tracks = list((await session.execute(stmt)).scalars().all())
         if not tracks:
             break
+        await _end_read(session)
 
         queries = [
             mapper_module.RecordingQuery(
@@ -277,6 +290,7 @@ async def backfill_artists(
         artists = list((await session.execute(stmt)).scalars().all())
         if not artists:
             break
+        await _end_read(session)
 
         for artist in artists:
             harvested_mbid = harvested.get(artist.id)
@@ -388,6 +402,7 @@ async def run_popularity_backfill(
         tracks = list((await session.execute(stmt)).scalars().all())
         if not tracks:
             break
+        await _end_read(session)
         offset += len(tracks)
         counts.candidates += len(tracks)
 
@@ -485,6 +500,7 @@ async def run_genre_backfill(
         artists = list((await session.execute(stmt)).scalars().all())
         if not artists:
             break
+        await _end_read(session)
 
         by_mbid: dict[str, list[music_module.Artist]] = {}
         for artist in artists:

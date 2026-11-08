@@ -237,7 +237,7 @@ class TestBackfillTracks:
         )
         assert track.mb_attempted_at is None  # CRITICAL
         assert counts.transient == 1
-        session.commit.assert_not_awaited()
+        session.commit.assert_awaited_once()  # only the end of the batch read
 
 
 # ---------------------------------------------------------------------------
