@@ -56,6 +56,7 @@ import sqlalchemy.orm as orm
 import structlog
 
 import resonance.config as config_module
+import resonance.connectors.base as connector_base
 import resonance.connectors.listenbrainz as listenbrainz_module
 import resonance.models.music as music_module
 import resonance.normalize as normalize_module
@@ -292,7 +293,8 @@ async def backfill_artists(
             break
         await _end_read(session)
 
-        for artist in artists:
+        throttled = False
+        for index, artist in enumerate(artists):
             harvested_mbid = harvested.get(artist.id)
             if harvested_mbid:
                 # Already gated during the track pass — trust it (gate passes at 1.0).
@@ -302,6 +304,16 @@ async def backfill_artists(
 
             try:
                 results = await connector.search_artists(artist.name, limit=1)
+            except connector_base.RateLimitExceededError:
+                # Unattempted rows would come back on the next SELECT, so stop
+                # the pass here; the rest of the batch is retried next run.
+                logger.warning(
+                    "mbid_backfill_artist_search_rate_limited",
+                    remaining=len(artists) - index,
+                )
+                counts.transient += len(artists) - index
+                throttled = True
+                break
             except _SEARCH_TRANSIENT_ERRORS as exc:
                 logger.warning(
                     "mbid_backfill_artist_search_unavailable",
@@ -326,6 +338,8 @@ async def backfill_artists(
             _apply(artist, artist.name, res, settings, seen, counts)
 
         await session.commit()
+        if throttled:
+            break
 
     logger.info("mbid_backfill_artists_done", **dataclasses.asdict(counts))
     return counts
@@ -339,6 +353,7 @@ class PopularityBackfillCounts:
     updated: int = 0
     no_popularity: int = 0
     skipped_no_mbid: int = 0
+    rate_limited: int = 0  # tracks left for the next run after throttling
 
 
 # Listen-count ceiling for the 0-100 normalization. A global hit recording
@@ -415,9 +430,14 @@ async def run_popularity_backfill(
                 counts.skipped_no_mbid += 1
 
         if by_recording_mbid:
-            popularity = await connector.get_recording_popularity(
-                list(by_recording_mbid.keys())
-            )
+            try:
+                popularity = await connector.get_recording_popularity(
+                    list(by_recording_mbid.keys())
+                )
+            except connector_base.RateLimitExceededError:
+                logger.warning("popularity_backfill_rate_limited", batch=len(tracks))
+                counts.rate_limited += sum(len(g) for g in by_recording_mbid.values())
+                break  # the scan is idempotent; the next run starts over
             for recording_mbid, group in by_recording_mbid.items():
                 listen_count = popularity.get(recording_mbid)
                 if listen_count is None:

@@ -1342,9 +1342,21 @@ async def _resolve_adjacent_artists(
     # per neighbor (a later provider may supply an MBID an earlier one lacked).
     fetch = neighbor_fetch or _default_neighbor_fetch
     ordered: dict[str, dict[str, str | None]] = {}
+    dry: set[int] = set()
     for artist in target_artists:
         for connector in connectors:
-            neighbors = await fetch(connector, artist, per_artist_limit)
+            if id(connector) in dry:
+                continue
+            try:
+                neighbors = await fetch(connector, artist, per_artist_limit)
+            except base_module.RateLimitExceededError:
+                # Throttled: treat as run dry (the partial-success path).
+                logger.warning(
+                    "adjacent_fetch_rate_limited",
+                    connector=type(connector).__name__,
+                )
+                dry.add(id(connector))
+                continue
             for neighbor in neighbors:
                 name = neighbor.get("name")
                 if not name:

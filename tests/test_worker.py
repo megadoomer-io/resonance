@@ -3921,6 +3921,37 @@ class TestResolveAdjacentArtists:
         )
 
     @pytest.mark.anyio()
+    async def test_rate_limited_connector_runs_dry(self) -> None:
+        """A throttled connector contributes nothing more; others still do."""
+        first = MagicMock()
+        first.name = "King Buffalo"
+        first.service_links = None
+        second = MagicMock()
+        second.name = "Elder"
+        second.service_links = None
+
+        throttled = AsyncMock()
+        throttled.get_similar_artists.side_effect = base_module.RateLimitExceededError(
+            60.0, 120.0
+        )
+        healthy = AsyncMock()
+        healthy.get_similar_artists.return_value = [
+            {"name": "Newcomer", "mbid": "mbid-new"}
+        ]
+        result = MagicMock()
+        result.all.return_value = []
+        session = AsyncMock()
+        session.execute.return_value = result
+
+        resolution = await worker_module._resolve_adjacent_artists(
+            session, [throttled, healthy], [first, second], set()
+        )
+
+        assert resolution.import_candidates == [("Newcomer", "mbid-new")]
+        throttled.get_similar_artists.assert_awaited_once()
+        assert healthy.get_similar_artists.await_count == 2
+
+    @pytest.mark.anyio()
     async def test_mbid_match_dedups_name_variant_to_library(self) -> None:
         """A neighbor whose MBID matches a library artist under a different name
         is a library match, not an import (decision d)."""

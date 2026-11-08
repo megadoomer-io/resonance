@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import resonance.config as config_module
+import resonance.connectors.base as connector_base
 import resonance.services.mbid_mapper as mapper_module
 import resonance.sync.backfill as backfill_module
 import resonance.types as types_module
@@ -302,6 +303,32 @@ class TestBackfillArtists:
         assert artist.mb_attempted_at is None  # CRITICAL
         assert counts.transient == 1
 
+    @pytest.mark.anyio()
+    async def test_rate_limit_ends_pass_leaving_rest_unattempted(self) -> None:
+        throttled = _entity(name="Portishead")
+        never_searched = _entity(name="Massive Attack")
+        harvested_artist = _entity(name="Tricky")
+        # A second SELECT would re-return the unattempted rows; the pass must
+        # stop instead of re-searching them.
+        session = _session([[throttled, never_searched, harvested_artist]])
+        connector = AsyncMock()
+        connector.search_artists = AsyncMock(
+            side_effect=connector_base.RateLimitExceededError(60.0, 120.0)
+        )
+
+        counts = await backfill_module.backfill_artists(
+            session, _settings(), connector, harvested={harvested_artist.id: "ART-3"}
+        )
+
+        connector.search_artists.assert_awaited_once()
+        assert throttled.mb_attempted_at is None
+        assert never_searched.mb_attempted_at is None
+        # Nothing after the throttle is applied, harvested rows included.
+        assert harvested_artist.mb_attempted_at is None
+        assert counts.transient == 3
+        assert counts.matched == 0
+        assert session.commit.await_count == 2  # end of read, then the batch
+
 
 class TestRunMbidBackfill:
     @pytest.mark.anyio()
@@ -357,6 +384,28 @@ class TestNormalizePopularity:
 
 
 class TestRunPopularityBackfill:
+    @pytest.mark.anyio()
+    async def test_rate_limit_ends_run_keeping_earlier_batches(self) -> None:
+        a = _pop_track("rec-a")
+        b = _pop_track("rec-b")
+        session = _session([[a], [b]])
+        connector = AsyncMock()
+        connector.get_recording_popularity = AsyncMock(
+            side_effect=[
+                {"rec-a": 1000},
+                connector_base.RateLimitExceededError(60.0, 120.0),
+            ]
+        )
+
+        counts = await backfill_module.run_popularity_backfill(
+            session, _settings(), connector
+        )
+
+        assert a.popularity_score == 50
+        assert b.popularity_score is None
+        assert counts.updated == 1
+        assert counts.rate_limited == 1
+
     @pytest.mark.anyio()
     async def test_normalizes_and_overwrites_for_mb_linked_tracks(self) -> None:
         # LB is the source: overwrite any prior synthetic value with the
