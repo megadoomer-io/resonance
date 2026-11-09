@@ -148,7 +148,13 @@ async def confirm_artist_merge(
     canonical = await _get_artist_or_404(db, artist_id)
     other = await _get_artist_or_404(db, other_id)
 
-    stats = await dedup_module.merge_artists(db, canonical, other)
+    try:
+        stats = await dedup_module.merge_artists(db, canonical, other)
+    except dedup_module.ConflictingMbidError as exc:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail="These artists have different MusicBrainz IDs; not merging.",
+        ) from exc
     await db.commit()
 
     return {

@@ -448,6 +448,11 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
                 stats = await dedup_module.find_and_merge_duplicate_artists(session)
                 result = {
                     "artists_merged": stats.artists_merged,
+                    "mbid_artists_merged": stats.mbid_artists_merged,
+                    "profiles_repointed": stats.profiles_repointed,
+                    "groups_merged": stats.groups_merged,
+                    "groups_skipped": stats.groups_skipped,
+                    "groups_failed": stats.groups_failed,
                     "tracks_repointed": stats.tracks_repointed,
                     "relations_repointed": stats.artist_relations_repointed,
                     "relations_deleted": stats.artist_relations_deleted,

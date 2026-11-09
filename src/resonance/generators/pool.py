@@ -549,3 +549,91 @@ def replace_via_seed_sources(
         sorted(excludes, key=str),
         sorted(track_excludes, key=str),
     )
+
+
+def repoint_artist(
+    input_references: Mapping[str, object],
+    old_id: uuid.UUID,
+    new_id: uuid.UUID,
+) -> dict[str, object] | None:
+    """Rewrite references to artist ``old_id`` as ``new_id`` after a merge.
+
+    Works on the raw stored shape so unknown keys survive. Rules:
+
+    * Artist sources and ``via_seed`` scopes naming ``old_id`` now name ``new_id``.
+    * A source seeded by itself after that (the winner was discovered from the
+      loser) loses its ``via_seed`` and becomes a plain source: it stays in the
+      pool, and a re-enrich of the scope can't remove it.
+    * Two sources for the same artist collapse into the first. It is enabled if
+      either was, and keeps a ``via_seed`` only if both had one, since a source
+      without one is a manual pick that re-enrichment must not replace.
+    * An exclude of ``old_id`` is dropped when ``new_id`` is a source (the
+      include wins), else it becomes an exclude of ``new_id``. An existing
+      exclude of ``new_id`` stays.
+
+    Returns the new dict, or None when nothing referenced ``old_id``.
+    """
+    old, new = str(old_id), str(new_id)
+    refs = dict(input_references)
+    if not _references(refs, old):
+        return None
+
+    sources = refs.get("sources")
+    included = False
+    if isinstance(sources, list):
+        merged: list[object] = []
+        by_artist: dict[str, dict[str, object]] = {}
+        for entry in sources:
+            if not isinstance(entry, Mapping):
+                merged.append(entry)
+                continue
+            updated = dict(entry)
+            if updated.get("via_seed") == old:
+                updated["via_seed"] = new
+            if updated.get("kind") == "artist":
+                if updated.get("artist_id") == old:
+                    updated["artist_id"] = new
+                artist_id = str(updated.get("artist_id"))
+                if updated.get("via_seed") == artist_id:
+                    updated.pop("via_seed")
+                included = included or artist_id == new
+                first = by_artist.get(artist_id)
+                if first is not None:
+                    _absorb_source(first, updated)
+                    continue
+                by_artist[artist_id] = updated
+            merged.append(updated)
+        refs["sources"] = merged
+
+    excludes = refs.get("exclude_artist_ids")
+    if isinstance(excludes, list) and old in excludes:
+        replacement = [] if included else [new]
+        repointed = [
+            r for aid in excludes for r in ([aid] if aid != old else replacement)
+        ]
+        refs["exclude_artist_ids"] = list(dict.fromkeys(repointed))
+
+    return refs
+
+
+def _references(refs: Mapping[str, object], artist_id: str) -> bool:
+    excludes = refs.get("exclude_artist_ids")
+    if isinstance(excludes, list) and artist_id in excludes:
+        return True
+    sources = refs.get("sources")
+    return isinstance(sources, list) and any(
+        isinstance(s, Mapping)
+        and (
+            (s.get("kind") == "artist" and s.get("artist_id") == artist_id)
+            or s.get("via_seed") == artist_id
+        )
+        for s in sources
+    )
+
+
+def _absorb_source(first: dict[str, object], other: Mapping[str, object]) -> None:
+    """Fold a duplicate artist source into the first one (see repoint_artist)."""
+    if other.get("enabled", True) is not False:
+        first["enabled"] = True
+    if other.get("via_seed") is None:
+        first.pop("via_seed", None)

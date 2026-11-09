@@ -17,6 +17,7 @@ import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.services.artist_mbid as artist_mbid_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.reaper as reaper_module
 import resonance.types as types_module
@@ -142,6 +143,58 @@ async def get_db_stats(
         "events_by_service": {row[0]: row[1] for row in events_by_svc.all()},
         "duplicate_artist_groups": dup_artists_result.scalar() or 0,
         "duplicate_track_groups": dup_tracks_result.scalar() or 0,
+        **await _mbid_duplicate_counts(db),
+    }
+
+
+async def _mbid_duplicate_counts(db: sa_async.AsyncSession) -> dict[str, int]:
+    groups = await artist_mbid_module.find_mbid_duplicate_groups(db)
+    return {
+        "mbid_duplicate_artist_groups": len(groups),
+        "mbid_duplicate_artist_groups_names_differ": sum(
+            1 for g in groups if g.names_differ
+        ),
+    }
+
+
+def _artist_json(artist: artist_mbid_module.DuplicateArtist) -> dict[str, str]:
+    return {
+        "id": str(artist.id),
+        "name": artist.name,
+        "created_at": artist.created_at.isoformat(),
+    }
+
+
+async def get_mbid_duplicate_artists(db: sa_async.AsyncSession) -> dict[str, object]:
+    """Artists sharing an MBID, and same-name artists with different MBIDs (#203).
+
+    ``groups`` with ``names_differ`` are not merged by dedup (manual review).
+    ``name_conflicts`` are same-name artists the name dedup won't merge because
+    their MBIDs differ.
+    """
+    groups = await artist_mbid_module.find_mbid_duplicate_groups(db)
+    conflicts = await artist_mbid_module.find_name_conflicts(db)
+    return {
+        "group_count": len(groups),
+        "groups": [
+            {
+                "mbid": group.mbid,
+                "count": group.count,
+                "names_differ": group.names_differ,
+                "artists": [_artist_json(a) for a in group.artists],
+            }
+            for group in groups
+        ],
+        "name_conflicts": [
+            {
+                "name": conflict.name,
+                "artists": [
+                    {**_artist_json(artist), "mbid": mbid}
+                    for artist, mbid in conflict.artists
+                ],
+            }
+            for conflict in conflicts
+        ],
     }
 
 
@@ -429,6 +482,23 @@ async def admin_stats_endpoint(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     return await get_db_stats(db)
+
+
+@router.get(
+    "/artists/mbid-duplicates",
+    summary="Artists sharing a MusicBrainz MBID",
+    description=(
+        "Read-only. Groups artists by MBID, read from"
+        " service_links.musicbrainz.id or else the legacy flat"
+        " service_links.listenbrainz string, trimmed and lowercased."
+        " Artists without an MBID are ignored. Merge with POST"
+        " /admin/dedup/artists."
+    ),
+)
+async def admin_mbid_duplicates_endpoint(
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_mbid_duplicate_artists(db)
 
 
 @router.get(

@@ -63,6 +63,15 @@ class TestMergeArtistsRepointsEventArtists:
     """merge_artists must repoint EventArtist and EventArtistCandidate
     records before deleting the duplicate, otherwise CASCADE deletes them."""
 
+    @pytest.fixture(autouse=True)
+    def _skip_tag_and_similarity_moves(self) -> Any:
+        # Covered on Postgres in tests/integration/test_artist_merge_pg.py.
+        with (
+            patch.object(dedup_module, "_merge_tags", new_callable=AsyncMock),
+            patch.object(dedup_module, "_merge_similarity", new_callable=AsyncMock),
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_repoints_event_artists_without_conflict(self) -> None:
         """EventArtist rows for the duplicate are repointed to canonical."""
@@ -79,6 +88,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[event_artist]),  # SELECT EventArtist
                 FakeResult(items=[]),  # SELECT EventArtist conflict check → none
                 FakeResult(rowcount=1),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )
@@ -112,6 +122,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[dup_event_artist]),  # SELECT EventArtist
                 FakeResult(items=[existing_event_artist]),  # conflict exists
                 FakeResult(rowcount=0),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )
@@ -136,6 +147,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[]),  # SELECT UserArtistRelation
                 FakeResult(items=[]),  # SELECT EventArtist (none)
                 FakeResult(rowcount=3),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )

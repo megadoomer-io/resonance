@@ -1094,3 +1094,77 @@ class TestPlaylistExportCommands:
         with pytest.raises(SystemExit) as exc:
             cli_module._cmd_playlist()
         assert exc.value.code == 1
+
+
+class TestArtistsMbidDuplicates:
+    """`resonance-api artists mbid-duplicates` (#203)."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_gets_admin_endpoint_and_prints_groups(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        captured: dict[str, Any] = {}
+        body = {
+            "group_count": 1,
+            "groups": [
+                {
+                    "mbid": "m1",
+                    "count": 2,
+                    "names_differ": True,
+                    "artists": [
+                        {"id": "a1", "name": "Elder", "created_at": "x"},
+                        {"id": "a2", "name": "elder", "created_at": "y"},
+                    ],
+                }
+            ],
+            "name_conflicts": [
+                {
+                    "name": "sleep",
+                    "artists": [
+                        {"id": "c1", "name": "Sleep", "mbid": "x1", "created_at": "x"},
+                    ],
+                }
+            ],
+        }
+
+        def fake_request(m: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured["method"] = m
+            captured["url"] = url
+            return _fake_response(json_body=body)
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "artists", "mbid-duplicates"]
+        )
+        cli_module._cmd_artists()
+
+        assert captured["method"] == "GET"
+        assert (
+            captured["url"] == "http://test-host/api/v1/admin/artists/mbid-duplicates"
+        )
+        out = capsys.readouterr().out
+        assert "m1" in out
+        assert "a2  elder" in out
+        assert "names differ" in out
+        assert "c1  x1  Sleep" in out
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_reports_none(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            httpx,
+            "request",
+            lambda *a, **k: _fake_response(json_body={"group_count": 0, "groups": []}),
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["resonance-api", "artists", "mbid-duplicates"]
+        )
+        cli_module._cmd_artists()
+        assert "No artists share an MBID." in capsys.readouterr().out
+
+    def test_unknown_subcommand_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "artists", "nope"])
+        with pytest.raises(SystemExit) as exc:
+            cli_module._cmd_artists()
+        assert exc.value.code == 1
