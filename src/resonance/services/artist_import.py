@@ -4,9 +4,9 @@ Centralizes the "find-or-create a local Artist row from an MBID" flow so both
 the HTTP import endpoint (``api/v1/artists.py``) and the background worker
 (adjacent-artist discovery, issue #115 Phase 2) share one dedup + create path.
 
-Dedup is MBID-first and checks both the canonical
-``service_links["musicbrainz"]["id"]`` location and the legacy flat
-``service_links["listenbrainz"]`` location.
+Dedup is MBID-first, on ``Artist.musicbrainz_id`` (normalized from the
+canonical ``service_links["musicbrainz"]["id"]`` or the legacy flat
+``service_links["listenbrainz"]``).
 """
 
 from __future__ import annotations
@@ -18,21 +18,23 @@ import sqlalchemy as sa
 import structlog
 
 import resonance.models.music as music_models
+import resonance.services.artist_utils as artist_utils
 
 if typing.TYPE_CHECKING:
     import sqlalchemy.ext.asyncio as sa_async
 
 logger = structlog.get_logger(__name__)
 
+_MBID_INDEX = "uq_artists_musicbrainz_id"
+
 
 async def find_local_artist_by_mbid(
     session: sa_async.AsyncSession, mbid: str
 ) -> music_models.Artist | None:
-    """Find a local artist by MBID, checking canonical and legacy locations.
+    """Find a local artist by MBID via the uniquely indexed ``musicbrainz_id``.
 
-    Matches both the canonical ``service_links["musicbrainz"]["id"]`` and the
-    legacy flat ``service_links["listenbrainz"]`` storage so an artist imported
-    under either convention is found.
+    The column covers the canonical ``service_links["musicbrainz"]["id"]`` and
+    the legacy flat ``service_links["listenbrainz"]`` storage, case-insensitively.
 
     Args:
         session: Async DB session.
@@ -41,11 +43,11 @@ async def find_local_artist_by_mbid(
     Returns:
         The matching Artist, or None.
     """
+    normalized = artist_utils.normalize_mbid(mbid)
+    if normalized is None:
+        return None
     stmt = sa.select(music_models.Artist).where(
-        sa.or_(
-            music_models.Artist.service_links["musicbrainz"]["id"].as_string() == mbid,
-            music_models.Artist.service_links["listenbrainz"].as_string() == mbid,
-        )
+        music_models.Artist.musicbrainz_id == normalized
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
@@ -67,8 +69,9 @@ async def import_artist_by_mbid(
     pending: once before the MusicBrainz call (so no transaction is held across
     it, #199) and once after the insert or the re-check that finds a concurrent
     import. Flush or commit your own work first, and don't call this mid-way
-    through a change that must stay atomic. The insert runs in a savepoint, so a
-    failed insert rolls back only the savepoint.
+    through a change that must stay atomic. The insert runs in a savepoint; if a
+    concurrent import commits the same MBID first, the unique index rejects this
+    one and the winner is returned (:func:`insert_artist_or_get_winner`).
 
     Args:
         session: Async DB session.
@@ -96,22 +99,56 @@ async def import_artist_by_mbid(
         await session.commit()
         return existing
 
-    artist = music_models.Artist(
-        name=data["name"],
-        disambiguation=data.get("disambiguation") or None,
-        artist_type=data.get("artist_type") or None,
-        area=data.get("area") or None,
-        begin_year=data.get("begin_year"),
-        end_year=data.get("end_year"),
-        service_links={"musicbrainz": {"id": mbid}},
+    artist, created = await insert_artist_or_get_winner(
+        session,
+        music_models.Artist(
+            name=data["name"],
+            disambiguation=data.get("disambiguation") or None,
+            artist_type=data.get("artist_type") or None,
+            area=data.get("area") or None,
+            begin_year=data.get("begin_year"),
+            end_year=data.get("end_year"),
+            service_links={"musicbrainz": {"id": mbid}},
+        ),
     )
-    async with session.begin_nested():
-        session.add(artist)
     await session.commit()
-    logger.info(
-        "artist_imported_by_mbid",
-        mbid=mbid,
-        name=artist.name,
-        artist_id=str(artist.id),
-    )
+    if created:
+        logger.info(
+            "artist_imported_by_mbid",
+            mbid=mbid,
+            name=artist.name,
+            artist_id=str(artist.id),
+        )
     return artist
+
+
+async def insert_artist_or_get_winner(
+    session: sa_async.AsyncSession, artist: music_models.Artist
+) -> tuple[music_models.Artist, bool]:
+    """Insert ``artist`` in a savepoint; if its MBID is already taken, return that row.
+
+    The unique index on ``musicbrainz_id`` makes two concurrent inserts of one
+    MBID converge: the loser's savepoint rolls back (the caller's transaction
+    survives) and it re-reads the committed winner. Does not commit.
+
+    Returns:
+        ``(artist, created)``: the inserted artist and True, or the existing
+        artist holding the MBID and False.
+
+    Raises:
+        sa.exc.IntegrityError: For any other constraint violation, or if the
+            MBID conflict's winner can't be read.
+    """
+    mbid = artist_utils.normalized_mbid(artist.service_links)
+    try:
+        async with session.begin_nested():
+            session.add(artist)
+    except sa.exc.IntegrityError as exc:
+        if mbid is None or _MBID_INDEX not in str(exc.orig):
+            raise
+        winner = await find_local_artist_by_mbid(session, mbid)
+        if winner is None:
+            raise
+        logger.info("artist_insert_lost_mbid_race", mbid=mbid, artist_id=str(winner.id))
+        return winner, False
+    return artist, True

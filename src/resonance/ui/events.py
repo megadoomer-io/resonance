@@ -22,6 +22,7 @@ import resonance.models.concert as concert_models
 import resonance.models.music as music_models
 import resonance.models.user as user_models
 import resonance.normalize as normalize_module
+import resonance.services.artist_import as artist_import_module
 import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 import resonance.ui.common as common
@@ -1213,21 +1214,17 @@ async def artist_import_partial(
     )
     artist: music_models.Artist | None = None
 
-    dedup_conditions: list[sa.ColumnElement[bool]] = []
     if mbid:
-        dedup_conditions.append(
-            music_models.Artist.service_links["musicbrainz"]["id"].as_string() == mbid
-        )
-        dedup_conditions.append(
-            music_models.Artist.service_links["listenbrainz"].as_string() == mbid
-        )
-    if spotify_id:
-        dedup_conditions.append(
-            music_models.Artist.service_links["spotify"]["id"].as_string() == spotify_id
-        )
-    if dedup_conditions:
+        artist = await artist_import_module.find_local_artist_by_mbid(db, mbid)
+    if artist is None and spotify_id:
         result = await db.execute(
-            sa.select(music_models.Artist).where(sa.or_(*dedup_conditions))
+            sa.select(music_models.Artist)
+            .where(
+                music_models.Artist.service_links["spotify"]["id"].as_string()
+                == spotify_id
+            )
+            .order_by(music_models.Artist.created_at)
+            .limit(1)
         )
         artist = result.scalar_one_or_none()
 
@@ -1237,18 +1234,19 @@ async def artist_import_partial(
             links["musicbrainz"] = {"id": mbid}
         if spotify_id:
             links["spotify"] = {"id": spotify_id}
-        artist = music_models.Artist(
-            name=name,
-            disambiguation=disambiguation or None,
-            artist_type=artist_type or None,
-            area=area or None,
-            begin_year=int(begin_year) if begin_year else None,
-            end_year=int(end_year) if end_year else None,
-            service_links=links,
+        artist, created = await artist_import_module.insert_artist_or_get_winner(
+            db,
+            music_models.Artist(
+                name=name,
+                disambiguation=disambiguation or None,
+                artist_type=artist_type or None,
+                area=area or None,
+                begin_year=int(begin_year) if begin_year else None,
+                end_year=int(end_year) if end_year else None,
+                service_links=links,
+            ),
         )
-        db.add(artist)
-        await db.flush()
-        log.info("artist_imported", artist_id=str(artist.id), created=True)
+        log.info("artist_imported", artist_id=str(artist.id), created=created)
     else:
         log.info("artist_import_existing", artist_id=str(artist.id))
 

@@ -46,6 +46,15 @@ class TestFindLocalArtistByMbid:
 
         assert found is None
 
+    @pytest.mark.anyio()
+    async def test_blank_mbid_skips_the_query(self) -> None:
+        session = _session_returning(None)
+
+        assert (
+            await artist_import_module.find_local_artist_by_mbid(session, " ") is None
+        )
+        session.execute.assert_not_awaited()
+
 
 class TestImportArtistByMbid:
     """Find-or-create an Artist from an MBID."""

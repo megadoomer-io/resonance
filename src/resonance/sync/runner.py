@@ -13,6 +13,7 @@ import structlog
 
 import resonance.connectors.base as base_module
 import resonance.models as models_module
+import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 
 if TYPE_CHECKING:
@@ -132,20 +133,22 @@ async def _upsert_artist(
 
     # 2. If this is a ListenBrainz artist with an MBID, check if any
     #    existing artist already has this MBID stored under another key
-    #    (flat musicbrainz or nested musicbrainz.id — flat listenbrainz
-    #    is already checked in step 1)
+    #    (flat musicbrainz, or the normalized musicbrainz_id column, which
+    #    also catches a case-variant MBID the unique index would reject)
     if (
         artist_data.service == types_module.ServiceType.LISTENBRAINZ
         and artist_data.external_id
     ):
+        normalized = artist_utils.normalize_mbid(artist_data.external_id)
         cross_checks = [
-            models_module.Artist.service_links["musicbrainz"].as_string(),
-            models_module.Artist.service_links["musicbrainz"]["id"].as_string(),
+            (
+                models_module.Artist.service_links["musicbrainz"].as_string(),
+                artist_data.external_id,
+            ),
+            (models_module.Artist.musicbrainz_id, normalized),
         ]
-        for check_expr in cross_checks:
-            stmt = sa.select(models_module.Artist).where(
-                check_expr == artist_data.external_id
-            )
+        for check_expr, value in cross_checks:
+            stmt = sa.select(models_module.Artist).where(check_expr == value)
             result = await session.execute(stmt)
             existing = result.scalar_one_or_none()
             if existing is not None:

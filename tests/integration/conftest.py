@@ -23,6 +23,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
+_MBID_INDEX = "uq_artists_musicbrainz_id"
+_PRE_MBID_INDEX_MODULES = frozenset(
+    {"test_artist_mbid_duplicates_pg", "test_artist_merge_pg"}
+)
+
+
 def _unavailable(reason: str) -> None:
     # CI provides the services, so a missing one there is a failure, not a skip.
     if os.environ.get("CI"):
@@ -57,8 +63,13 @@ async def arq_redis() -> AsyncIterator[arq.ArqRedis]:
 
 
 @pytest.fixture
-async def pg_task_db() -> AsyncIterator[TaskDB]:
-    """A TaskDB on real Postgres, in a throwaway schema dropped afterwards."""
+async def pg_task_db(request: pytest.FixtureRequest) -> AsyncIterator[TaskDB]:
+    """A TaskDB on real Postgres, in a throwaway schema dropped afterwards.
+
+    Modules in ``_PRE_MBID_INDEX_MODULES`` test detecting and merging duplicate
+    MBIDs, data that exists only before the unique index; they get a schema
+    without it.
+    """
     settings = config_module.Settings()
     schema = f"test_{uuid.uuid4().hex}"
     admin = sa_async.create_async_engine(settings.database_url)
@@ -76,6 +87,8 @@ async def pg_task_db() -> AsyncIterator[TaskDB]:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(models.Base.metadata.create_all)
+            if request.module.__name__.rsplit(".", 1)[-1] in _PRE_MBID_INDEX_MODULES:
+                await conn.execute(sa.text(f"DROP INDEX {_MBID_INDEX}"))
         yield TaskDB(database_module.create_session_factory(engine))
     finally:
         await engine.dispose()
