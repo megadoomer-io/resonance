@@ -653,20 +653,21 @@ async def import_artist(
     for svc_name, svc_id in body.service_ids.items():
         service_links[svc_name] = {"id": svc_id}
 
-    artist = music_models.Artist(
-        name=body.name,
-        disambiguation=body.disambiguation or None,
-        artist_type=body.artist_type or None,
-        area=body.area or None,
-        begin_year=body.begin_year,
-        end_year=body.end_year,
-        service_links=service_links,
+    artist, created = await artist_import_module.insert_artist_or_get_winner(
+        db,
+        music_models.Artist(
+            name=body.name,
+            disambiguation=body.disambiguation or None,
+            artist_type=body.artist_type or None,
+            area=body.area or None,
+            begin_year=body.begin_year,
+            end_year=body.end_year,
+            service_links=service_links,
+        ),
     )
-    db.add(artist)
-    await db.flush()
     await db.commit()
 
-    log.info("artist_imported", artist_id=str(artist.id), created=True)
+    log.info("artist_imported", artist_id=str(artist.id), created=created)
     return format_artist_summary(artist)
 
 

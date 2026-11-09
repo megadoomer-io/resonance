@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 import httpx
 import sqlalchemy as sa
 import sqlalchemy.dialects.postgresql as pg_dialect
+import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as orm
 import structlog
 
@@ -207,6 +208,53 @@ def _apply(
     counts.matched += 1
 
 
+async def _skip_mbids_held_elsewhere(
+    session: Any,
+    before: dict[uuid.UUID, dict[str, Any] | None],
+    artists: list[music_module.Artist],
+    counts: BackfillCounts,
+) -> None:
+    """Undo this batch's MBID writes that another artist row already holds.
+
+    ``_apply``'s ``seen`` only covers this run; an MBID held by an artist from
+    an earlier run would violate ``uq_artists_musicbrainz_id`` at commit and
+    fail the whole batch. Such rows are recorded as collisions instead, for
+    dedup to merge (#203). ``before`` is each artist's ``service_links`` as
+    loaded. Runs before the batch flushes; Postgres only (where the index is).
+    """
+    if not isinstance(session, sa_async.AsyncSession):
+        return
+    claimed: dict[str, music_module.Artist] = {}
+    for artist in artists:
+        mbid = artist_utils.normalized_mbid(artist.service_links)
+        if mbid is not None and mbid != artist_utils.normalized_mbid(
+            before.get(artist.id)
+        ):
+            claimed[mbid] = artist
+    if not claimed:
+        return
+    with session.no_autoflush:
+        rows = await session.execute(
+            sa.select(music_module.Artist.musicbrainz_id, music_module.Artist.id).where(
+                music_module.Artist.musicbrainz_id.in_(list(claimed))
+            )
+        )
+        holders = {mbid: holder_id for mbid, holder_id in rows.all()}
+    for mbid, artist in claimed.items():
+        holder_id = holders.get(mbid)
+        if holder_id is None or holder_id == artist.id:
+            continue
+        artist.service_links = before.get(artist.id)
+        counts.matched -= 1
+        counts.collision += 1
+        logger.info(
+            "mbid_backfill_collision",
+            mbid=mbid,
+            first_entity_id=str(holder_id),
+            duplicate_entity_id=str(artist.id),
+        )
+
+
 # Transient errors from the MB /ws/2 search (after the connector exhausts its own
 # retries) — treat as "not attempted" for the artist rather than a false no_match.
 _SEARCH_TRANSIENT_ERRORS = (httpx.HTTPError,)
@@ -294,6 +342,7 @@ async def backfill_artists(
         if not artists:
             break
         await _end_read(session)
+        links_before = {a.id: a.service_links for a in artists}
 
         throttled = False
         for index, artist in enumerate(artists):
@@ -339,6 +388,7 @@ async def backfill_artists(
             )
             _apply(artist, artist.name, res, settings, seen, counts)
 
+        await _skip_mbids_held_elsewhere(session, links_before, artists, counts)
         await session.commit()
         if throttled:
             break

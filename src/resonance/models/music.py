@@ -18,6 +18,15 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     """A musical artist, potentially linked across multiple services."""
 
     __tablename__ = "artists"
+    __table_args__ = (
+        sa.Index(
+            "uq_artists_musicbrainz_id",
+            "musicbrainz_id",
+            unique=True,
+            postgresql_where=sa.text("musicbrainz_id IS NOT NULL"),
+            sqlite_where=sa.text("musicbrainz_id IS NOT NULL"),
+        ),
+    )
 
     id: orm.Mapped[uuid.UUID] = orm.mapped_column(
         sa.Uuid, primary_key=True, default=uuid.uuid4

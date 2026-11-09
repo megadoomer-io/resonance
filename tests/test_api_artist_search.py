@@ -111,6 +111,9 @@ class FakeAsyncSession:
     async def commit(self) -> None:
         self._committed = True
 
+    def begin_nested(self) -> FakeAsyncSession:
+        return self
+
     async def __aenter__(self) -> FakeAsyncSession:
         return self
 

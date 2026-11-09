@@ -24,6 +24,14 @@ pytestmark = pytest.mark.integration
 _BASE = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
 
+@pytest.fixture(autouse=True)
+async def _no_unique_mbid_index(pg_task_db: TaskDB) -> None:
+    """Model the data before the unique index: duplicates must be seedable."""
+    async with pg_task_db.factory() as session:
+        await session.execute(sa.text("DROP INDEX IF EXISTS uq_artists_musicbrainz_id"))
+        await session.commit()
+
+
 async def _artists(db: TaskDB, *specs: tuple[str, Any]) -> list[uuid.UUID]:
     """Insert artists (name, service_links) with increasing created_at."""
     ids: list[uuid.UUID] = []

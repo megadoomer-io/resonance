@@ -171,6 +171,8 @@ Read-only. Calls `GET /api/v1/admin/artists/mbid-duplicates`, which reports two 
 
 The MBID is read from `service_links.musicbrainz.id`, else a flat `service_links.musicbrainz` string, else the legacy flat `service_links.listenbrainz` string, trimmed and lowercased. Artists without an MBID are ignored. `stats` reports `mbid_duplicate_artist_groups` and `mbid_duplicate_artist_groups_names_differ`.
 
+The database enforces one artist per MBID with the unique index `uq_artists_musicbrainz_id`. Its migration refuses to run while any MBID is shared, failing the init container with the offending MBIDs; old pods keep serving. To recover, run `resonance-api dedup artists`, confirm `artists mbid-duplicates` reports none, and redeploy.
+
 #### `task` -- Monitor a Task
 
 ```bash

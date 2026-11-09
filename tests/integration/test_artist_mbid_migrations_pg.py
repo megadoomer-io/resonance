@@ -22,6 +22,7 @@ pytestmark = pytest.mark.integration
 _ROOT = pathlib.Path(__file__).parent.parent.parent
 _BEFORE_COLUMN = "a7b8c9d0e1f2"
 _COLUMN = "b8c9d0e1f2a3"
+_INDEX = "c9d0e1f2a3b4"
 
 
 class MigrationDB:
@@ -58,6 +59,22 @@ class MigrationDB:
         with self.engine.connect() as conn:
             rows = conn.execute(sa.text("SELECT id, musicbrainz_id FROM artists"))
             return {row.id: row.musicbrainz_id for row in rows}
+
+    def index_exists(self) -> bool:
+        with self.engine.connect() as conn:
+            found = conn.execute(
+                sa.text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": "uq_artists_musicbrainz_id"},
+            )
+            return found.first() is not None
+
+    def revision(self) -> str:
+        with self.engine.connect() as conn:
+            return str(
+                conn.execute(
+                    sa.text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            )
 
 
 @pytest.fixture
@@ -102,3 +119,37 @@ def test_column_migration_backfills_normalized_mbid(migration_db: MigrationDB) -
         none: None,
         blank: None,
     }
+
+
+def test_index_migration_refuses_duplicates_without_half_applying(
+    migration_db: MigrationDB,
+) -> None:
+    migration_db.upgrade(_COLUMN)
+    migration_db.insert_artist("A", {"musicbrainz": {"id": "same"}})
+    migration_db.insert_artist("B", {"listenbrainz": "SAME"})
+
+    with pytest.raises(Exception, match="same \\(2\\)"):
+        migration_db.upgrade(_INDEX)
+
+    assert not migration_db.index_exists()
+    assert migration_db.revision() == _COLUMN
+
+
+def test_index_migration_resyncs_stale_rows_then_builds(
+    migration_db: MigrationDB,
+) -> None:
+    migration_db.upgrade(_COLUMN)
+    # Written by a pod older than the column: service_links set, column NULL.
+    stale = migration_db.insert_artist("A", {"listenbrainz": "Late-Mbid"})
+    migration_db.insert_artist("B", None)
+
+    migration_db.upgrade(_INDEX)
+
+    assert migration_db.index_exists()
+    assert migration_db.mbids()[stale] == "late-mbid"
+    other = migration_db.insert_artist("C", None)
+    with pytest.raises(sa.exc.IntegrityError), migration_db.engine.begin() as conn:
+        conn.execute(
+            sa.text("UPDATE artists SET musicbrainz_id = 'late-mbid' WHERE id = :id"),
+            {"id": other},
+        )
