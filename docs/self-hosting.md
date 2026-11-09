@@ -174,7 +174,7 @@ If using `WORKER_MODE=external` (the default), start the arq worker in a
 separate terminal:
 
 ```bash
-uv run arq resonance.worker.WorkerSettings
+uv run python -m resonance.worker
 ```
 
 The app will be available at `http://localhost:8000`.
