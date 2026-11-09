@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 import httpx
 import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as pg_dialect
 import sqlalchemy.orm as orm
 import structlog
 
@@ -63,6 +64,7 @@ import resonance.normalize as normalize_module
 import resonance.services.artist_tags as artist_tags_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mapper_module
+import resonance.services.row_locks as row_locks_module
 import resonance.types as types_module
 
 logger = structlog.get_logger()
@@ -549,7 +551,7 @@ async def run_genre_backfill(
             counts.transient += len(artists)
             break  # leave the rest unattempted; retried next run
 
-        for artist in artists:
+        for artist in sorted(artists, key=lambda a: a.id):
             counts.candidates += 1
             mbid = artist_utils.get_mbid(artist.service_links)
             results = tags_by_mbid.get(mbid, []) if mbid else []
@@ -577,21 +579,33 @@ async def _persist_artist_tags(
     -data write shared by the bulk backfill (:func:`run_genre_backfill`) and the
     on-demand fetch (:func:`fetch_and_persist_tags`, #152). The caller owns the
     transaction/commit.
+
+    Concurrent writers for one artist serialize on an advisory lock held until
+    the caller's commit, so each is a clean replace (#199). Callers persisting
+    several artists in one transaction pass them in id order.
     """
+    await row_locks_module.lock_key(session, "artist_tags", artist.id)
     await session.execute(
         sa.delete(music_module.ArtistTag).where(
             music_module.ArtistTag.artist_id == artist.id
         )
     )
-    for res in results:
-        session.add(
-            music_module.ArtistTag(
-                artist_id=artist.id,
-                tag=res.tag,
-                genre_mbid=res.genre_mbid,
-                count=max(0, res.count),
-                source="musicbrainz",
-            )
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "artist_id": artist.id,
+            "tag": res.tag,
+            "genre_mbid": res.genre_mbid,
+            "count": max(0, res.count),
+            "source": "musicbrainz",
+        }
+        for res in results
+    ]
+    if rows:
+        await session.execute(
+            pg_dialect.insert(music_module.ArtistTag)
+            .values(rows)
+            .on_conflict_do_nothing(constraint="uq_artist_tags_artist_tag")
         )
     artist.genre_attempted_at = _now()
 
@@ -642,7 +656,7 @@ async def fetch_and_persist_tags(
     except artist_tags_module.ArtistTagsUnavailableError:
         logger.warning("ondemand_artist_tags_unavailable", count=len(pending))
         return False
-    for artist in pending:
+    for artist in sorted(pending, key=lambda a: a.id):
         mbid = artist_utils.get_mbid(artist.service_links)
         results = tags_by_mbid.get(mbid, []) if mbid else []
         await _persist_artist_tags(session, artist, results)

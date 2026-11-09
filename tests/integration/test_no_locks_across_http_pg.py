@@ -121,6 +121,47 @@ async def test_concurrent_similarity_refresh_does_not_conflict(
         assert sorted(names) == ["Elder", "Kyuss"]
 
 
+def _tag(name: str) -> artist_tags_module.ArtistTagResult:
+    return artist_tags_module.ArtistTagResult(tag=name, count=1)
+
+
+async def test_concurrent_tag_writes_replace_cleanly(pg_task_db: TaskDB) -> None:
+    """Two writers persisting one artist's tags both succeed; one set wins whole."""
+    import resonance.sync.backfill as backfill_module
+
+    artist = await _seed_artist(pg_task_db)
+    batch_a = [_tag("doom"), _tag("sludge"), _tag("stoner")]
+    batch_b = [_tag("doom"), _tag("drone")]
+    a_written = asyncio.Event()
+
+    async def write(batch: list[artist_tags_module.ArtistTagResult]) -> None:
+        async with pg_task_db.factory() as session:
+            row = await session.get(music_models.Artist, artist.id)
+            assert row is not None
+            await backfill_module._persist_artist_tags(session, row, batch)
+            await session.flush()
+            if batch is batch_a:
+                a_written.set()
+                await asyncio.sleep(0.3)  # B arrives while A is uncommitted
+            await session.commit()
+
+    run_a = asyncio.create_task(write(batch_a))
+    await asyncio.wait_for(a_written.wait(), 5)
+    await asyncio.wait_for(asyncio.gather(run_a, write(batch_b)), 10)
+
+    async with pg_task_db.factory() as session:
+        tags = set(
+            (
+                await session.execute(
+                    sa.select(music_models.ArtistTag.tag).where(
+                        music_models.ArtistTag.artist_id == artist.id
+                    )
+                )
+            ).scalars()
+        )
+    assert tags == {"doom", "drone"}  # B ran after A committed: a clean replace
+
+
 # ---------------------------------------------------------------------------
 # Lock checks: a second session must write the rows a run has touched while
 # the run is blocked inside an external call.
