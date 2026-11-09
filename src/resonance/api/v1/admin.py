@@ -285,6 +285,8 @@ async def get_tasks_health(
             "last_redelivered": (state.last_tick or {}).get("redelivered"),
             "last_lease_expired": (state.last_tick or {}).get("lease_expired"),
             "last_lease_recovered": (state.last_tick or {}).get("lease_recovered"),
+            "last_holder_frozen": (state.last_tick or {}).get("holder_frozen"),
+            "last_holder_terminated": (state.last_tick or {}).get("holder_terminated"),
         },
         "oldest_pending": (
             {

@@ -454,7 +454,7 @@ async def renew_lease(
         try:
             renewed = await _renew_row(session, task_id, attempt)
         except sa.exc.DBAPIError as exc:
-            if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            if getattr(exc.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
                 raise
             await session.rollback()
             raise LeaseRenewBlocked from exc
@@ -478,7 +478,7 @@ async def renew_lease(
     return False
 
 
-_LOCK_NOT_AVAILABLE = "55P03"
+LOCK_NOT_AVAILABLE = "55P03"
 
 
 async def _renew_row(

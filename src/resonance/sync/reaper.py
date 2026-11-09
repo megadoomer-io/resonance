@@ -13,10 +13,15 @@ see ``lifecycle.renew_lease``) is past ``LEASE_GRACE``. A NULL lease means
 pre-lease code claimed it, or its job ended leaving it RUNNING (a parent
 waiting on children); startup recovery covers those. ``LeaseRecovery.LOG``
 records the decision without acting.
+
+An expired row that is still locked belongs to a holder frozen mid-transaction
+(see ``holder``); in active mode the reaper terminates that backend so the next
+tick can recover the row.
 """
 
 from __future__ import annotations
 
+import collections.abc
 import dataclasses
 import datetime
 import enum
@@ -30,12 +35,12 @@ import structlog
 
 import resonance.models.task as task_models
 import resonance.sync.dispatch as dispatch_module
+import resonance.sync.holder as holder_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.resume as resume_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
-    import collections.abc
     import uuid
 
     import arq
@@ -55,11 +60,13 @@ LEASE_GRACE = datetime.timedelta(seconds=30)
 
 LAST_TICK_KEY = "resonance:reaper:last_tick"
 DECISIONS_KEY = "resonance:reaper:decisions"
-# One key per (task, attempt) already recorded as lease_expired, so a stuck row
-# in log mode is recorded once instead of every tick.
-LEASE_EXPIRED_SEEN_PREFIX = "resonance:reaper:lease_expired:"
+# One key per (action, task, attempt) already recorded, so a stuck row is
+# recorded once instead of every tick.
+SEEN_PREFIX = "resonance:reaper:"
+LEASE_EXPIRED_SEEN_PREFIX = f"{SEEN_PREFIX}lease_expired:"
 LEASE_EXPIRED_SEEN_TTL = datetime.timedelta(days=7)
 MAX_RECORDED_DECISIONS = 50
+TERMINATE_TIMEOUT = datetime.timedelta(seconds=5)
 
 ARQ_HOLDS_JOB: frozenset[arq_jobs.JobStatus] = frozenset(
     {
@@ -67,6 +74,10 @@ ARQ_HOLDS_JOB: frozenset[arq_jobs.JobStatus] = frozenset(
         arq_jobs.JobStatus.deferred,
         arq_jobs.JobStatus.in_progress,
     }
+)
+
+_ONCE_PER_ATTEMPT = frozenset(
+    {"lease_expired", "holder_locked", "holder_frozen", "terminate_failed"}
 )
 
 _ARQ_WILL_RUN: frozenset[str] = frozenset(
@@ -96,6 +107,11 @@ class Action(enum.StrEnum):
     LEASE_RECOVERED = "lease_recovered"
     HOLDER_ALIVE = "holder_alive"
     LIVENESS_ERROR = "liveness_error"
+    HOLDER_LOCKED = "holder_locked"
+    HOLDER_FROZEN = "holder_frozen"
+    HOLDER_TERMINATED = "holder_terminated"
+    TERMINATE_FAILED = "terminate_failed"
+    HOLDER_CHECK_ERROR = "holder_check_error"
 
 
 # Recorded for the health endpoint; ARQ_HOLDS_JOB repeats every tick for a
@@ -114,6 +130,7 @@ class Decision:
     arq_status: str | None
     job_id: str | None
     attempt: int | None = None
+    detail: dict[str, object] | None = None
 
     def to_json(self) -> str:
         return json.dumps({**dataclasses.asdict(self), "at": self.at.isoformat()})
@@ -278,23 +295,16 @@ async def _recover_expired_lease(
     arq_redis: arq.ArqRedis,
     task_id: uuid.UUID,
     seen_attempt: int,
-    decide: collections.abc.Callable[[Action, str | None], Decision],
+    decide: DecideFn,
 ) -> Decision:
     """Fence the stalled holder and redeliver with a fresh job id."""
     async with session_factory() as session:
-        task = (
-            await session.execute(
-                sa.select(task_models.Task)
-                .where(
-                    task_models.Task.id == task_id,
-                    task_models.Task.attempt == seen_attempt,
-                    _lease_expired(task_models.Task),
-                )
-                # Locked means someone is writing it right now (normally its
-                # live holder); look again next tick rather than queue behind.
-                .with_for_update(skip_locked=True)
+        try:
+            task = await _lock_expired(session, task_id, seen_attempt)
+        except _RowLockedError:
+            return await _handle_locked_row(
+                session_factory, task_id, seen_attempt, LeaseRecovery.ACTIVE, decide
             )
-        ).scalar_one_or_none()
         if task is None:
             await session.rollback()
             return decide(Action.ROW_CHANGED, None)
@@ -314,6 +324,135 @@ async def _recover_expired_lease(
         Action.LEASE_RECOVERED if delivered else Action.ENQUEUE_FAILED,
         delivery.job_id,
     )
+
+
+DecideFn = collections.abc.Callable[..., Decision]
+
+
+class _RowLockedError(Exception):
+    pass
+
+
+async def _lock_expired(
+    session: sa_async.AsyncSession, task_id: uuid.UUID, seen_attempt: int
+) -> task_models.Task | None:
+    """Lock the row if it is still expired under ``seen_attempt``.
+
+    Raises:
+        _RowLockedError: another transaction holds the row (the session is rolled
+            back).
+    """
+    try:
+        return (
+            await session.execute(
+                sa.select(task_models.Task)
+                .where(
+                    task_models.Task.id == task_id,
+                    task_models.Task.attempt == seen_attempt,
+                    _lease_expired(task_models.Task),
+                )
+                # Never queue behind the holder: a locked row goes to the
+                # holder check instead.
+                .with_for_update(nowait=True)
+            )
+        ).scalar_one_or_none()
+    except sa.exc.DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != lifecycle_module.LOCK_NOT_AVAILABLE:
+            raise
+        await session.rollback()
+        raise _RowLockedError from exc
+
+
+async def _row_locked(
+    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
+    task_id: uuid.UUID,
+    seen_attempt: int,
+) -> bool:
+    async with session_factory() as session:
+        try:
+            await _lock_expired(session, task_id, seen_attempt)
+        except _RowLockedError:
+            return True
+        await session.rollback()
+        return False
+
+
+async def _handle_locked_row(
+    session_factory: sa_async.async_sessionmaker[sa_async.AsyncSession],
+    task_id: uuid.UUID,
+    seen_attempt: int,
+    lease_recovery: LeaseRecovery,
+    decide: DecideFn,
+) -> Decision:
+    """Deal with the backend holding an expired row's lock.
+
+    Terminates only an unmistakably frozen worker, and only in active mode.
+    Never recovers in the same tick: the dead backend's transaction rolls back
+    and the next tick's normal path recovers (and fences) the row.
+    """
+    ttl = lifecycle_module.LEASE_TTL
+    async with session_factory() as session:
+        try:
+            lookup = await holder_module.find_holder(session, task_id)
+        except sa.exc.DBAPIError:
+            logger.exception("reaper_holder_check_failed", task_id=str(task_id))
+            await session.rollback()
+            return decide(Action.HOLDER_CHECK_ERROR, None)
+        await session.rollback()
+        holder = lookup.holder
+        if holder is None:
+            return decide(
+                Action.HOLDER_LOCKED,
+                None,
+                detail={"reason": lookup.reason, "multixact": lookup.multixact},
+            )
+        detail: dict[str, object] = {
+            "pid": holder.pid,
+            "state": holder.state,
+            "application_name": holder.application_name,
+            "idle_seconds": (
+                round(holder.idle_seconds, 1)
+                if holder.idle_seconds is not None
+                else None
+            ),
+            "multixact": lookup.multixact,
+        }
+        reason = holder_module.unsafe_reason(holder, ttl)
+        if reason is not None:
+            return decide(
+                Action.HOLDER_LOCKED, None, detail={**detail, "reason": reason}
+            )
+        if lease_recovery == LeaseRecovery.LOG:
+            return decide(Action.HOLDER_FROZEN, None, detail=detail)
+        if lookup.xmax is None:
+            return decide(
+                Action.HOLDER_LOCKED, None, detail={**detail, "reason": "no_xmax"}
+            )
+        try:
+            terminated = await holder_module.terminate(
+                session,
+                holder,
+                holder_module.RowState(task_id, seen_attempt, lookup.xmax),
+                ttl=ttl,
+                grace=LEASE_GRACE,
+                timeout=TERMINATE_TIMEOUT,
+            )
+        except holder_module.TerminateError as exc:
+            logger.warning(
+                "reaper_terminate_failed",
+                task_id=str(task_id),
+                reason=exc.reason,
+                **detail,
+            )
+            return decide(
+                Action.TERMINATE_FAILED, None, detail={**detail, "reason": exc.reason}
+            )
+    if not terminated:
+        return decide(
+            Action.HOLDER_LOCKED, None, detail={**detail, "reason": "holder_moved_on"}
+        )
+    logger.warning("reaper_holder_terminated", task_id=str(task_id), **detail)
+    return decide(Action.HOLDER_TERMINATED, None, detail=detail)
 
 
 async def _reap_expired_leases(
@@ -344,6 +483,7 @@ async def _reap_expired_leases(
             _task_type: types_module.TaskType = task_type,
             _arq_status: str | None = arq_status,
             _attempt: int = seen_attempt,
+            detail: dict[str, object] | None = None,
         ) -> Decision:
             return Decision(
                 now,
@@ -353,6 +493,7 @@ async def _reap_expired_leases(
                 _arq_status,
                 job_id,
                 _attempt,
+                detail,
             )
 
         # An expired DB lease alone isn't death: the holder's own transaction
@@ -372,6 +513,16 @@ async def _reap_expired_leases(
             continue
         if lease_recovery == LeaseRecovery.LOG:
             decisions.append(decide(Action.LEASE_EXPIRED, seen_job_id))
+            if await _row_locked(session_factory, task_id, seen_attempt):
+                decisions.append(
+                    await _handle_locked_row(
+                        session_factory,
+                        task_id,
+                        seen_attempt,
+                        LeaseRecovery.LOG,
+                        decide,
+                    )
+                )
             continue
         if arq_status is None:
             decisions.append(decide(Action.STATUS_ERROR, seen_job_id))
@@ -460,7 +611,7 @@ async def reap(
     recorded = await _to_record(arq_redis, decisions)
     for decision in decisions:
         quiet = decision.action in _QUIET_ACTIONS or (
-            decision.action == Action.LEASE_EXPIRED and decision not in recorded
+            decision.action in _ONCE_PER_ATTEMPT and decision not in recorded
         )
         (logger.debug if quiet else logger.info)(
             "reaper_decision",
@@ -469,6 +620,7 @@ async def reap(
             action=decision.action.value,
             arq_status=decision.arq_status,
             job_id=decision.job_id,
+            **(decision.detail or {}),
         )
     await _record_tick(arq_redis, now, len(candidates), decisions, recorded)
     return decisions
@@ -487,6 +639,10 @@ async def _record_tick(
         "redelivered": sum(d.action == Action.REDELIVERED for d in decisions),
         "lease_expired": sum(d.action == Action.LEASE_EXPIRED for d in decisions),
         "lease_recovered": sum(d.action == Action.LEASE_RECOVERED for d in decisions),
+        "holder_frozen": sum(d.action == Action.HOLDER_FROZEN for d in decisions),
+        "holder_terminated": sum(
+            d.action == Action.HOLDER_TERMINATED for d in decisions
+        ),
     }
     try:
         async with arq_redis.pipeline(transaction=True) as pipe:
@@ -509,12 +665,12 @@ async def _to_record(
         d
         for d in decisions
         if d.action in _RECORDED_ACTIONS
-        and (d.action != Action.LEASE_EXPIRED or await _first_sighting(arq_redis, d))
+        and (d.action not in _ONCE_PER_ATTEMPT or await _first_sighting(arq_redis, d))
     ]
 
 
 async def _first_sighting(arq_redis: arq.ArqRedis, decision: Decision) -> bool:
-    key = f"{LEASE_EXPIRED_SEEN_PREFIX}{decision.task_id}:{decision.attempt}"
+    key = f"{SEEN_PREFIX}{decision.action}:{decision.task_id}:{decision.attempt}"
     try:
         return bool(
             await arq_redis.set(
