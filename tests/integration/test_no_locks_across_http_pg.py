@@ -71,7 +71,7 @@ class _Neighbors:
 async def test_concurrent_similarity_refresh_does_not_conflict(
     pg_task_db: TaskDB,
 ) -> None:
-    """Two refreshes of one source both insert the same edges; neither raises."""
+    """Two refreshes of one source both succeed; the result is one whole batch."""
     artist = await _seed_artist(pg_task_db)
     now = datetime.datetime.now(datetime.UTC)
     hold_a, a_written = asyncio.Event(), asyncio.Event()
@@ -89,18 +89,17 @@ async def test_concurrent_similarity_refresh_does_not_conflict(
             await commit_a()
 
         a.commit = held_commit  # type: ignore[method-assign]
-        connector = _Neighbors(["Elder", "Kyuss"])
         run_a = asyncio.create_task(
             worker_module._fetch_similar_with_store(
-                a, connector, artist, limit=30, now=now
+                a, _Neighbors(["Elder", "Kyuss", "Sleep"]), artist, limit=30, now=now
             )
         )
         try:
             await asyncio.wait_for(a_written.wait(), 5)
-            # B's insert waits on A's uncommitted unique keys, then skips them.
+            # B arrives while A's replace is uncommitted.
             run_b = asyncio.create_task(
                 worker_module._fetch_similar_with_store(
-                    b, connector, artist, limit=30, now=now
+                    b, _Neighbors(["Elder", "Om"]), artist, limit=30, now=now
                 )
             )
             await asyncio.sleep(0.2)
@@ -118,7 +117,7 @@ async def test_concurrent_similarity_refresh_does_not_conflict(
                 )
             )
         ).scalars()
-        assert sorted(names) == ["Elder", "Kyuss"]
+        assert sorted(names) == ["Elder", "Om"]  # B replaced A whole, no union
 
 
 def _tag(name: str) -> artist_tags_module.ArtistTagResult:

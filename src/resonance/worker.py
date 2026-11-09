@@ -73,6 +73,7 @@ import resonance.services.artist_tags as artist_tags_module
 import resonance.services.artist_utils as artist_utils
 import resonance.services.mbid_mapper as mbid_mapper_module
 import resonance.services.playlist_export as playlist_export_module
+import resonance.services.row_locks as row_locks_module
 import resonance.sync.backfill as backfill_module
 import resonance.sync.base as sync_base
 import resonance.sync.dispatch as dispatch_module
@@ -1521,7 +1522,9 @@ async def _fetch_similar_with_store(
         await connector.get_similar_artists(artist.name, mbid=mbid, limit=limit)
     )
 
-    # Replace this (artist, connector)'s edges wholesale with the fresh batch.
+    # Replace this (artist, connector)'s edges wholesale with the fresh batch,
+    # serialized against a concurrent refresh of the same pair.
+    await row_locks_module.lock_key(session, "artist_similarities", artist.id, service)
     await session.execute(
         sa.delete(taste_models.ArtistSimilarity).where(
             taste_models.ArtistSimilarity.source_artist_id == artist.id,
@@ -1542,8 +1545,6 @@ async def _fetch_similar_with_store(
         if (name := neighbor.get("name"))
     ]
     if edges:
-        # A concurrent refresh of the same source can insert after our delete;
-        # its edges are as fresh as ours.
         await session.execute(
             pg_dialect.insert(taste_models.ArtistSimilarity)
             .values(edges)
