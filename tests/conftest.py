@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import uuid
+import weakref
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
+import sqlalchemy.orm as orm
 
 import resonance.models as models
 import resonance.models.task as task_models
@@ -16,7 +20,7 @@ import resonance.sync.lifecycle as lifecycle_module
 import resonance.types as types_module
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
 
 class TaskDB:
@@ -112,3 +116,86 @@ def _simulated_claim_on_mock_sessions(
             task.attempt = (task.attempt or 0) + 1
 
     monkeypatch.setattr(lifecycle_module, "_fence_out_holders", fence_out)
+
+
+class _WritesAcrossHttp:
+    """State for :func:`no_writes_across_http`."""
+
+    def __init__(self) -> None:
+        self.dirty: weakref.WeakKeyDictionary[orm.Session, asyncio.Task[Any] | None] = (
+            weakref.WeakKeyDictionary()
+        )
+        self.violations: list[str] = []
+
+    def mark(self, session: orm.Session) -> None:
+        try:
+            owner: asyncio.Task[Any] | None = asyncio.current_task()
+        except RuntimeError:
+            owner = None
+        self.dirty.setdefault(session, owner)
+
+    def clear(self, session: orm.Session) -> None:
+        self.dirty.pop(session, None)
+
+    def check(self, request: httpx.Request) -> None:
+        current = asyncio.current_task()
+        if any(owner is current for owner in self.dirty.values()):
+            self.violations.append(f"{request.method} {request.url}")
+
+
+@pytest.fixture
+def no_writes_across_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[_WritesAcrossHttp]:
+    """Fail the test if an HTTP request is sent while its task has uncommitted writes.
+
+    A session counts as written once it flushes, or once it executes a core
+    INSERT/UPDATE/DELETE through ``session.execute`` (which never flushes), and
+    stops counting at commit or rollback. Every outbound call (connectors, the
+    artist-tags client, ``fetch_feed``) goes through ``httpx.AsyncClient.send``,
+    which is patched to record a violation when a written session belongs to the
+    sending asyncio task (other tasks, like the lease renewer, are ignored).
+
+    Opt-in, not global: paged syncs (ListenBrainz, Last.fm, Spotify) flush a
+    page's rows and fetch the next page before their per-page commit, which
+    this would flag. Tests must route stub connectors through a real
+    ``httpx.AsyncClient`` (e.g. ``httpx.MockTransport``) for the check to see them.
+    """
+    state = _WritesAcrossHttp()
+
+    def on_flush(session: orm.Session, _ctx: Any) -> None:
+        state.mark(session)
+
+    def on_execute(orm_state: orm.ORMExecuteState) -> None:
+        if orm_state.is_insert or orm_state.is_update or orm_state.is_delete:
+            state.mark(orm_state.session)
+
+    def on_end(session: orm.Session, *_: Any) -> None:
+        state.clear(session)
+
+    listeners: list[tuple[str, Any]] = [
+        ("after_flush", on_flush),
+        ("do_orm_execute", on_execute),
+        ("after_commit", on_end),
+        ("after_rollback", on_end),
+    ]
+    for name, fn in listeners:
+        sa.event.listen(orm.Session, name, fn)
+
+    real_send = httpx.AsyncClient.send
+
+    async def send(
+        self: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
+    ) -> httpx.Response:
+        state.check(request)
+        return await real_send(self, request, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    try:
+        yield state
+    finally:
+        for name, fn in listeners:
+            sa.event.remove(orm.Session, name, fn)
+    assert not state.violations, (
+        f"HTTP sent with uncommitted writes: {state.violations}"
+    )
