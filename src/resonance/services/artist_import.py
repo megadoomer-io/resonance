@@ -63,10 +63,12 @@ async def import_artist_by_mbid(
     connector (``get_artist_by_mbid``), an Artist is created with canonical
     ``service_links`` and returned.
 
-    Commits the session before the MusicBrainz call and after the insert, so no
-    transaction is held across the external call (#199). The insert runs in a
-    savepoint: if it fails, only the savepoint is rolled back and the caller's
-    loaded objects stay usable.
+    **This commits the caller's session**, including any writes the caller has
+    pending: once before the MusicBrainz call (so no transaction is held across
+    it, #199) and once after the insert or the re-check that finds a concurrent
+    import. Flush or commit your own work first, and don't call this mid-way
+    through a change that must stay atomic. The insert runs in a savepoint, so a
+    failed insert rolls back only the savepoint.
 
     Args:
         session: Async DB session.
