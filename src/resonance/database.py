@@ -8,12 +8,26 @@ if TYPE_CHECKING:
     import resonance.config as config_module
 
 
-def create_async_engine(settings: config_module.Settings) -> sa_async.AsyncEngine:
-    """Create an async SQLAlchemy engine from settings."""
+def create_async_engine(
+    settings: config_module.Settings,
+    *,
+    server_settings: dict[str, str] | None = None,
+) -> sa_async.AsyncEngine:
+    """Create an async SQLAlchemy engine from settings.
+
+    Args:
+        settings: Application settings.
+        server_settings: Postgres session parameters set on every connection
+            the engine opens (asyncpg ``server_settings``).
+    """
+    connect_args: dict[str, object] = {}
+    if server_settings:
+        connect_args["server_settings"] = dict(server_settings)
     return sa_async.create_async_engine(
         settings.database_url,
         echo=settings.debug,
         pool_pre_ping=True,
+        connect_args=connect_args,
     )
 
 

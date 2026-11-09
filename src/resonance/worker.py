@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime
+import os
+import socket
 import traceback
 import typing
 import uuid
@@ -239,6 +241,7 @@ async def plan_sync(ctx: dict[str, Any], sync_task_id: str) -> None:
 
         except Exception:
             log.exception("plan_sync_failed")
+            await lifecycle_module.recover_failed_session(session)
             # Re-fetch task in case the session was invalidated
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
@@ -360,6 +363,7 @@ async def sync_range(ctx: dict[str, Any], sync_task_id: str) -> None:
 
         except Exception:
             log.exception("sync_range_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, sync_task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -474,6 +478,7 @@ async def run_bulk_job(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("bulk_job_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -588,6 +593,7 @@ async def backfill_mbids(ctx: dict[str, Any], task_id: str) -> None:
             log.info("mbid_backfill_done", result=result)
         except Exception:
             log.exception("mbid_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -660,6 +666,7 @@ async def backfill_popularity(ctx: dict[str, Any], task_id: str) -> None:
             log.info("popularity_backfill_done", result=result)
         except Exception:
             log.exception("popularity_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -715,6 +722,7 @@ async def backfill_genres(ctx: dict[str, Any], task_id: str) -> None:
             log.info("genre_backfill_done", result=result)
         except Exception:
             log.exception("genre_backfill_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -1085,6 +1093,7 @@ async def generate_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("generate_playlist_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -1250,6 +1259,7 @@ async def discover_tracks_for_artist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("discover_tracks_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -1332,9 +1342,21 @@ async def _resolve_adjacent_artists(
     # per neighbor (a later provider may supply an MBID an earlier one lacked).
     fetch = neighbor_fetch or _default_neighbor_fetch
     ordered: dict[str, dict[str, str | None]] = {}
+    dry: set[int] = set()
     for artist in target_artists:
         for connector in connectors:
-            neighbors = await fetch(connector, artist, per_artist_limit)
+            if id(connector) in dry:
+                continue
+            try:
+                neighbors = await fetch(connector, artist, per_artist_limit)
+            except base_module.RateLimitExceededError:
+                # Throttled: treat as run dry (the partial-success path).
+                logger.warning(
+                    "adjacent_fetch_rate_limited",
+                    connector=type(connector).__name__,
+                )
+                dry.add(id(connector))
+                continue
             for neighbor in neighbors:
                 name = neighbor.get("name")
                 if not name:
@@ -1971,6 +1993,7 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("enrich_related_artists_failed")
+            await lifecycle_module.recover_failed_session(session)
             if task is not None:
                 await lifecycle_module.fail_task(session, task, traceback.format_exc())
                 await session.commit()
@@ -2372,6 +2395,7 @@ async def score_and_build_playlist(ctx: dict[str, Any], task_id: str) -> None:
 
         except Exception:
             log.exception("score_and_build_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -2802,6 +2826,7 @@ async def export_playlist(ctx: dict[str, Any], task_id: str) -> None:
                 await session.commit()
         except Exception:
             log.exception("export_playlist_failed")
+            await lifecycle_module.recover_failed_session(session)
             task_reload = await _load_task(session, task_id)
             if task_reload is not None:
                 await lifecycle_module.fail_task(
@@ -3271,6 +3296,25 @@ def _lease_recovery(wctx: WorkerContext) -> reaper_module.LeaseRecovery:
     return reaper_module.LeaseRecovery(settings.task_lease_recovery)
 
 
+WORKER_APPLICATION_NAME_PREFIX = "resonance-worker"
+
+
+def worker_server_settings(settings: config_module.Settings) -> dict[str, str]:
+    """Postgres session parameters for every worker connection.
+
+    ``application_name`` tags the backend as this worker process so a lock
+    holder can be traced to (and terminated for) a specific pod; Postgres
+    truncates it to 63 bytes.
+    """
+    timeout_ms = settings.worker_idle_tx_timeout_seconds * 1000
+    return {
+        "idle_in_transaction_session_timeout": str(timeout_ms),
+        "application_name": (
+            f"{WORKER_APPLICATION_NAME_PREFIX}:{socket.gethostname()}:{os.getpid()}"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # arq startup / shutdown hooks
 # ---------------------------------------------------------------------------
@@ -3289,7 +3333,9 @@ async def startup(ctx: dict[str, Any]) -> None:
     settings = config_module.Settings()
     logging_module.configure_logging(settings.log_level)
 
-    engine = database_module.create_async_engine(settings)
+    engine = database_module.create_async_engine(
+        settings, server_settings=worker_server_settings(settings)
+    )
     session_factory = database_module.create_session_factory(engine)
 
     # Fail fast if the DB schema is behind this image's migrations, rather than
