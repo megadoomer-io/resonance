@@ -463,6 +463,85 @@ class TestRepointArtist:
         assert out["exclude_artist_ids"] == [str(new)]
         assert out["exclude_track_ids"] == ["t"]
 
+    def test_collapses_duplicate_sources_enabled_wins_manual_seed_wins(self) -> None:
+        old, new = uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {
+            "sources": [
+                {
+                    "kind": "artist",
+                    "artist_id": str(new),
+                    "enabled": False,
+                    "via_seed": "lineup",
+                },
+                {"kind": "artist", "artist_id": str(old), "enabled": True},
+            ],
+            "exclude_artist_ids": [],
+        }
+
+        out = pool_module.repoint_artist(refs, old, new)
+
+        assert out is not None
+        assert out["sources"] == [
+            {"kind": "artist", "artist_id": str(new), "enabled": True}
+        ]
+
+    def test_collapse_keeps_seed_when_both_seeded(self) -> None:
+        old, new = uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {
+            "sources": [
+                {"kind": "artist", "artist_id": str(old), "via_seed": "lineup"},
+                {"kind": "artist", "artist_id": str(new), "via_seed": "s2"},
+            ],
+        }
+        out = pool_module.repoint_artist(refs, old, new)
+        assert out is not None
+        assert out["sources"] == [
+            {
+                "kind": "artist",
+                "artist_id": str(new),
+                "via_seed": "lineup",
+                "enabled": True,
+            }
+        ]
+
+    def test_include_of_winner_drops_losers_exclude(self) -> None:
+        old, new, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {
+            "sources": [{"kind": "artist", "artist_id": str(new), "enabled": True}],
+            "exclude_artist_ids": [str(old), str(other)],
+        }
+        out = pool_module.repoint_artist(refs, old, new)
+        assert out is not None
+        assert out["exclude_artist_ids"] == [str(other)]
+
+    def test_explicit_exclude_of_winner_stays(self) -> None:
+        old, new = uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {
+            "sources": [{"kind": "artist", "artist_id": str(new)}],
+            "exclude_artist_ids": [str(old), str(new)],
+        }
+        out = pool_module.repoint_artist(refs, old, new)
+        assert out is not None
+        assert out["exclude_artist_ids"] == [str(new)]
+
+    def test_exclude_without_include_moves_to_winner(self) -> None:
+        old, new = uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {"sources": [], "exclude_artist_ids": [str(old)]}
+        out = pool_module.repoint_artist(refs, old, new)
+        assert out is not None
+        assert out["exclude_artist_ids"] == [str(new)]
+
+    def test_self_seed_becomes_plain_source(self) -> None:
+        old, new = uuid.uuid4(), uuid.uuid4()
+        refs: dict[str, object] = {
+            "sources": [
+                {"kind": "artist", "artist_id": str(new), "via_seed": str(old)}
+            ],
+        }
+        out = pool_module.repoint_artist(refs, old, new)
+        assert out is not None
+        assert out["sources"] == [{"kind": "artist", "artist_id": str(new)}]
+
     def test_returns_none_when_unreferenced(self) -> None:
         refs: dict[str, object] = {
             "sources": [

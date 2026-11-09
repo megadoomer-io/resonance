@@ -67,6 +67,11 @@ class TestNormalizedMbid:
         links = {"musicbrainz": {"id": "  "}, "listenbrainz": "old"}
         assert artist_utils.normalized_mbid(links) == "old"
 
+    def test_flat_musicbrainz_string_between_canonical_and_legacy(self) -> None:
+        assert artist_utils.normalized_mbid({"musicbrainz": " FLAT "}) == "flat"
+        links = {"musicbrainz": "flat", "listenbrainz": "old"}
+        assert artist_utils.normalized_mbid(links) == "flat"
+
     def test_legacy_dict_is_not_an_mbid(self) -> None:
         assert artist_utils.normalized_mbid({"listenbrainz": {"id": "x"}}) is None
 

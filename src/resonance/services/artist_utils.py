@@ -50,20 +50,24 @@ def normalize_mbid(value: str | None) -> str | None:
     return normalized or None
 
 
-def normalized_mbid(service_links: dict[str, Any] | None) -> str | None:
-    """The artist MBID compared for uniqueness: canonical, else legacy flat.
+MBID_KEYS = ("musicbrainz", "listenbrainz")
 
-    Blank values are skipped and only a string legacy value counts, matching
+
+def normalized_mbid(service_links: dict[str, Any] | None) -> str | None:
+    """The artist MBID compared for uniqueness, trimmed and lowercased.
+
+    Precedence: ``musicbrainz.id`` (canonical), then a flat ``musicbrainz``
+    string, then the legacy flat ``listenbrainz`` string. No writer produces the
+    flat ``musicbrainz`` shape, but the sync's MBID cross-check treats it as one,
+    so it counts here too. Blank or non-string values are skipped. Matches
     ``services.artist_mbid.normalized_mbid_expr``.
     """
     if not service_links:
         return None
     mb = service_links.get("musicbrainz")
-    if isinstance(mb, dict):
-        canonical = mb.get("id")
-        if isinstance(canonical, str) and (found := normalize_mbid(canonical)):
+    candidates = [mb.get("id") if isinstance(mb, dict) else mb]
+    candidates.append(service_links.get("listenbrainz"))
+    for value in candidates:
+        if isinstance(value, str) and (found := normalize_mbid(value)):
             return found
-    lb = service_links.get("listenbrainz")
-    if isinstance(lb, str):
-        return normalize_mbid(lb)
     return None
