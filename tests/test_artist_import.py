@@ -17,6 +17,9 @@ def _session_returning(scalar: object) -> MagicMock:
     session = MagicMock()
     session.execute = AsyncMock(return_value=result)
     session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.begin_nested.return_value.__aenter__ = AsyncMock()
+    session.begin_nested.return_value.__aexit__ = AsyncMock(return_value=False)
     return session
 
 
@@ -91,7 +94,9 @@ class TestImportArtistByMbid:
         assert result.begin_year == 2005
         assert result.end_year is None
         assert result.service_links == {"musicbrainz": {"id": "mbid-new"}}
-        session.flush.assert_awaited_once()
+        session.begin_nested.assert_called_once()
+        # Committed before the MusicBrainz call and after the insert (#199).
+        assert session.commit.await_count == 2
 
     @pytest.mark.anyio()
     async def test_blank_optional_fields_become_none(self) -> None:
@@ -128,4 +133,23 @@ class TestImportArtistByMbid:
 
         assert result is None
         session.add.assert_not_called()
-        session.flush.assert_not_awaited()
+        session.begin_nested.assert_not_called()
+
+    @pytest.mark.anyio()
+    async def test_concurrent_import_during_fetch_is_reused(self) -> None:
+        """An artist imported by another writer while we fetched is returned (#199)."""
+        winner = MagicMock(spec=music_models.Artist)
+        session = _session_returning(None)
+        first, second = MagicMock(), MagicMock()
+        first.scalar_one_or_none.return_value = None
+        second.scalar_one_or_none.return_value = winner
+        session.execute = AsyncMock(side_effect=[first, second])
+        connector = AsyncMock()
+        connector.get_artist_by_mbid.return_value = {"name": "Elder"}
+
+        result = await artist_import_module.import_artist_by_mbid(
+            session, connector, "mbid-race"
+        )
+
+        assert result is winner
+        session.add.assert_not_called()

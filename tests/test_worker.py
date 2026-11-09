@@ -4479,6 +4479,31 @@ class TestFetchSimilarWithStore:
         connector.get_similar_artists.assert_awaited_once()
         assert out == [{"name": "Fresh", "mbid": "m2"}]
 
+    @pytest.mark.asyncio
+    async def test_commits_around_the_live_fetch(self) -> None:
+        """No transaction is open across the connector call (#199)."""
+        now = datetime.datetime.now(datetime.UTC)
+        events: list[str] = []
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+        session.commit.side_effect = lambda: events.append("commit")
+        connector = AsyncMock()
+        connector.service_type = types_module.ServiceType.LISTENBRAINZ
+
+        async def _fetch(*_: Any, **__: Any) -> list[dict[str, Any]]:
+            events.append("fetch")
+            return [{"name": "Elder", "mbid": "m1"}]
+
+        connector.get_similar_artists.side_effect = _fetch
+
+        await worker_module._fetch_similar_with_store(
+            session, connector, _artist_ns(), limit=30, now=now
+        )
+
+        assert events == ["commit", "fetch", "commit"]
+
 
 class TestCollectRelated:
     """_collect_related: early-stop, library-first, import top-up."""
@@ -4810,9 +4835,16 @@ class TestEnrichRelatedArtists:
             artists_res,
             _genre_pairs_res([]),
         ]
-        # Commits in order: phase-0 RUNNING, phase-1 edges, phase-2 attempt 0
-        # (conflict), phase-2 attempt 1 (succeeds after reload + merge).
-        session.commit.side_effect = [None, None, orm_exc.StaleDataError("x"), None]
+        # Phase 1 commits freely; the first phase-2 commit (the one carrying the
+        # COMPLETED task) conflicts, the retry after reload + merge succeeds.
+        conflicted: list[bool] = []
+
+        async def _commit() -> None:
+            if task.status == types_module.SyncStatus.COMPLETED and not conflicted:
+                conflicted.append(True)
+                raise orm_exc.StaleDataError("x")
+
+        session.commit.side_effect = _commit
 
         async def _refresh(obj: Any) -> None:
             # Simulate the concurrent editor: a manual artist was added and the

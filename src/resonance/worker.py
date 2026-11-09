@@ -1442,7 +1442,7 @@ async def _import_adjacent_candidates(
     candidate order, deduped against ``exclude_ids`` and each other.
 
     Args:
-        session: Async DB session (the caller owns the transaction/commit).
+        session: Async DB session; each import commits on its own (#199).
         connector: Connector exposing ``get_artist_by_mbid`` (ListenBrainz).
         candidates: ``(name, mbid)`` import candidates in similarity rank.
         limit: Max number of candidates to import this generation.
@@ -1497,6 +1497,9 @@ async def _fetch_similar_with_store(
     and fresh (younger than :data:`_SIMILARITY_REFRESH_AGE`); otherwise the
     connector is queried live and the edges are replaced. Durable domain data,
     not a cache: ``fetched_at`` drives refresh, never eviction.
+
+    Commits before the live fetch and after replacing the edges, so no
+    transaction (or row lock) is held across the external call (#199).
     """
     service = connector.service_type
     stored = await session.execute(
@@ -1511,6 +1514,7 @@ async def _fetch_similar_with_store(
     if rows and rows[0].fetched_at > now - _SIMILARITY_REFRESH_AGE:
         return [{"name": r.neighbor_name, "mbid": r.neighbor_mbid} for r in rows]
 
+    await session.commit()
     mbid = artist_utils.get_mbid(artist.service_links)
     neighbors = list(
         await connector.get_similar_artists(artist.name, mbid=mbid, limit=limit)
@@ -1537,6 +1541,7 @@ async def _fetch_similar_with_store(
                 fetched_at=now,
             )
         )
+    await session.commit()
     return neighbors
 
 
@@ -1679,6 +1684,7 @@ async def _collect_related(
         # in-library picks); the guard applies only to the imported expansion, which
         # is where an off-genre seed does the most damage.
         if genre_client is not None and seed_tag_lists is not None:
+            await session.commit()
             import_candidates = await _genre_rank_candidates(
                 genre_client, import_candidates, seed_tag_lists
             )
@@ -1856,6 +1862,10 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                 log.info("enrich_related_artists_no_connector")
                 return
 
+            # Phase 1 commits before every external call so it never holds row
+            # locks on the shared artist/tag/similarity tables across one (#199).
+            await session.commit()
+
             lb_connector = wctx["connector_registry"].get_base_connector(
                 types_module.ServiceType.LISTENBRAINZ
             )
@@ -1870,12 +1880,11 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
 
             settings = wctx["settings"]
 
-            # Phase 1: resolve each scope's new artists, persisting similarity
-            # edges + any imported artists. Commit so that work survives a later
-            # optimistic-version retry on the profile row.
+            # Phase 1: resolve each scope's new artists. Tags, similarity edges
+            # and imported artists are durable facts, committed as they are
+            # fetched; only the profile write in phase 2 is atomic.
             scope_results: list[tuple[str, list[uuid.UUID]]] = []
             running_pool_ids = set(current_pool_ids)
-            total_found = 0
             # Genre guard (#153): a shared on-demand tags client for both halves --
             # ensuring the seeds/core have genre tags (fetch+persist any that missed
             # the scheduled backfill) and fetching import-candidate tags by MBID so
@@ -1885,13 +1894,12 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             ) as genre_client:
                 seed_artists_all = [a for _, seeds, _ in scope_plans for a in seeds]
                 # Best-effort: a tag-endpoint outage degrades to unguarded ranking.
-                # No commit here -- the freshly-persisted tags are visible to the
-                # _load_genre_pairs read within this same session, and they ride the
-                # phase-1 commit below (atomic with the edges/imports, so a later
-                # failure rolls the stamp back and they are re-fetched next run).
+                # Tags and their genre_attempted_at stamp are written together, so
+                # committing them before the next external call is safe.
                 await backfill_module.fetch_and_persist_tags(
                     session, genre_client, seed_artists_all
                 )
+                await session.commit()
                 genre_pairs_by_id = await _load_genre_pairs(
                     session, [a.id for a in seed_artists_all]
                 )
@@ -1928,8 +1936,6 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     )
                     scope_results.append((scope, new_ids))
                     running_pool_ids |= set(new_ids)
-                    total_found += len(new_ids)
-                await session.commit()
 
             # Phase 2: apply the discovered artists to the profile under optimistic
             # concurrency. If a concurrent writer (editor PATCH, CLI, agent)
@@ -1938,7 +1944,9 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             # then retry.
             for attempt in range(_MAX_VERSION_RETRIES):
                 merged: dict[str, object] = dict(profile.input_references)
+                total_found = 0
                 for scope, new_ids in scope_results:
+                    total_found += len(new_ids)
                     if not new_ids:
                         continue  # no-op top-up: leave the scope's discoveries
                     # Top-up (append), not replace: recompute the scope's current
