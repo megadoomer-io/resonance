@@ -1954,8 +1954,12 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
             # then retry.
             for attempt in range(_MAX_VERSION_RETRIES):
                 merged: dict[str, object] = dict(profile.input_references)
+                # Phase 1 ran outside any transaction: an exclude a concurrent
+                # writer added meanwhile (seen here after a reload) must win.
+                excluded_now = pool_module.extract_excludes(merged)
                 total_found = 0
-                for scope, new_ids in scope_results:
+                for scope, found_ids in scope_results:
+                    new_ids = [nid for nid in found_ids if nid not in excluded_now]
                     total_found += len(new_ids)
                     if not new_ids:
                         continue  # no-op top-up: leave the scope's discoveries

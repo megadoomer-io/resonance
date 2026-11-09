@@ -4893,6 +4893,85 @@ class TestEnrichRelatedArtists:
         session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_exclude_added_mid_run_is_not_applied(self) -> None:
+        """An artist the user excludes while phase 1 runs is dropped on merge (#199)."""
+        import sqlalchemy.orm.exc as orm_exc
+
+        core_id = uuid.uuid4()
+        kept, excluded = uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=core_id)]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+        )
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [
+            _artist_ns("Core", id=core_id)
+        ]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
+        conflicted: list[bool] = []
+
+        async def _commit() -> None:
+            if task.status == types_module.SyncStatus.COMPLETED and not conflicted:
+                conflicted.append(True)
+                raise orm_exc.StaleDataError("x")
+
+        session.commit.side_effect = _commit
+
+        async def _refresh(obj: Any) -> None:
+            if obj is profile:  # the editor excluded one discovery meanwhile
+                profile.input_references = pool_module.serialize_input_references(
+                    [pool_module.ArtistSource(artist_id=core_id)],
+                    exclude_ids=[excluded],
+                )
+
+        session.refresh = AsyncMock(side_effect=_refresh)
+
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=core_id, via=pool_module.PoolProvenance.ARTIST
+                        )
+                    ]
+                ),
+            ),
+            patch.object(
+                worker_module,
+                "_collect_related",
+                AsyncMock(return_value=[kept, excluded]),
+            ),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        lineup = set(pool_module.scope_artist_ids(profile.input_references, "lineup"))
+        assert lineup == {kept}
+        assert task.result["found"] == 1
+        assert pool_module.extract_excludes(profile.input_references) == {excluded}
+
+    @pytest.mark.asyncio
     async def test_top_up_fetches_only_the_difference_and_appends(self) -> None:
         """A scope with prior discoveries tops up to N: fetch only N - active and
         append (keep the priors), never replace them."""
