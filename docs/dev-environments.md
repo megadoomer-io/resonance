@@ -167,3 +167,21 @@ the older app can still start and fix the data through its API.
 make dev-down ENV=demo    # apps, containers, volume, worktrees, state
 make dev-status           # confirm it's gone
 ```
+
+### Leftover Docker volumes
+
+Every Docker volume these targets, the default `make dev-*` stack, test runs or
+agent worktrees create holds disposable dev data, so deleting it is always
+safe. That includes the default stack's `<project>_resonance-pgdata18` and
+volumes from older compose files (`*_resonance-pgdata`). Real data lives only in
+the cluster, never in a local volume.
+
+Volumes outlive the checkout or worktree that created them. To find and remove
+the unused ones:
+
+```bash
+for v in $(docker volume ls -q | grep resonance-pgdata); do
+  [ -z "$(docker ps -aq --filter volume="$v")" ] && echo "$v"
+done                       # unused volumes
+docker volume rm <name>... # remove them
+```

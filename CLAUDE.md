@@ -39,6 +39,9 @@ Add `ENV=<name>` for a separate, disposable environment that can run several
 git refs against one database (`dev-app`, `dev-env`, `dev-status`), seeded via
 `resonance-api seed`: see [docs/dev-environments.md](docs/dev-environments.md).
 
+Local Docker volumes only ever hold dev or test data, so an unused one is safe
+to delete without asking (see "Leftover Docker volumes" in that doc).
+
 ## Development Commands
 
 ```bash
