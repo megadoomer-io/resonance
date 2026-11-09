@@ -49,3 +49,28 @@ class TestHasMbid:
 
     def test_false_for_non_mbid_keys(self) -> None:
         assert artist_utils.has_mbid({"spotify": "some-id"}) is False
+
+
+class TestNormalizedMbid:
+    def test_canonical_lowercased_and_trimmed(self) -> None:
+        links = {"musicbrainz": {"id": "  ABC-123 "}}
+        assert artist_utils.normalized_mbid(links) == "abc-123"
+
+    def test_legacy_flat_string(self) -> None:
+        assert artist_utils.normalized_mbid({"listenbrainz": "ABC"}) == "abc"
+
+    def test_canonical_wins_over_legacy(self) -> None:
+        links = {"musicbrainz": {"id": "new"}, "listenbrainz": "old"}
+        assert artist_utils.normalized_mbid(links) == "new"
+
+    def test_blank_canonical_falls_back_to_legacy(self) -> None:
+        links = {"musicbrainz": {"id": "  "}, "listenbrainz": "old"}
+        assert artist_utils.normalized_mbid(links) == "old"
+
+    def test_legacy_dict_is_not_an_mbid(self) -> None:
+        assert artist_utils.normalized_mbid({"listenbrainz": {"id": "x"}}) is None
+
+    def test_none_and_blank(self) -> None:
+        assert artist_utils.normalized_mbid(None) is None
+        assert artist_utils.normalized_mbid({"listenbrainz": ""}) is None
+        assert artist_utils.normalized_mbid({"listenbrainz": None}) is None
