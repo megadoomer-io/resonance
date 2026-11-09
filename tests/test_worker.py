@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import arq.jobs as arq_jobs
 import pytest
+import sqlalchemy.dialects.postgresql as postgresql
 
 import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_module
-import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.services.artist_tags as artist_tags_module
 import resonance.sync.base as sync_base
@@ -4452,11 +4452,11 @@ class TestFetchSimilarWithStore:
 
         connector.get_similar_artists.assert_awaited_once()
         assert out == [{"name": "Elder", "mbid": "m1"}, {"name": "", "mbid": "skip"}]
-        added = [c.args[0] for c in session.add.call_args_list]
-        assert len(added) == 1  # only the named neighbor recorded
-        assert isinstance(added[0], taste_models.ArtistSimilarity)
-        assert added[0].neighbor_name == "Elder"
-        assert added[0].rank == 0
+        insert = session.execute.await_args_list[-1].args[0]
+        params = insert.compile(dialect=postgresql.dialect()).params
+        assert params["neighbor_name_m0"] == "Elder"  # only the named neighbor
+        assert params["rank_m0"] == 0
+        assert "neighbor_name_m1" not in params
 
     @pytest.mark.asyncio
     async def test_stale_edges_trigger_refetch(self) -> None:

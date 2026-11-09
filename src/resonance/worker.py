@@ -32,6 +32,7 @@ import arq
 import arq.connections as arq_connections
 import httpx
 import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as pg_dialect
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 import sqlalchemy.orm.exc as orm_exc
@@ -1527,18 +1528,27 @@ async def _fetch_similar_with_store(
             taste_models.ArtistSimilarity.connector == service,
         )
     )
-    for rank, neighbor in enumerate(neighbors):
-        name = neighbor.get("name")
-        if not name:
-            continue
-        session.add(
-            taste_models.ArtistSimilarity(
-                source_artist_id=artist.id,
-                connector=service,
-                neighbor_name=name,
-                neighbor_mbid=neighbor.get("mbid") or None,
-                rank=rank,
-                fetched_at=now,
+    edges = [
+        {
+            "id": uuid.uuid4(),
+            "source_artist_id": artist.id,
+            "connector": service,
+            "neighbor_name": name,
+            "neighbor_mbid": neighbor.get("mbid") or None,
+            "rank": rank,
+            "fetched_at": now,
+        }
+        for rank, neighbor in enumerate(neighbors)
+        if (name := neighbor.get("name"))
+    ]
+    if edges:
+        # A concurrent refresh of the same source can insert after our delete;
+        # its edges are as fresh as ours.
+        await session.execute(
+            pg_dialect.insert(taste_models.ArtistSimilarity)
+            .values(edges)
+            .on_conflict_do_nothing(
+                constraint="uq_artist_similarities_source_connector_neighbor"
             )
         )
     await session.commit()
