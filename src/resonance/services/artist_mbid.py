@@ -1,8 +1,9 @@
 """Find artists that share a MusicBrainz artist MBID (#203).
 
-An artist's MBID is read from the canonical ``service_links["musicbrainz"]["id"]``
-or, failing that, the legacy flat ``service_links["listenbrainz"]`` string,
-trimmed and lowercased. ``artist_utils.normalized_mbid`` is the Python twin.
+An artist's MBID is the canonical ``service_links["musicbrainz"]["id"]``, else a
+flat ``service_links["musicbrainz"]`` string, else the legacy flat
+``service_links["listenbrainz"]`` string, trimmed and lowercased.
+``artist_utils.normalized_mbid`` is the Python twin.
 """
 
 from __future__ import annotations
@@ -33,9 +34,11 @@ def _string_or_null(element: Any) -> sa.ColumnElement[str]:
 def normalized_mbid_expr() -> sa.ColumnElement[str]:
     """SQL for an artist's normalized MBID (Postgres; ``service_links`` is json)."""
     links = music_models.Artist.service_links
-    canonical = _string_or_null(links["musicbrainz"]["id"])
-    legacy = _string_or_null(links["listenbrainz"])
-    return sa.func.coalesce(canonical, legacy)
+    return sa.func.coalesce(
+        _string_or_null(links["musicbrainz"]["id"]),
+        _string_or_null(links["musicbrainz"]),
+        _string_or_null(links["listenbrainz"]),
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -45,6 +48,11 @@ class DuplicateArtist:
     id: uuid.UUID
     name: str
     created_at: datetime.datetime
+
+
+def name_key(name: str) -> str:
+    """Case- and whitespace-insensitive name, for "same artist, same name" checks."""
+    return " ".join(name.split()).lower()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,6 +65,23 @@ class MbidDuplicateGroup:
     @property
     def count(self) -> int:
         return len(self.artists)
+
+    @property
+    def names_differ(self) -> bool:
+        """True when the names differ; dedup leaves these for manual review."""
+        return len({name_key(a.name) for a in self.artists}) > 1
+
+
+@dataclasses.dataclass(frozen=True)
+class NameConflictGroup:
+    """Artists sharing a name (as the name dedup groups them) but not an MBID.
+
+    The name dedup skips merging these: they are distinct MusicBrainz artists
+    that happen to share a name.
+    """
+
+    name: str
+    artists: list[tuple[DuplicateArtist, str]]
 
 
 def _duplicate_mbids() -> sa.Select[tuple[str]]:
@@ -74,6 +99,36 @@ async def count_mbid_duplicate_groups(session: sa_async.AsyncSession) -> int:
     """Number of distinct MBIDs held by more than one artist."""
     stmt = sa.select(sa.func.count()).select_from(_duplicate_mbids().subquery())
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def find_name_conflicts(
+    session: sa_async.AsyncSession,
+) -> list[NameConflictGroup]:
+    """Name-duplicate groups holding two or more different MBIDs."""
+    mbid = normalized_mbid_expr()
+    lname = sa.func.lower(music_models.Artist.name)
+    conflicted = (
+        sa.select(lname)
+        .where(mbid.isnot(None))
+        .group_by(lname)
+        .having(sa.func.count(sa.distinct(mbid)) > 1)
+    )
+    stmt = (
+        sa.select(
+            lname.label("lname"),
+            mbid.label("mbid"),
+            music_models.Artist.id,
+            music_models.Artist.name,
+            music_models.Artist.created_at,
+        )
+        .where(lname.in_(conflicted), mbid.isnot(None))
+        .order_by(lname, music_models.Artist.created_at, music_models.Artist.id)
+    )
+    groups: dict[str, list[tuple[DuplicateArtist, str]]] = {}
+    for row in (await session.execute(stmt)).all():
+        artist = DuplicateArtist(id=row.id, name=row.name, created_at=row.created_at)
+        groups.setdefault(row.lname, []).append((artist, row.mbid))
+    return [NameConflictGroup(name=k, artists=v) for k, v in groups.items()]
 
 
 async def find_mbid_duplicate_groups(

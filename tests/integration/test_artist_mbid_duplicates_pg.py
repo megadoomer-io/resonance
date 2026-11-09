@@ -81,6 +81,16 @@ async def test_case_and_whitespace_are_normalized(pg_task_db: TaskDB) -> None:
     assert await _groups(pg_task_db) == {"abcd-ef": [upper, lower]}
 
 
+async def test_flat_musicbrainz_string_counts(pg_task_db: TaskDB) -> None:
+    flat, legacy = await _artists(
+        pg_task_db,
+        ("F", {"musicbrainz": "FLAT-1", "listenbrainz": "other"}),
+        ("G", {"listenbrainz": "flat-1"}),
+    )
+
+    assert await _groups(pg_task_db) == {"flat-1": [flat, legacy]}
+
+
 async def test_canonical_wins_over_a_different_legacy_value(
     pg_task_db: TaskDB,
 ) -> None:
@@ -116,11 +126,11 @@ async def test_artists_without_an_mbid_are_ignored(pg_task_db: TaskDB) -> None:
 
 
 async def test_dedup_merges_an_mbid_group(pg_task_db: TaskDB) -> None:
-    """Different names, same MBID: one artist survives with every reference."""
+    """Same MBID, names equal but for case and spacing: one artist survives."""
     keeper, dup = await _artists(
         pg_task_db,
         ("Elder", {"musicbrainz": {"id": "e-mbid"}, "lastfm": "elder"}),
-        ("ELDER (band)", {"listenbrainz": "E-MBID", "spotify": {"id": "sp"}}),
+        ("  ELDER ", {"listenbrainz": "E-MBID", "spotify": {"id": "sp"}}),
     )
     user = user_models.User(id=uuid.uuid4(), display_name="t")
     profile_id = uuid.uuid4()
@@ -165,3 +175,22 @@ async def test_dedup_merges_an_mbid_group(pg_task_db: TaskDB) -> None:
         sources = profile.input_references["sources"]
         assert isinstance(sources, list)
         assert sources[0]["artist_id"] == str(keeper)
+
+
+async def test_mbid_group_with_different_names_is_left_for_review(
+    pg_task_db: TaskDB,
+) -> None:
+    a, b = await _artists(
+        pg_task_db,
+        ("Elder", {"musicbrainz": {"id": "e-mbid"}}),
+        ("Elder (band)", {"listenbrainz": "e-mbid"}),
+    )
+
+    async with pg_task_db.factory() as session:
+        stats = await dedup_module.find_and_merge_duplicate_artists(session)
+        report = await artist_mbid.find_mbid_duplicate_groups(session)
+
+    assert stats.artists_merged == 0
+    assert stats.groups_skipped == 1
+    assert [(g.mbid, g.names_differ) for g in report] == [("e-mbid", True)]
+    assert await _groups(pg_task_db) == {"e-mbid": [a, b]}
