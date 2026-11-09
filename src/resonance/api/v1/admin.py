@@ -142,32 +142,58 @@ async def get_db_stats(
         "events_total": events_total,
         "events_by_service": {row[0]: row[1] for row in events_by_svc.all()},
         "duplicate_artist_groups": dup_artists_result.scalar() or 0,
-        "mbid_duplicate_artist_groups": (
-            await artist_mbid_module.count_mbid_duplicate_groups(db)
-        ),
         "duplicate_track_groups": dup_tracks_result.scalar() or 0,
+        **await _mbid_duplicate_counts(db),
+    }
+
+
+async def _mbid_duplicate_counts(db: sa_async.AsyncSession) -> dict[str, int]:
+    groups = await artist_mbid_module.find_mbid_duplicate_groups(db)
+    return {
+        "mbid_duplicate_artist_groups": len(groups),
+        "mbid_duplicate_artist_groups_names_differ": sum(
+            1 for g in groups if g.names_differ
+        ),
+    }
+
+
+def _artist_json(artist: artist_mbid_module.DuplicateArtist) -> dict[str, str]:
+    return {
+        "id": str(artist.id),
+        "name": artist.name,
+        "created_at": artist.created_at.isoformat(),
     }
 
 
 async def get_mbid_duplicate_artists(db: sa_async.AsyncSession) -> dict[str, object]:
-    """Groups of artists sharing a normalized MusicBrainz MBID (#203)."""
+    """Artists sharing an MBID, and same-name artists with different MBIDs (#203).
+
+    ``groups`` with ``names_differ`` are not merged by dedup (manual review).
+    ``name_conflicts`` are same-name artists the name dedup won't merge because
+    their MBIDs differ.
+    """
     groups = await artist_mbid_module.find_mbid_duplicate_groups(db)
+    conflicts = await artist_mbid_module.find_name_conflicts(db)
     return {
         "group_count": len(groups),
         "groups": [
             {
                 "mbid": group.mbid,
                 "count": group.count,
-                "artists": [
-                    {
-                        "id": str(artist.id),
-                        "name": artist.name,
-                        "created_at": artist.created_at.isoformat(),
-                    }
-                    for artist in group.artists
-                ],
+                "names_differ": group.names_differ,
+                "artists": [_artist_json(a) for a in group.artists],
             }
             for group in groups
+        ],
+        "name_conflicts": [
+            {
+                "name": conflict.name,
+                "artists": [
+                    {**_artist_json(artist), "mbid": mbid}
+                    for artist, mbid in conflict.artists
+                ],
+            }
+            for conflict in conflicts
         ],
     }
 

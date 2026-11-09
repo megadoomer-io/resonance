@@ -220,11 +220,12 @@ def _cmd_stats() -> None:
         print(f"  {svc:15s} {count}")
     dup_a = data.get("duplicate_artist_groups", 0)
     dup_m = data.get("mbid_duplicate_artist_groups", 0)
+    dup_md = data.get("mbid_duplicate_artist_groups_names_differ", 0)
     dup_t = data.get("duplicate_track_groups", 0)
     if dup_a or dup_m or dup_t:
         print(
-            f"Duplicate groups: {dup_a} artists by name, {dup_m} by MBID,"
-            f" {dup_t} tracks"
+            f"Duplicate groups: {dup_a} artists by name, {dup_m} by MBID"
+            f" ({dup_md} with differing names), {dup_t} tracks"
         )
 
 
@@ -242,15 +243,24 @@ def _cmd_artists() -> None:
         print(json.dumps(data, indent=2))
         return
     groups = data.get("groups", [])
+    conflicts = data.get("name_conflicts", [])
     if not groups:
         print("No artists share an MBID.")
-        return
-    print(f"{len(groups)} MBID(s) shared by more than one artist:")
-    for group in groups:
-        print(f"\n{group['mbid']}  ({group['count']} artists)")
-        for artist in group["artists"]:
-            print(f"  {artist['id']}  {artist['name']}")
-    print("\nMerge with: resonance-api dedup artists")
+    else:
+        print(f"{len(groups)} MBID(s) shared by more than one artist:")
+        for group in groups:
+            flag = "  [names differ: review manually]" if group["names_differ"] else ""
+            print(f"\n{group['mbid']}  ({group['count']} artists){flag}")
+            for artist in group["artists"]:
+                print(f"  {artist['id']}  {artist['name']}")
+        print("\nMerge same-name groups with: resonance-api dedup artists")
+    if conflicts:
+        print(f"\n{len(conflicts)} name(s) shared by artists with different MBIDs")
+        print("(dedup does not merge these):")
+        for conflict in conflicts:
+            print(f"\n{conflict['name']}")
+            for artist in conflict["artists"]:
+                print(f"  {artist['id']}  {artist['mbid']}  {artist['name']}")
 
 
 def _cmd_sync() -> None:

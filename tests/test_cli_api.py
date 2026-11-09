@@ -1110,9 +1110,18 @@ class TestArtistsMbidDuplicates:
                 {
                     "mbid": "m1",
                     "count": 2,
+                    "names_differ": True,
                     "artists": [
                         {"id": "a1", "name": "Elder", "created_at": "x"},
                         {"id": "a2", "name": "elder", "created_at": "y"},
+                    ],
+                }
+            ],
+            "name_conflicts": [
+                {
+                    "name": "sleep",
+                    "artists": [
+                        {"id": "c1", "name": "Sleep", "mbid": "x1", "created_at": "x"},
                     ],
                 }
             ],
@@ -1136,6 +1145,8 @@ class TestArtistsMbidDuplicates:
         out = capsys.readouterr().out
         assert "m1" in out
         assert "a2  elder" in out
+        assert "names differ" in out
+        assert "c1  x1  Sleep" in out
 
     @pytest.mark.usefixtures("_mock_config")
     def test_reports_none(

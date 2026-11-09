@@ -441,7 +441,14 @@ class TestAdminStats:
                 FakeResult([]),  # events by service
                 FakeResult([3]),  # duplicate artist groups
                 FakeResult([7]),  # duplicate track groups
-                FakeResult([2]),  # MBID duplicate artist groups
+                FakeResult(  # MBID duplicate rows: one same-name, one names-differ
+                    [
+                        _MbidRow("m1", uuid.uuid4(), "Elder", _WHEN),
+                        _MbidRow("m1", uuid.uuid4(), "elder ", _WHEN),
+                        _MbidRow("m2", uuid.uuid4(), "Sleep", _WHEN),
+                        _MbidRow("m2", uuid.uuid4(), "Om", _WHEN),
+                    ]
+                ),
             ]
         )
         application = _make_bearer_app(db_session=db_session)
@@ -462,18 +469,37 @@ class TestAdminStats:
         assert "duplicate_artist_groups" in data
         assert "duplicate_track_groups" in data
         assert data["mbid_duplicate_artist_groups"] == 2
+        assert data["mbid_duplicate_artist_groups_names_differ"] == 1
+
+
+_MbidRow = collections.namedtuple("_MbidRow", ["mbid", "id", "name", "created_at"])
+_ConflictRow = collections.namedtuple(
+    "_ConflictRow", ["lname", "mbid", "id", "name", "created_at"]
+)
+_WHEN = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
 
 class TestAdminMbidDuplicates:
     """Tests for GET /api/v1/admin/artists/mbid-duplicates (#203)."""
 
     async def test_groups_rows_by_mbid(self) -> None:
-        Row = collections.namedtuple("Row", ["mbid", "id", "name", "created_at"])
-        when = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-        a, b = uuid.uuid4(), uuid.uuid4()
+        a, b, x, y = (uuid.uuid4() for _ in range(4))
         db_session = FakeAsyncSession()
         db_session.set_execute_results(
-            [FakeResult([Row("m1", a, "Elder", when), Row("m1", b, "elder", when)])]
+            [
+                FakeResult(
+                    [
+                        _MbidRow("m1", a, "Elder", _WHEN),
+                        _MbidRow("m1", b, "elder", _WHEN),
+                    ]
+                ),
+                FakeResult(
+                    [
+                        _ConflictRow("sleep", "x1", x, "Sleep", _WHEN),
+                        _ConflictRow("sleep", "x2", y, "SLEEP", _WHEN),
+                    ]
+                ),
+            ]
         )
         application = _make_bearer_app(db_session=db_session)
         transport = httpx.ASGITransport(app=application)
@@ -488,7 +514,14 @@ class TestAdminMbidDuplicates:
         group = data["groups"][0]
         assert group["mbid"] == "m1"
         assert group["count"] == 2
+        assert group["names_differ"] is False
         assert [x["id"] for x in group["artists"]] == [str(a), str(b)]
+        conflict = data["name_conflicts"][0]
+        assert conflict["name"] == "sleep"
+        assert [(x["id"], x["mbid"]) for x in conflict["artists"]] == [
+            (str(x), "x1"),
+            (str(y), "x2"),
+        ]
 
     async def test_requires_admin(self) -> None:
         application = _make_bearer_app()

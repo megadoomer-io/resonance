@@ -164,7 +164,12 @@ uv run resonance-api artists mbid-duplicates          # human-readable groups
 uv run resonance-api artists mbid-duplicates --json   # raw API response
 ```
 
-Read-only. Calls `GET /api/v1/admin/artists/mbid-duplicates` and lists every MusicBrainz MBID held by more than one artist, with each artist's id and name. The MBID is read from `service_links.musicbrainz.id`, or from the legacy flat `service_links.listenbrainz` string when the canonical one is missing, then trimmed and lowercased. Artists without an MBID are ignored. `stats` reports the same count as `mbid_duplicate_artist_groups`. Merge the groups with `resonance-api dedup artists`.
+Read-only. Calls `GET /api/v1/admin/artists/mbid-duplicates`, which reports two things:
+
+- `groups`: every MusicBrainz MBID held by more than one artist, with each artist's id and name. A group flagged `names_differ` has names that differ beyond case and spacing; `dedup artists` leaves those for manual review (merge them with the artist merge UI/API once confirmed).
+- `name_conflicts`: names shared by artists holding different MBIDs. These are distinct artists, and the name dedup never merges them.
+
+The MBID is read from `service_links.musicbrainz.id`, else a flat `service_links.musicbrainz` string, else the legacy flat `service_links.listenbrainz` string, trimmed and lowercased. Artists without an MBID are ignored. `stats` reports `mbid_duplicate_artist_groups` and `mbid_duplicate_artist_groups_names_differ`.
 
 #### `task` -- Monitor a Task
 
@@ -252,7 +257,14 @@ Duplicates appear for several reasons:
 
 **Event dedup** removes duplicate listening events. A duplicate is defined as the same user + track + timestamp combination. This is the most common type of duplicate and is automatically cleaned up after every successful sync.
 
-**Artist dedup** merges artist records in two passes: first those sharing a MusicBrainz MBID (normalized as in `artists mbid-duplicates`, so the names may differ), then those sharing a name (case-insensitive). When merging, tracks, user relations, event lineups, event candidates and generator-profile recipes (artist sources, enrichment seeds, artist excludes) move to the surviving record, and the duplicate is deleted. The survivor is the record with an MBID, then the one with more service links, then the oldest.
+**Artist dedup** merges artist records in two passes: first those sharing a MusicBrainz MBID whose names match ignoring case and spacing, then those sharing a name (case-insensitive). A name group holding two different MBIDs is skipped, and two artists with different MBIDs are never merged. The survivor is the record with an MBID, then the one with more service links, then the oldest. When merging:
+
+- tracks, user relations, event lineups and event candidates move to the survivor;
+- generator-profile recipes are rewritten: sources for the duplicate point at the survivor (two sources for one artist collapse into one, enabled if either was), and an exclusion of the duplicate is dropped if the recipe includes the survivor;
+- genre tags move only if the survivor has none; similarity edges move for connectors the survivor has none for;
+- service links are combined without changing the survivor's MBID, which is stored trimmed and lowercased.
+
+Each group commits on its own. A group that fails (for example, a profile edited during the run) is rolled back and counted in `groups_failed`; the rest of the run continues. The job result reports `groups_merged`, `groups_skipped` and `groups_failed`.
 
 **Track dedup** merges track records that share the same title (case-insensitive) and artist. Service links, events, and relations are consolidated onto the surviving record.
 
@@ -266,7 +278,7 @@ Run deduplication manually when:
 
 - You want to clean up artist or track duplicates (these are not auto-triggered).
 - You suspect the auto-dedup missed events (e.g., after a database restore or manual data import).
-- The `stats` command shows non-zero duplicate group counts (`duplicate_artist_groups` by name, `mbid_duplicate_artist_groups` by MBID).
+- The `stats` command shows non-zero duplicate group counts (`duplicate_artist_groups` by name, `mbid_duplicate_artist_groups` by MBID, of which `mbid_duplicate_artist_groups_names_differ` need manual review).
 
 Manual dedup is available through:
 
