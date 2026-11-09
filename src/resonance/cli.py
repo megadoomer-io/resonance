@@ -100,6 +100,7 @@ Commands:
   playlist export-retry <id> <task>  Retry a failed or stalled export
   watermark <service> [--reset] View or reset sync watermark (direct DB)
   import concert_archives      Import Concert Archives CSV
+  seed <file|->                Seed a scenario (dev environments only)
   api [METHOD] PATH [opts]     Raw API request (like gh api)
   set-role <user_id> <role>    Set user role (direct DB)
 """
@@ -1305,6 +1306,42 @@ Types:
 """
 
 
+_SEED_USAGE = """\
+Usage: resonance-api seed <file|->
+
+Posts one scenario JSON document (a file, or - for stdin) to
+/api/v1/admin/seed. The app must run with DEV_SEED_ENABLED=true.
+See docs/dev-environments.md for the scenario shape.
+"""
+
+
+def _cmd_seed() -> None:
+    args = sys.argv[2:]
+    if len(args) != 1 or args[0] in ("--help", "-h"):
+        print(_SEED_USAGE)
+        sys.exit(0 if args and args[0] in ("--help", "-h") else 1)
+    source = args[0]
+    try:
+        text = sys.stdin.read() if source == "-" else pathlib.Path(source).read_text()
+    except OSError as exc:
+        print(f"Error: cannot read {source}: {exc.strerror or exc}")
+        sys.exit(1)
+    try:
+        scenario = json.loads(text)
+    except json.JSONDecodeError as exc:
+        print(f"Error: scenario is not valid JSON: {exc}")
+        sys.exit(1)
+    resp = _send_request("POST", "/api/v1/admin/seed", json=scenario)
+    if resp.status_code == 404:
+        print("Error: seeding is disabled on this app (set DEV_SEED_ENABLED=true).")
+        sys.exit(1)
+    if resp.status_code >= 400:
+        print(f"Error: HTTP {resp.status_code}")
+        print(f"  {resp.text[:2000]}")
+        sys.exit(1)
+    print(json.dumps(resp.json(), indent=2))
+
+
 def _cmd_import() -> None:
     if len(sys.argv) < 3:
         print(_IMPORT_USAGE)
@@ -1758,6 +1795,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "playlist": ("Show or diff a playlist", _cmd_playlist),
     "watermark": ("View/reset sync watermark", _cmd_watermark),
     "import": ("Import data from external sources", _cmd_import),
+    "seed": ("Seed a scenario (dev environments only)", _cmd_seed),
     "api": ("Raw API request", _cmd_api),
     "set-role": ("Set user role (direct DB)", _cmd_set_role),
 }

@@ -1168,3 +1168,67 @@ class TestArtistsMbidDuplicates:
         with pytest.raises(SystemExit) as exc:
             cli_module._cmd_artists()
         assert exc.value.code == 1
+
+
+class TestSeedCommand:
+    """`resonance-api seed` posts a scenario file to the admin seed endpoint."""
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_posts_scenario_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        scenario = {"artists": [{"name": "A"}]}
+        path = tmp_path / "scenario.json"
+        path.write_text(json.dumps(scenario))
+        captured: dict[str, Any] = {}
+
+        def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            captured.update(method=method, url=url, json=kwargs.get("json"))
+            return _fake_response(json_body={"counts": {"artists": 1}})
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "seed", str(path)])
+        cli_module._cmd_seed()
+
+        assert captured == {
+            "method": "POST",
+            "url": "http://test-host/api/v1/admin/seed",
+            "json": scenario,
+        }
+        assert '"artists": 1' in capsys.readouterr().out
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_disabled_seed_exits_with_hint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = tmp_path / "scenario.json"
+        path.write_text("{}")
+        monkeypatch.setattr(
+            httpx,
+            "request",
+            lambda *a, **k: _fake_response(404, json_body={"detail": "Not Found"}),
+        )
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "seed", str(path)])
+        with pytest.raises(SystemExit):
+            cli_module._cmd_seed()
+        assert "DEV_SEED_ENABLED" in capsys.readouterr().out
+
+    @pytest.mark.usefixtures("_mock_config")
+    def test_missing_file_exits_with_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        path = tmp_path / "missing.json"
+        monkeypatch.setattr(sys, "argv", ["resonance-api", "seed", str(path)])
+        with pytest.raises(SystemExit) as exc:
+            cli_module._cmd_seed()
+        assert exc.value.code == 1
+        assert f"cannot read {path}" in capsys.readouterr().out
