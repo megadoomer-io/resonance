@@ -336,8 +336,10 @@ class BaseConnector(abc.ABC):
                 await asyncio.sleep(backoff)
                 continue
 
-            # Reset transient counter on successful response (even if 429)
-            transient_attempt = 0
+            # Any non-5xx answer (even a 429) proves the server is up, so it ends
+            # a run of consecutive transient failures; a 5xx extends the run.
+            if response.status_code < 500:
+                transient_attempt = 0
             self._budget.update_from_headers(dict(response.headers))
             self._budget.record_request()
             window_used = self._budget.window_used
