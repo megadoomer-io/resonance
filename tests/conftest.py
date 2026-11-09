@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import re
 import uuid
 import weakref
 from typing import TYPE_CHECKING, Any
@@ -12,7 +13,6 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import sqlalchemy.ext.asyncio as sa_async
-import sqlalchemy.orm as orm
 
 import resonance.models as models
 import resonance.models.task as task_models
@@ -122,39 +122,50 @@ class _WritesAcrossHttp:
     """State for :func:`no_writes_across_http`."""
 
     def __init__(self) -> None:
-        self.dirty: weakref.WeakKeyDictionary[orm.Session, asyncio.Task[Any] | None] = (
-            weakref.WeakKeyDictionary()
-        )
+        # Connection -> asyncio task holding its uncommitted write/lock. Keyed on
+        # the Connection itself: reading ``conn.connection`` in a commit/rollback
+        # event can revalidate it and check out another pooled connection.
+        self.held: weakref.WeakKeyDictionary[
+            sa.engine.Connection, asyncio.Task[Any] | None
+        ] = weakref.WeakKeyDictionary()
         self.violations: list[str] = []
 
-    def mark(self, session: orm.Session) -> None:
+    def mark(self, conn: sa.engine.Connection) -> None:
         try:
             owner: asyncio.Task[Any] | None = asyncio.current_task()
         except RuntimeError:
             owner = None
-        self.dirty.setdefault(session, owner)
+        self.held.setdefault(conn, owner)
 
-    def clear(self, session: orm.Session) -> None:
-        self.dirty.pop(session, None)
+    def clear(self, conn: sa.engine.Connection) -> None:
+        self.held.pop(conn, None)
 
     def check(self, request: httpx.Request) -> None:
         current = asyncio.current_task()
-        if any(owner is current for owner in self.dirty.values()):
+        if any(owner is current for owner in self.held.values()):
             self.violations.append(f"{request.method} {request.url}")
+
+
+_HOLDS_LOCKS = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|MERGE)\b|\bFOR\s+(NO\s+KEY\s+)?(UPDATE|SHARE)\b",
+    re.IGNORECASE,
+)
 
 
 @pytest.fixture
 def no_writes_across_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[_WritesAcrossHttp]:
-    """Fail the test if an HTTP request is sent while its task has uncommitted writes.
+    """Fail the test if an HTTP request is sent while its task holds row locks.
 
-    A session counts as written once it flushes, or once it executes a core
-    INSERT/UPDATE/DELETE through ``session.execute`` (which never flushes), and
-    stops counting at commit or rollback. Every outbound call (connectors, the
+    Listens at the connection level (``before_cursor_execute`` on every
+    ``Engine``), so ORM flushes, core statements, ``sa.text()`` DML and writes
+    through ``session.connection()`` are all seen. A connection counts as holding
+    locks after any INSERT/UPDATE/DELETE/MERGE or ``SELECT ... FOR UPDATE/SHARE``
+    until it commits or rolls back. Every outbound call (connectors, the
     artist-tags client, ``fetch_feed``) goes through ``httpx.AsyncClient.send``,
-    which is patched to record a violation when a written session belongs to the
-    sending asyncio task (other tasks, like the lease renewer, are ignored).
+    which is patched to record a violation when a holding connection belongs to
+    the sending asyncio task (other tasks, like the lease renewer, are ignored).
 
     Opt-in, not global: paged syncs (ListenBrainz, Last.fm, Spotify) flush a
     page's rows and fetch the next page before their per-page commit, which
@@ -163,24 +174,22 @@ def no_writes_across_http(
     """
     state = _WritesAcrossHttp()
 
-    def on_flush(session: orm.Session, _ctx: Any) -> None:
-        state.mark(session)
+    def on_execute(
+        conn: sa.engine.Connection, _cursor: Any, statement: str, *_: Any
+    ) -> None:
+        if _HOLDS_LOCKS.search(statement):
+            state.mark(conn)
 
-    def on_execute(orm_state: orm.ORMExecuteState) -> None:
-        if orm_state.is_insert or orm_state.is_update or orm_state.is_delete:
-            state.mark(orm_state.session)
-
-    def on_end(session: orm.Session, *_: Any) -> None:
-        state.clear(session)
+    def on_end(conn: sa.engine.Connection) -> None:
+        state.clear(conn)
 
     listeners: list[tuple[str, Any]] = [
-        ("after_flush", on_flush),
-        ("do_orm_execute", on_execute),
-        ("after_commit", on_end),
-        ("after_rollback", on_end),
+        ("before_cursor_execute", on_execute),
+        ("commit", on_end),
+        ("rollback", on_end),
     ]
     for name, fn in listeners:
-        sa.event.listen(orm.Session, name, fn)
+        sa.event.listen(sa.engine.Engine, name, fn)
 
     real_send = httpx.AsyncClient.send
 
@@ -195,7 +204,7 @@ def no_writes_across_http(
         yield state
     finally:
         for name, fn in listeners:
-            sa.event.remove(orm.Session, name, fn)
+            sa.event.remove(sa.engine.Engine, name, fn)
     assert not state.violations, (
-        f"HTTP sent with uncommitted writes: {state.violations}"
+        f"HTTP sent while holding row locks: {state.violations}"
     )
