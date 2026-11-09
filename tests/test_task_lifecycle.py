@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import sqlalchemy as sa
 
 import resonance.models.task as task_models
 import resonance.sync.lifecycle as lifecycle_module
@@ -165,6 +166,47 @@ def _scalars_result(values: list[task_models.Task]) -> MagicMock:
     result = MagicMock()
     result.scalars.return_value = scalars
     return result
+
+
+class TestRecoverFailedSession:
+    async def test_rolls_back_uncommitted_work(self, task_db: TaskDB) -> None:
+        task = await task_db.add(status=types_module.SyncStatus.RUNNING)
+        async with task_db.factory() as session:
+            row = await session.get(task_models.Task, task.id)
+            assert row is not None
+            row.progress_current = 3
+            await session.flush()
+
+            await lifecycle_module.recover_failed_session(session)
+
+            assert row.progress_current == 0  # refreshed from the database
+            await lifecycle_module.fail_task(session, row, "boom")
+            await session.commit()
+        stored = await task_db.get(task.id)
+        assert (stored.status, stored.progress_current) == (
+            types_module.SyncStatus.FAILED,
+            0,
+        )
+
+    async def test_failed_flush_is_recovered(self, task_db: TaskDB) -> None:
+        task = await task_db.add(status=types_module.SyncStatus.RUNNING)
+        async with task_db.factory() as session:
+            row = await session.get(task_models.Task, task.id)
+            assert row is not None
+            session.add(task_models.Task(id=uuid.uuid4(), task_type=None))
+            with pytest.raises(sa.exc.IntegrityError):
+                await session.flush()
+
+            await lifecycle_module.recover_failed_session(session)
+
+            await lifecycle_module.fail_task(session, row, "boom")
+            await session.commit()
+        assert (await task_db.get(task.id)).status == types_module.SyncStatus.FAILED
+
+    async def test_no_transaction_is_a_no_op(self, task_db: TaskDB) -> None:
+        async with task_db.factory() as session:
+            await lifecycle_module.recover_failed_session(session)
+            assert not session.in_transaction()
 
 
 class TestCancelTask:

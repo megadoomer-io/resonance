@@ -1,5 +1,6 @@
 import typing
 
+import pydantic
 import pydantic_settings
 
 # Placeholder values shipped as defaults. Safe for local dev, unsafe in
@@ -77,6 +78,11 @@ class Settings(pydantic_settings.BaseSettings):
     # Reaper handling of RUNNING tasks whose row lease expired (#183): "log"
     # records the decision only (rollout soak); "active" recovers the row.
     task_lease_recovery: typing.Literal["log", "active"] = "log"
+
+    # Worker connections only: Postgres ends a session left idle inside a
+    # transaction this long, releasing the row locks a frozen job holds (#197).
+    # Must exceed the longest legitimate gap between statements in a job.
+    worker_idle_tx_timeout_seconds: int = pydantic.Field(default=1800, ge=1)
 
     # Dex OIDC (GitHub identity via Dex broker)
     dex_client_id: str = ""

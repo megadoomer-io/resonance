@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import arq.jobs as arq_jobs
 import sqlalchemy as sa
+import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as orm
 import structlog
 
@@ -152,6 +153,30 @@ async def complete_task(
     task.status = types_module.SyncStatus.COMPLETED
     task.result = result
     task.completed_at = datetime.datetime.now(datetime.UTC)
+
+
+async def recover_failed_session(session: AsyncSession) -> None:
+    """Roll back a failed job's transaction so its session can record FAILED.
+
+    Call at the top of a job's failure handler. The failure may have left a
+    transaction that refuses every further statement: a connection the server
+    ended (``idle_in_transaction_session_timeout``), a failed flush, or a core
+    statement the server rejected (the session still reports active then). So
+    it always rolls back, dropping the job's uncommitted work, then reloads
+    the task rows the session holds so the handler can keep using them
+    (an async session can't lazy-load the expired attributes).
+    """
+    if not isinstance(session, sa_async.AsyncSession):
+        return  # a test double has no transaction
+    if not session.in_transaction():
+        return
+    await session.rollback()
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, task_models.Task):
+            try:
+                await session.refresh(obj)
+            except sa.exc.InvalidRequestError:
+                session.expunge(obj)  # the row is gone
 
 
 async def fail_task(

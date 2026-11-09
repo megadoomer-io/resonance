@@ -188,7 +188,7 @@ class TestRunGenreBackfill:
 
         assert counts.candidates == 2
         assert counts.updated == 2
-        assert session.commits == 2  # one per populated batch
+        assert session.commits == 4  # per populated batch: end of read + writes
 
 
 class _SimpleSession:
