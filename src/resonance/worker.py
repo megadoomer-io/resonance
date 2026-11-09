@@ -1983,11 +1983,19 @@ async def enrich_related_artists(ctx: dict[str, Any], task_id: str) -> None:
                     "found": total_found,
                     "requested": target_total,
                 }
+                dropped = sum(len(ids) for _, ids in scope_results) - total_found
+                if dropped:
+                    result_payload["dropped_excluded"] = dropped
                 if total_found < target_total:
                     # Partial success: the connectors had fewer fresh neighbors than
-                    # the top-up needed (neighbors exhausted).
+                    # the top-up needed, and/or the user excluded some mid-run.
+                    reasons = []
+                    if total_found + dropped < target_total:
+                        reasons.append("neighbors exhausted")
+                    if dropped:
+                        reasons.append(f"{dropped} dropped as excluded during the run")
                     result_payload["message"] = (
-                        f"found {total_found} of {target_total} (neighbors exhausted)"
+                        f"found {total_found} of {target_total} ({'; '.join(reasons)})"
                     )
                 await lifecycle_module.complete_task(
                     session,

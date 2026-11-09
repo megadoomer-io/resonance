@@ -4893,7 +4893,20 @@ class TestEnrichRelatedArtists:
         session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_exclude_added_mid_run_is_not_applied(self) -> None:
+    @pytest.mark.parametrize(
+        ("n", "message"),
+        [
+            (
+                5,
+                "found 1 of 5 (neighbors exhausted; "
+                "1 dropped as excluded during the run)",
+            ),
+            (2, "found 1 of 2 (1 dropped as excluded during the run)"),
+        ],
+    )
+    async def test_exclude_added_mid_run_is_not_applied(
+        self, n: int, message: str
+    ) -> None:
         """An artist the user excludes while phase 1 runs is dropped on merge (#199)."""
         import sqlalchemy.orm.exc as orm_exc
 
@@ -4908,7 +4921,7 @@ class TestEnrichRelatedArtists:
             ),
         )
         task = _enrich_task(
-            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": 5}
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": n}
         )
         session = AsyncMock()
         task_res = MagicMock()
@@ -4969,6 +4982,9 @@ class TestEnrichRelatedArtists:
         lineup = set(pool_module.scope_artist_ids(profile.input_references, "lineup"))
         assert lineup == {kept}
         assert task.result["found"] == 1
+        assert task.result["dropped_excluded"] == 1
+        # Phase 1 found 2; the user then excluded 1 of them.
+        assert task.result["message"] == message
         assert pool_module.extract_excludes(profile.input_references) == {excluded}
 
     @pytest.mark.asyncio
