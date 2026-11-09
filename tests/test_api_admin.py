@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import collections
+import datetime
 import uuid
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -439,6 +441,7 @@ class TestAdminStats:
                 FakeResult([]),  # events by service
                 FakeResult([3]),  # duplicate artist groups
                 FakeResult([7]),  # duplicate track groups
+                FakeResult([2]),  # MBID duplicate artist groups
             ]
         )
         application = _make_bearer_app(db_session=db_session)
@@ -458,6 +461,41 @@ class TestAdminStats:
         assert "events_by_service" in data
         assert "duplicate_artist_groups" in data
         assert "duplicate_track_groups" in data
+        assert data["mbid_duplicate_artist_groups"] == 2
+
+
+class TestAdminMbidDuplicates:
+    """Tests for GET /api/v1/admin/artists/mbid-duplicates (#203)."""
+
+    async def test_groups_rows_by_mbid(self) -> None:
+        Row = collections.namedtuple("Row", ["mbid", "id", "name", "created_at"])
+        when = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+        a, b = uuid.uuid4(), uuid.uuid4()
+        db_session = FakeAsyncSession()
+        db_session.set_execute_results(
+            [FakeResult([Row("m1", a, "Elder", when), Row("m1", b, "elder", when)])]
+        )
+        application = _make_bearer_app(db_session=db_session)
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get(
+                "/api/v1/admin/artists/mbid-duplicates",
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["group_count"] == 1
+        group = data["groups"][0]
+        assert group["mbid"] == "m1"
+        assert group["count"] == 2
+        assert [x["id"] for x in group["artists"]] == [str(a), str(b)]
+
+    async def test_requires_admin(self) -> None:
+        application = _make_bearer_app()
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.get("/api/v1/admin/artists/mbid-duplicates")
+        assert response.status_code in (401, 403)
 
 
 class TestAdminTaskDetail:

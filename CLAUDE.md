@@ -147,6 +147,7 @@ uv run resonance-api status                     # Recent sync job overview
 uv run resonance-api stats                      # Database statistics
 uv run resonance-api sync <service> [--full]    # Trigger a sync
 uv run resonance-api dedup <type> [--no-wait]   # Dedup: events|artists|tracks|all
+uv run resonance-api artists mbid-duplicates [--json]  # Artists sharing an MBID (read-only)
 uv run resonance-api task <task_id>             # Check bulk task status
 uv run resonance-api tasks health [--json]      # Reaper liveness, queue backlog, running tasks
 uv run resonance-api cancel <task_id>           # Cancel a task + unfinished children

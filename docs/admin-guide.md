@@ -157,6 +157,15 @@ By default, the CLI polls the task until completion, showing a progress indicato
 
 When running `dedup all`, jobs execute in sequence: artists first, then tracks, then events.
 
+#### `artists mbid-duplicates` -- Find Artists Sharing an MBID
+
+```bash
+uv run resonance-api artists mbid-duplicates          # human-readable groups
+uv run resonance-api artists mbid-duplicates --json   # raw API response
+```
+
+Read-only. Calls `GET /api/v1/admin/artists/mbid-duplicates` and lists every MusicBrainz MBID held by more than one artist, with each artist's id and name. The MBID is read from `service_links.musicbrainz.id`, or from the legacy flat `service_links.listenbrainz` string when the canonical one is missing, then trimmed and lowercased. Artists without an MBID are ignored. `stats` reports the same count as `mbid_duplicate_artist_groups`. Merge the groups with `resonance-api dedup artists`.
+
 #### `task` -- Monitor a Task
 
 ```bash
@@ -243,7 +252,7 @@ Duplicates appear for several reasons:
 
 **Event dedup** removes duplicate listening events. A duplicate is defined as the same user + track + timestamp combination. This is the most common type of duplicate and is automatically cleaned up after every successful sync.
 
-**Artist dedup** merges artist records that share the same name (case-insensitive). When merging, all tracks, relations, and references are moved to the surviving record and the duplicate is deleted.
+**Artist dedup** merges artist records in two passes: first those sharing a MusicBrainz MBID (normalized as in `artists mbid-duplicates`, so the names may differ), then those sharing a name (case-insensitive). When merging, tracks, user relations, event lineups, event candidates and generator-profile recipes (artist sources, enrichment seeds, artist excludes) move to the surviving record, and the duplicate is deleted. The survivor is the record with an MBID, then the one with more service links, then the oldest.
 
 **Track dedup** merges track records that share the same title (case-insensitive) and artist. Service links, events, and relations are consolidated onto the surviving record.
 
@@ -257,7 +266,7 @@ Run deduplication manually when:
 
 - You want to clean up artist or track duplicates (these are not auto-triggered).
 - You suspect the auto-dedup missed events (e.g., after a database restore or manual data import).
-- The `stats` command shows non-zero duplicate group counts.
+- The `stats` command shows non-zero duplicate group counts (`duplicate_artist_groups` by name, `mbid_duplicate_artist_groups` by MBID).
 
 Manual dedup is available through:
 

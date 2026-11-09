@@ -82,6 +82,7 @@ Commands:
   feed-add ical <url> [--label] Add generic iCal connection
   feed-sync <conn_id|all>      Sync a calendar connection (or all)
   dedup <type> [--no-wait]     Run deduplication
+  artists mbid-duplicates      Artists sharing a MusicBrainz MBID (read-only)
   backfill-mbids [opts]        Backfill MusicBrainz MBIDs (#71)
   backfill-popularity [opts]   Backfill ListenBrainz popularity
   backfill-genres [opts]       Backfill artist genre tags (#136)
@@ -108,9 +109,16 @@ Usage: resonance-api dedup <type>
 
 Types:
   events    Remove cross-service duplicate events
-  artists   Merge duplicate artist records
+  artists   Merge duplicate artist records (same MBID, then same name)
   tracks    Merge duplicate track records
   all       Run all three in sequence
+"""
+
+_ARTISTS_USAGE = """\
+Usage: resonance-api artists <subcommand>
+
+Subcommands:
+  mbid-duplicates [--json]   Groups of artists sharing a MusicBrainz MBID
 """
 
 
@@ -211,9 +219,38 @@ def _cmd_stats() -> None:
     for svc, count in sorted(data.get("events_by_service", {}).items()):
         print(f"  {svc:15s} {count}")
     dup_a = data.get("duplicate_artist_groups", 0)
+    dup_m = data.get("mbid_duplicate_artist_groups", 0)
     dup_t = data.get("duplicate_track_groups", 0)
-    if dup_a or dup_t:
-        print(f"Duplicate groups: {dup_a} artists, {dup_t} tracks")
+    if dup_a or dup_m or dup_t:
+        print(
+            f"Duplicate groups: {dup_a} artists by name, {dup_m} by MBID,"
+            f" {dup_t} tracks"
+        )
+
+
+def _cmd_artists() -> None:
+    args = sys.argv[2:]
+    if not args or args[0] in ("--help", "-h"):
+        print(_ARTISTS_USAGE)
+        return
+    if args[0] != "mbid-duplicates":
+        print(f"Unknown artists subcommand: {args[0]}")
+        print(_ARTISTS_USAGE)
+        sys.exit(1)
+    data = _api_request("GET", "/api/v1/admin/artists/mbid-duplicates").json()
+    if "--json" in args[1:]:
+        print(json.dumps(data, indent=2))
+        return
+    groups = data.get("groups", [])
+    if not groups:
+        print("No artists share an MBID.")
+        return
+    print(f"{len(groups)} MBID(s) shared by more than one artist:")
+    for group in groups:
+        print(f"\n{group['mbid']}  ({group['count']} artists)")
+        for artist in group["artists"]:
+            print(f"  {artist['id']}  {artist['name']}")
+    print("\nMerge with: resonance-api dedup artists")
 
 
 def _cmd_sync() -> None:
@@ -1689,6 +1726,7 @@ _COMMANDS: dict[str, tuple[str, Callable[[], None]]] = {
     "feed-add": ("Add calendar connection", _cmd_feed_add),
     "feed-sync": ("Sync a calendar connection", _cmd_feed_sync),
     "dedup": ("Run deduplication", _cmd_dedup),
+    "artists": ("Artist data checks", _cmd_artists),
     "backfill-mbids": ("Backfill MusicBrainz MBIDs", _cmd_backfill_mbids),
     "backfill-popularity": (
         "Backfill ListenBrainz popularity",

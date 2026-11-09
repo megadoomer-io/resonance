@@ -17,6 +17,7 @@ import resonance.dependencies as deps_module
 import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
+import resonance.services.artist_mbid as artist_mbid_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.reaper as reaper_module
 import resonance.types as types_module
@@ -141,7 +142,33 @@ async def get_db_stats(
         "events_total": events_total,
         "events_by_service": {row[0]: row[1] for row in events_by_svc.all()},
         "duplicate_artist_groups": dup_artists_result.scalar() or 0,
+        "mbid_duplicate_artist_groups": (
+            await artist_mbid_module.count_mbid_duplicate_groups(db)
+        ),
         "duplicate_track_groups": dup_tracks_result.scalar() or 0,
+    }
+
+
+async def get_mbid_duplicate_artists(db: sa_async.AsyncSession) -> dict[str, object]:
+    """Groups of artists sharing a normalized MusicBrainz MBID (#203)."""
+    groups = await artist_mbid_module.find_mbid_duplicate_groups(db)
+    return {
+        "group_count": len(groups),
+        "groups": [
+            {
+                "mbid": group.mbid,
+                "count": group.count,
+                "artists": [
+                    {
+                        "id": str(artist.id),
+                        "name": artist.name,
+                        "created_at": artist.created_at.isoformat(),
+                    }
+                    for artist in group.artists
+                ],
+            }
+            for group in groups
+        ],
     }
 
 
@@ -429,6 +456,23 @@ async def admin_stats_endpoint(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     return await get_db_stats(db)
+
+
+@router.get(
+    "/artists/mbid-duplicates",
+    summary="Artists sharing a MusicBrainz MBID",
+    description=(
+        "Read-only. Groups artists by MBID, read from"
+        " service_links.musicbrainz.id or else the legacy flat"
+        " service_links.listenbrainz string, trimmed and lowercased."
+        " Artists without an MBID are ignored. Merge with POST"
+        " /admin/dedup/artists."
+    ),
+)
+async def admin_mbid_duplicates_endpoint(
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, object]:
+    return await get_mbid_duplicate_artists(db)
 
 
 @router.get(
