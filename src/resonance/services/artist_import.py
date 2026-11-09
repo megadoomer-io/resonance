@@ -4,9 +4,9 @@ Centralizes the "find-or-create a local Artist row from an MBID" flow so both
 the HTTP import endpoint (``api/v1/artists.py``) and the background worker
 (adjacent-artist discovery, issue #115 Phase 2) share one dedup + create path.
 
-Dedup is MBID-first and checks both the canonical
-``service_links["musicbrainz"]["id"]`` location and the legacy flat
-``service_links["listenbrainz"]`` location.
+Dedup is MBID-first, on ``Artist.musicbrainz_id`` (normalized from the
+canonical ``service_links["musicbrainz"]["id"]`` or the legacy flat
+``service_links["listenbrainz"]``).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import sqlalchemy as sa
 import structlog
 
 import resonance.models.music as music_models
+import resonance.services.artist_utils as artist_utils
 
 if typing.TYPE_CHECKING:
     import sqlalchemy.ext.asyncio as sa_async
@@ -28,11 +29,12 @@ logger = structlog.get_logger(__name__)
 async def find_local_artist_by_mbid(
     session: sa_async.AsyncSession, mbid: str
 ) -> music_models.Artist | None:
-    """Find a local artist by MBID, checking canonical and legacy locations.
+    """Find a local artist by MBID via the normalized ``musicbrainz_id`` column.
 
-    Matches both the canonical ``service_links["musicbrainz"]["id"]`` and the
-    legacy flat ``service_links["listenbrainz"]`` storage so an artist imported
-    under either convention is found.
+    The column covers the canonical ``service_links["musicbrainz"]["id"]`` and
+    the legacy flat ``service_links["listenbrainz"]`` storage, case-insensitively.
+    Until the unique index exists a shared MBID can match several rows; the
+    oldest wins rather than raising.
 
     Args:
         session: Async DB session.
@@ -41,11 +43,14 @@ async def find_local_artist_by_mbid(
     Returns:
         The matching Artist, or None.
     """
-    stmt = sa.select(music_models.Artist).where(
-        sa.or_(
-            music_models.Artist.service_links["musicbrainz"]["id"].as_string() == mbid,
-            music_models.Artist.service_links["listenbrainz"].as_string() == mbid,
-        )
+    normalized = artist_utils.normalize_mbid(mbid)
+    if normalized is None:
+        return None
+    stmt = (
+        sa.select(music_models.Artist)
+        .where(music_models.Artist.musicbrainz_id == normalized)
+        .order_by(music_models.Artist.created_at, music_models.Artist.id)
+        .limit(1)
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()

@@ -10,6 +10,7 @@ import sqlalchemy as sa
 import sqlalchemy.orm as orm
 
 import resonance.models.base as base_module
+import resonance.services.artist_utils as artist_utils
 import resonance.types as types_module
 
 
@@ -24,6 +25,11 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     name: orm.Mapped[str] = orm.mapped_column(sa.String(512), nullable=False)
     service_links: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
         sa.JSON, nullable=True, default=None
+    )
+    # Derived from service_links on every assignment (_sync_musicbrainz_id), so
+    # write service_links through the ORM, never a Core UPDATE (#203).
+    musicbrainz_id: orm.Mapped[str | None] = orm.mapped_column(
+        sa.String(64), nullable=True, default=None
     )
     origin: orm.Mapped[str | None] = orm.mapped_column(
         sa.String(256), nullable=True, default=None
@@ -72,6 +78,13 @@ class Artist(base_module.TimestampMixin, base_module.Base):
     tags: orm.Mapped[list[ArtistTag]] = orm.relationship(
         back_populates="artist", cascade="all, delete-orphan"
     )
+
+    @orm.validates("service_links")
+    def _sync_musicbrainz_id(
+        self, _key: str, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        self.musicbrainz_id = artist_utils.normalized_mbid(value)
+        return value
 
 
 class ArtistTag(base_module.TimestampMixin, base_module.Base):
