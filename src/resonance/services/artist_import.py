@@ -139,19 +139,16 @@ async def insert_artist_or_get_winner(
         sa.exc.IntegrityError: For any other constraint violation, or if the
             MBID conflict's winner can't be read.
     """
+    mbid = artist_utils.normalized_mbid(artist.service_links)
     try:
         async with session.begin_nested():
             session.add(artist)
     except sa.exc.IntegrityError as exc:
-        if artist.musicbrainz_id is None or _MBID_INDEX not in str(exc.orig):
+        if mbid is None or _MBID_INDEX not in str(exc.orig):
             raise
-        winner = await find_local_artist_by_mbid(session, artist.musicbrainz_id)
+        winner = await find_local_artist_by_mbid(session, mbid)
         if winner is None:
             raise
-        logger.info(
-            "artist_insert_lost_mbid_race",
-            mbid=artist.musicbrainz_id,
-            artist_id=str(winner.id),
-        )
+        logger.info("artist_insert_lost_mbid_race", mbid=mbid, artist_id=str(winner.id))
         return winner, False
     return artist, True

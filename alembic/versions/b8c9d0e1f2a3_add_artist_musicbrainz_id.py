@@ -1,10 +1,18 @@
-"""add artists.musicbrainz_id, backfilled from service_links
+"""add artists.musicbrainz_id, generated from service_links
 
-The normalized artist MBID: service_links.musicbrainz.id, else the legacy flat
-service_links.listenbrainz string, trimmed and lowercased (the same rule as
-resonance.services.artist_utils.normalized_mbid). The app keeps it in sync on
-every service_links write. Not unique yet: the unique index is a separate
-migration, applied once no MBID is shared by two artists.
+The normalized artist MBID: service_links.musicbrainz.id, else a flat
+service_links.musicbrainz string, else the legacy flat service_links.listenbrainz
+string, trimmed and lowercased (resonance.services.artist_utils.normalized_mbid).
+A STORED generated column, so the database keeps it in sync on every write path.
+Not unique yet: the unique index is the next migration, shipped separately.
+
+Adding a stored generated column rewrites the table under ACCESS EXCLUSIVE,
+blocking artist reads and writes for the rewrite (well under a second at ~7k
+rows). lock_timeout bounds the wait for the lock instead of queueing every
+artist query behind a long transaction.
+
+Rolling the app image back past this revision needs `alembic downgrade` first:
+the startup schema check refuses a database ahead of the code.
 
 Revision ID: b8c9d0e1f2a3
 Revises: a7b8c9d0e1f2
@@ -22,33 +30,33 @@ down_revision: str = "a7b8c9d0e1f2"
 branch_labels: None = None
 depends_on: None = None
 
-# json_typeof guards a non-string legacy value ({"id": ...} or null).
+# Frozen copy of resonance.models.mbid_sql.postgresql_sql(); json_typeof guards
+# non-string values ({"id": ...} or null).
 _NORMALIZED_MBID_SQL = """
     COALESCE(
-        NULLIF(LOWER(TRIM(CASE
+        NULLIF(LOWER(BTRIM(CASE
             WHEN json_typeof(service_links -> 'musicbrainz' -> 'id') = 'string'
             THEN service_links -> 'musicbrainz' ->> 'id' END)), ''),
-        NULLIF(LOWER(TRIM(CASE
+        NULLIF(LOWER(BTRIM(CASE
+            WHEN json_typeof(service_links -> 'musicbrainz') = 'string'
+            THEN service_links ->> 'musicbrainz' END)), ''),
+        NULLIF(LOWER(BTRIM(CASE
             WHEN json_typeof(service_links -> 'listenbrainz') = 'string'
             THEN service_links ->> 'listenbrainz' END)), '')
     )
 """
 
-_BACKFILL_SQL = f"""
-    UPDATE artists
-    SET musicbrainz_id = {_NORMALIZED_MBID_SQL}
-    WHERE {_NORMALIZED_MBID_SQL} IS NOT NULL
-"""
-
 
 def upgrade() -> None:
-    # ADD COLUMN needs a brief ACCESS EXCLUSIVE lock; don't queue every artist
-    # read behind a long transaction while waiting for it.
     op.execute(sa.text("SET LOCAL lock_timeout = '30s'"))
     op.add_column(
-        "artists", sa.Column("musicbrainz_id", sa.String(length=64), nullable=True)
+        "artists",
+        sa.Column(
+            "musicbrainz_id",
+            sa.String(length=64),
+            sa.Computed(sa.text(_NORMALIZED_MBID_SQL), persisted=True),
+        ),
     )
-    op.execute(sa.text(_BACKFILL_SQL))
 
 
 def downgrade() -> None:

@@ -13,6 +13,7 @@ import pytest
 import sqlalchemy as sa
 
 import resonance.config as config_module
+import resonance.models.mbid_sql as mbid_sql
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -35,8 +36,13 @@ class MigrationDB:
         self.engine = sa.create_engine(config_module.Settings().sync_database_url)
 
     def upgrade(self, revision: str) -> None:
-        cfg = alembic.config.Config(str(_ROOT / "alembic.ini"))
-        alembic.command.upgrade(cfg, revision)
+        alembic.command.upgrade(self._config(), revision)
+
+    def downgrade(self, revision: str) -> None:
+        alembic.command.downgrade(self._config(), revision)
+
+    def _config(self) -> alembic.config.Config:
+        return alembic.config.Config(str(_ROOT / "alembic.ini"))
 
     def insert_artist(self, name: str, links: Any) -> uuid.UUID:
         artist_id = uuid.uuid4()
@@ -108,6 +114,7 @@ def test_column_migration_backfills_normalized_mbid(migration_db: MigrationDB) -
     legacy_dict = migration_db.insert_artist("D", {"listenbrainz": {"id": "x"}})
     none = migration_db.insert_artist("E", None)
     blank = migration_db.insert_artist("F", {"musicbrainz": {"id": ""}})
+    flat = migration_db.insert_artist("G", {"musicbrainz": "FLAT", "listenbrainz": "l"})
 
     migration_db.upgrade(_COLUMN)
 
@@ -118,7 +125,43 @@ def test_column_migration_backfills_normalized_mbid(migration_db: MigrationDB) -
         legacy_dict: None,
         none: None,
         blank: None,
+        flat: "flat",
     }
+
+
+def test_generated_column_matches_the_model_expression(
+    migration_db: MigrationDB,
+) -> None:
+    """The migration's frozen SQL and the model's agree, so create_all == alembic."""
+    migration_db.upgrade(_COLUMN)
+    for links in (
+        {"musicbrainz": {"id": " A "}},
+        {"musicbrainz": "B", "listenbrainz": "x"},
+        {"listenbrainz": "C"},
+        {"listenbrainz": {"id": "d"}},
+        {"musicbrainz": {"id": ""}, "listenbrainz": " "},
+        None,
+    ):
+        migration_db.insert_artist("A", links)
+    with migration_db.engine.connect() as conn:
+        rows = conn.execute(
+            sa.text(f"SELECT musicbrainz_id, {mbid_sql.postgresql_sql()} FROM artists")
+        ).all()
+    assert len(rows) == 6
+    assert all(stored == model for stored, model in rows)
+
+
+def test_column_cannot_go_stale(migration_db: MigrationDB) -> None:
+    migration_db.upgrade(_COLUMN)
+    artist = migration_db.insert_artist("A", {"listenbrainz": "one"})
+    with migration_db.engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "UPDATE artists SET service_links = CAST(:links AS json) WHERE id = :id"
+            ),
+            {"links": json.dumps({"musicbrainz": {"id": "Two"}}), "id": artist},
+        )
+    assert migration_db.mbids()[artist] == "two"
 
 
 def test_index_migration_refuses_duplicates_without_half_applying(
@@ -135,21 +178,20 @@ def test_index_migration_refuses_duplicates_without_half_applying(
     assert migration_db.revision() == _COLUMN
 
 
-def test_index_migration_resyncs_stale_rows_then_builds(
-    migration_db: MigrationDB,
-) -> None:
+def test_index_migration_builds_and_enforces(migration_db: MigrationDB) -> None:
     migration_db.upgrade(_COLUMN)
-    # Written by a pod older than the column: service_links set, column NULL.
-    stale = migration_db.insert_artist("A", {"listenbrainz": "Late-Mbid"})
+    migration_db.insert_artist("A", {"listenbrainz": "Late-Mbid"})
     migration_db.insert_artist("B", None)
 
     migration_db.upgrade(_INDEX)
 
     assert migration_db.index_exists()
-    assert migration_db.mbids()[stale] == "late-mbid"
-    other = migration_db.insert_artist("C", None)
-    with pytest.raises(sa.exc.IntegrityError), migration_db.engine.begin() as conn:
-        conn.execute(
-            sa.text("UPDATE artists SET musicbrainz_id = 'late-mbid' WHERE id = :id"),
-            {"id": other},
-        )
+    with pytest.raises(sa.exc.IntegrityError):
+        migration_db.insert_artist("C", {"musicbrainz": {"id": " LATE-mbid"}})
+
+
+def test_index_migration_downgrades_cleanly(migration_db: MigrationDB) -> None:
+    migration_db.upgrade(_INDEX)
+    migration_db.downgrade(_BEFORE_COLUMN)
+    assert not migration_db.index_exists()
+    assert migration_db.revision() == _BEFORE_COLUMN

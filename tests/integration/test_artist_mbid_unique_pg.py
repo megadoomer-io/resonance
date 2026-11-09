@@ -51,6 +51,62 @@ async def test_find_local_artist_by_mbid_uses_the_column(
     assert found.id == artist_id
 
 
+async def _stored_mbid(db: TaskDB, artist_id: uuid.UUID) -> str | None:
+    async with db.factory() as session:
+        return (
+            await session.execute(
+                sa.select(music_models.Artist.musicbrainz_id).where(
+                    music_models.Artist.id == artist_id
+                )
+            )
+        ).scalar_one()
+
+
+async def test_generated_column_follows_core_updates(pg_task_db: TaskDB) -> None:
+    artist_id = await _seed(pg_task_db, "Elder", {"listenbrainz": "OLD"})
+    assert await _stored_mbid(pg_task_db, artist_id) == "old"
+
+    async with pg_task_db.factory() as session:
+        await session.execute(
+            sa.update(music_models.Artist)
+            .where(music_models.Artist.id == artist_id)
+            .values(service_links={"musicbrainz": " New "})
+        )
+        await session.commit()
+
+    assert await _stored_mbid(pg_task_db, artist_id) == "new"
+
+
+async def test_generated_column_follows_in_place_mutation(pg_task_db: TaskDB) -> None:
+    artist_id = await _seed(pg_task_db, "Elder", {"spotify": {"id": "s"}})
+
+    async with pg_task_db.factory() as session:
+        artist = await session.get(music_models.Artist, artist_id)
+        assert artist is not None and artist.service_links is not None
+        artist.service_links["musicbrainz"] = {"id": "Mutated"}
+        sa.orm.attributes.flag_modified(artist, "service_links")
+        await session.commit()
+        await session.refresh(artist)
+        assert artist.musicbrainz_id == "mutated"
+
+    assert await _stored_mbid(pg_task_db, artist_id) == "mutated"
+
+
+async def test_case_variant_duplicate_is_rejected_on_any_write_path(
+    pg_task_db: TaskDB,
+) -> None:
+    await _seed(pg_task_db, "Elder", {"musicbrainz": {"id": "e-1"}})
+    other = await _seed(pg_task_db, "Other", None)
+
+    async with pg_task_db.factory() as session:
+        with pytest.raises(sa.exc.IntegrityError, match="uq_artists_musicbrainz_id"):
+            await session.execute(
+                sa.update(music_models.Artist)
+                .where(music_models.Artist.id == other)
+                .values(service_links={"listenbrainz": " E-1 "})
+            )
+
+
 class _BarrierConnector:
     """Resolves an MBID only once every caller has asked, so all race to insert."""
 

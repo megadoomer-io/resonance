@@ -56,31 +56,6 @@ class TestFindLocalArtistByMbid:
         session.execute.assert_not_awaited()
 
 
-class TestMusicbrainzIdColumn:
-    """Artist.musicbrainz_id follows service_links on every assignment (#203)."""
-
-    def test_set_from_constructor(self) -> None:
-        artist = music_models.Artist(
-            name="A", service_links={"musicbrainz": {"id": " ABC "}}
-        )
-        assert artist.musicbrainz_id == "abc"
-
-    def test_legacy_flat_value(self) -> None:
-        artist = music_models.Artist(name="A", service_links={"listenbrainz": "DEF"})
-        assert artist.musicbrainz_id == "def"
-
-    def test_follows_reassignment(self) -> None:
-        artist = music_models.Artist(name="A", service_links={"listenbrainz": "old"})
-        artist.service_links = {"musicbrainz": {"id": "new"}, "listenbrainz": "old"}
-        assert artist.musicbrainz_id == "new"
-        artist.service_links = {"spotify": {"id": "s"}}
-        assert artist.musicbrainz_id is None
-
-    def test_none(self) -> None:
-        assert music_models.Artist(name="A").musicbrainz_id is None
-        assert music_models.Artist(name="A", service_links=None).musicbrainz_id is None
-
-
 class TestImportArtistByMbid:
     """Find-or-create an Artist from an MBID."""
 

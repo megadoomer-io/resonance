@@ -1,10 +1,13 @@
 """make artists.musicbrainz_id unique
 
-Ships only after `resonance-api artists mbid-duplicates` reports none in prod.
-Re-syncs the column first (rows written by pods older than the column), then
-refuses to start if any MBID is still shared, naming the MBIDs, so nothing is
-half-applied. The index is built CONCURRENTLY under lock_timeout, like
-w4x5y6z7a8b9; an INVALID index left by a failed build is dropped first.
+Ships in its own deploy, after the column migration and only once
+`resonance-api artists mbid-duplicates` reports no groups in prod. Refuses to
+start if any MBID is shared, naming the MBIDs, so nothing is half-applied. The
+index is built CONCURRENTLY under lock_timeout, like w4x5y6z7a8b9; an INVALID
+index left by a failed build is dropped first.
+
+If it refuses, the init container fails and the previous pods keep serving
+(they match the column revision), so dedup can still run through the API.
 
 Revision ID: c9d0e1f2a3b4
 Revises: b8c9d0e1f2a3
@@ -25,22 +28,6 @@ depends_on: None = None
 INDEX = "uq_artists_musicbrainz_id"
 _LOCK_TIMEOUT = "30s"
 
-_NORMALIZED_MBID_SQL = """
-    COALESCE(
-        NULLIF(LOWER(TRIM(CASE
-            WHEN json_typeof(service_links -> 'musicbrainz' -> 'id') = 'string'
-            THEN service_links -> 'musicbrainz' ->> 'id' END)), ''),
-        NULLIF(LOWER(TRIM(CASE
-            WHEN json_typeof(service_links -> 'listenbrainz') = 'string'
-            THEN service_links ->> 'listenbrainz' END)), '')
-    )
-"""
-_RESYNC_SQL = f"""
-    UPDATE artists
-    SET musicbrainz_id = {_NORMALIZED_MBID_SQL}
-    WHERE musicbrainz_id IS DISTINCT FROM {_NORMALIZED_MBID_SQL}
-"""
-
 
 class DuplicateMbidError(RuntimeError):
     """Two or more artists share an MBID; merge them before this migration."""
@@ -50,7 +37,6 @@ def upgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"SET lock_timeout = '{_LOCK_TIMEOUT}'"))
         try:
-            op.execute(sa.text(_RESYNC_SQL))
             _refuse_duplicates()
             _build_index()
         finally:
