@@ -79,6 +79,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[event_artist]),  # SELECT EventArtist
                 FakeResult(items=[]),  # SELECT EventArtist conflict check → none
                 FakeResult(rowcount=1),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )
@@ -112,6 +113,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[dup_event_artist]),  # SELECT EventArtist
                 FakeResult(items=[existing_event_artist]),  # conflict exists
                 FakeResult(rowcount=0),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )
@@ -136,6 +138,7 @@ class TestMergeArtistsRepointsEventArtists:
                 FakeResult(items=[]),  # SELECT UserArtistRelation
                 FakeResult(items=[]),  # SELECT EventArtist (none)
                 FakeResult(rowcount=3),  # UPDATE EventArtistCandidate
+                FakeResult(items=[]),  # SELECT GeneratorProfile
                 FakeResult(),  # DELETE duplicate artist
             ]
         )

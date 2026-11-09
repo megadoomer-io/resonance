@@ -549,3 +549,43 @@ def replace_via_seed_sources(
         sorted(excludes, key=str),
         sorted(track_excludes, key=str),
     )
+
+
+def repoint_artist(
+    input_references: Mapping[str, object],
+    old_id: uuid.UUID,
+    new_id: uuid.UUID,
+) -> dict[str, object] | None:
+    """Rewrite references to artist ``old_id`` as ``new_id`` after a merge.
+
+    Covers artist sources, ``via_seed`` scopes naming the old artist, and
+    ``exclude_artist_ids``. Works on the raw stored shape so unknown keys survive.
+    Returns the new dict, or None when nothing referenced ``old_id``.
+    """
+    old, new = str(old_id), str(new_id)
+    changed = False
+    refs = dict(input_references)
+
+    sources = refs.get("sources")
+    if isinstance(sources, list):
+        new_sources: list[object] = []
+        for entry in sources:
+            if isinstance(entry, Mapping):
+                updated = dict(entry)
+                if updated.get("kind") == "artist" and updated.get("artist_id") == old:
+                    updated["artist_id"] = new
+                if updated.get("via_seed") == old:
+                    updated["via_seed"] = new
+                if updated != entry:
+                    changed = True
+                    entry = updated
+            new_sources.append(entry)
+        refs["sources"] = new_sources
+
+    excludes = refs.get("exclude_artist_ids")
+    if isinstance(excludes, list) and old in excludes:
+        changed = True
+        repointed = [new if aid == old else aid for aid in excludes]
+        refs["exclude_artist_ids"] = list(dict.fromkeys(repointed))
+
+    return refs if changed else None

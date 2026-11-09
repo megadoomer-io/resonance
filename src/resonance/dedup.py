@@ -20,11 +20,15 @@ from typing import TYPE_CHECKING
 import sqlalchemy as sa
 import structlog
 
+import resonance.generators.pool as pool_module
 import resonance.models as models_module
 import resonance.normalize as normalize_module
+import resonance.services.artist_mbid as artist_mbid
 import resonance.services.artist_utils as artist_utils
 
 if TYPE_CHECKING:
+    import uuid
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -37,6 +41,8 @@ class MergeStats:
     """Counts of records affected by a merge operation."""
 
     artists_merged: int = 0
+    mbid_artists_merged: int = 0
+    profiles_repointed: int = 0
     tracks_merged: int = 0
     tracks_repointed: int = 0
     events_repointed: int = 0
@@ -237,6 +243,10 @@ async def merge_artists(
         candidate_result.rowcount if hasattr(candidate_result, "rowcount") else 0
     )
 
+    stats.profiles_repointed = await _repoint_profiles(
+        session, duplicate.id, canonical.id
+    )
+
     # Delete the duplicate
     await session.execute(
         sa.delete(models_module.Artist).where(models_module.Artist.id == duplicate.id)
@@ -251,8 +261,38 @@ async def merge_artists(
         event_artists_repointed=stats.event_artists_repointed,
         event_artists_deleted=stats.event_artists_deleted,
         candidates_repointed=stats.candidates_repointed,
+        profiles_repointed=stats.profiles_repointed,
     )
     return stats
+
+
+async def _repoint_profiles(
+    session: AsyncSession, old_id: uuid.UUID, new_id: uuid.UUID
+) -> int:
+    """Rewrite generator-profile recipes that reference a merged-away artist.
+
+    Each profile write bumps its ``version``, so an editor holding the old
+    version gets a 409 instead of re-saving the stale id.
+    """
+    profile = models_module.GeneratorProfile
+    candidates = (
+        (
+            await session.execute(
+                sa.select(profile).where(
+                    sa.cast(profile.input_references, sa.Text).contains(str(old_id))
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    repointed = 0
+    for prof in candidates:
+        updated = pool_module.repoint_artist(prof.input_references, old_id, new_id)
+        if updated is not None:
+            prof.input_references = updated
+            repointed += 1
+    return repointed
 
 
 async def merge_tracks(
@@ -369,14 +409,58 @@ async def merge_tracks(
     return stats
 
 
+def _add_artist_stats(total: MergeStats, stats: MergeStats) -> None:
+    total.artists_merged += stats.artists_merged
+    total.tracks_repointed += stats.tracks_repointed
+    total.artist_relations_repointed += stats.artist_relations_repointed
+    total.artist_relations_deleted += stats.artist_relations_deleted
+    total.profiles_repointed += stats.profiles_repointed
+
+
+async def find_and_merge_mbid_duplicate_artists(session: AsyncSession) -> MergeStats:
+    """Merge artists that share a normalized MusicBrainz MBID (#203).
+
+    Each group collapses into one artist through :func:`merge_artists`, the same
+    primitive the name pass uses. Caller must commit.
+    """
+    total = MergeStats()
+    groups = await artist_mbid.find_mbid_duplicate_groups(session)
+    logger.info("artist_mbid_dedup_candidates", groups=len(groups))
+
+    for group in groups:
+        artists = list(
+            (
+                await session.execute(
+                    sa.select(models_module.Artist)
+                    .where(models_module.Artist.id.in_([a.id for a in group.artists]))
+                    .order_by(models_module.Artist.created_at, models_module.Artist.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(artists) < 2:
+            continue
+        canonical = artists[0]
+        for other in artists[1:]:
+            canonical, dup = pick_canonical(canonical, other)
+            stats = await merge_artists(session, canonical, dup)
+            _add_artist_stats(total, stats)
+            total.mbid_artists_merged += stats.artists_merged
+        await session.flush()
+
+    return total
+
+
 async def find_and_merge_duplicate_artists(
     session: AsyncSession,
 ) -> MergeStats:
     """Find all duplicate artists and merge them.
 
-    Candidates: artists with the same name (case-insensitive).
+    Candidates: artists sharing a normalized MBID (#203), then artists with the
+    same name (case-insensitive).
     """
-    total = MergeStats()
+    total = await find_and_merge_mbid_duplicate_artists(session)
 
     # Find duplicate name groups
     result = await session.execute(
@@ -409,10 +493,7 @@ async def find_and_merge_duplicate_artists(
         for other in artists[1:]:
             canonical, dup = pick_canonical(canonical, other)
             stats = await merge_artists(session, canonical, dup)
-            total.artists_merged += stats.artists_merged
-            total.tracks_repointed += stats.tracks_repointed
-            total.artist_relations_repointed += stats.artist_relations_repointed
-            total.artist_relations_deleted += stats.artist_relations_deleted
+            _add_artist_stats(total, stats)
 
         await session.flush()
 
@@ -548,6 +629,8 @@ async def dedup_all(session: AsyncSession) -> dict[str, int]:
         "attendance_repointed": concert_stats.attendance_repointed,
         "attendance_deleted": concert_stats.attendance_deleted,
         "artists_merged": artist_stats.artists_merged,
+        "mbid_artists_merged": artist_stats.mbid_artists_merged,
+        "profiles_repointed": artist_stats.profiles_repointed,
         "tracks_repointed": artist_stats.tracks_repointed,
         "artist_relations_repointed": artist_stats.artist_relations_repointed,
         "artist_relations_deleted": artist_stats.artist_relations_deleted,

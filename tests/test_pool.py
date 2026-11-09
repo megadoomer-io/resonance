@@ -429,3 +429,45 @@ class TestWithTrackExcludes:
         t1 = uuid.uuid4()
         out = pool_module.with_track_excludes({}, [t1, t1])
         assert out["exclude_track_ids"] == [str(t1)]
+
+
+class TestRepointArtist:
+    """Rewriting a merged-away artist's references in a stored recipe (#203)."""
+
+    def test_repoints_sources_seeds_and_excludes(self) -> None:
+        old, new, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        event_source = {"kind": "event", "event_id": str(uuid.uuid4()), "enabled": True}
+        refs: dict[str, object] = {
+            "sources": [
+                {"kind": "artist", "artist_id": str(old), "enabled": True},
+                {
+                    "kind": "artist",
+                    "artist_id": str(other),
+                    "enabled": True,
+                    "via_seed": str(old),
+                },
+                event_source,
+            ],
+            "exclude_artist_ids": [str(old), str(new)],
+            "exclude_track_ids": ["t"],
+        }
+
+        out = pool_module.repoint_artist(refs, old, new)
+
+        assert out is not None
+        sources = out["sources"]
+        assert isinstance(sources, list)
+        assert sources[0]["artist_id"] == str(new)
+        assert sources[1]["via_seed"] == str(new)
+        assert sources[2] == event_source
+        assert out["exclude_artist_ids"] == [str(new)]
+        assert out["exclude_track_ids"] == ["t"]
+
+    def test_returns_none_when_unreferenced(self) -> None:
+        refs: dict[str, object] = {
+            "sources": [
+                {"kind": "artist", "artist_id": str(uuid.uuid4()), "enabled": True}
+            ],
+            "exclude_artist_ids": [],
+        }
+        assert pool_module.repoint_artist(refs, uuid.uuid4(), uuid.uuid4()) is None
