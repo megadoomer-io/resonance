@@ -310,8 +310,9 @@ class TestIdempotentSync:
             # complete_task called twice
             assert mock_complete.await_count == 2
 
-            # Session committed: 2 commits per run (RUNNING status + completion)
-            assert session.commit.await_count == 4
+            # 3 commits per run: RUNNING claim, end of the read before the feed
+            # fetches (#199), completion
+            assert session.commit.await_count == 6
 
 
 class TestGenericIcalSync:

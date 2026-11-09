@@ -216,12 +216,18 @@ async def sync_calendar_feed(
             totals = EventProcessingResult()
             total_events = 0
 
+            # Fetch every feed before writing anything, so no row lock on the
+            # shared venue/event tables is held across a fetch (#199). All feeds
+            # still land in one transaction with last_synced_at.
+            await session.commit()
+            feed_bodies: list[tuple[str, types_module.FeedType]] = []
             for url, feed_type in feed_items:
                 log.info("fetching_feed", url=url, feed_type=feed_type.value)
                 # SSRF-guarded fetch: validates scheme + resolved IP and pins the
                 # connection to a public address (security review #141 / #1).
-                feed_body = await url_safety_module.fetch_feed(url)
+                feed_bodies.append((await url_safety_module.fetch_feed(url), feed_type))
 
+            for feed_body, feed_type in feed_bodies:
                 parsed_events = ical_module.parse_ical_feed(feed_body, feed_type)
                 total_events += len(parsed_events)
 
