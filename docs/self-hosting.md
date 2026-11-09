@@ -192,7 +192,7 @@ The Docker image runs only the web server. If you need the arq worker, run a
 second container with an overridden command:
 
 ```bash
-docker run --env-file .env resonance arq resonance.worker.WorkerSettings
+docker run --env-file .env resonance python -m resonance.worker
 ```
 
 Both containers need access to the same PostgreSQL and Redis instances.

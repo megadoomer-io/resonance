@@ -68,7 +68,7 @@ uv run alembic upgrade head
 uv run uvicorn resonance.app:create_app --factory --reload
 
 # Run the background worker (separate terminal)
-uv run arq resonance.worker.WorkerSettings
+uv run python -m resonance.worker
 ```
 
 ## Documentation
