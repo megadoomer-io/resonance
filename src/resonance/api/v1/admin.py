@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import fastapi
 import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
 import sqlalchemy.ext.asyncio as sa_async
 import sqlalchemy.orm as sa_orm
 
@@ -18,6 +19,7 @@ import resonance.models.music as music_models
 import resonance.models.task as task_models
 import resonance.models.user as user_models
 import resonance.services.artist_mbid as artist_mbid_module
+import resonance.services.dev_seed as dev_seed_module
 import resonance.sync.lifecycle as lifecycle_module
 import resonance.sync.reaper as reaper_module
 import resonance.types as types_module
@@ -741,6 +743,36 @@ async def admin_backfill_genres_coverage_endpoint(
     db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
 ) -> dict[str, object]:
     return await get_genre_coverage(db)
+
+
+def _require_dev_seed(request: fastapi.Request) -> None:
+    # A dependency, so a disabled route 404s before the body is validated.
+    if not request.app.state.settings.dev_seed_enabled:
+        raise fastapi.HTTPException(status_code=404, detail="Not Found")
+
+
+@router.post(
+    "/seed",
+    dependencies=[fastapi.Depends(_require_dev_seed)],
+    summary="Seed a test scenario (dev environments only)",
+    description=(
+        "Creates a user (or uses the owner), artists with arbitrary"
+        " service_links, tags, similarity edges, tracks and listens from one"
+        " JSON document. 404 unless DEV_SEED_ENABLED is set. Constraint"
+        " violations roll back the whole scenario (409)."
+    ),
+)
+async def admin_seed_endpoint(
+    scenario: dev_seed_module.SeedScenario,
+    db: Annotated[sa_async.AsyncSession, fastapi.Depends(deps_module.get_db)],
+) -> dict[str, Any]:
+    try:
+        return await dev_seed_module.seed(db, scenario)
+    except sa_exc.IntegrityError as exc:
+        await db.rollback()
+        raise fastapi.HTTPException(
+            status_code=409, detail=f"Constraint violation: {exc.orig}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

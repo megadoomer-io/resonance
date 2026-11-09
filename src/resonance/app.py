@@ -8,6 +8,7 @@ import pathlib
 
 import arq.connections as arq_connections
 import fastapi
+import fastapi.routing
 import fastapi.staticfiles
 import redis.asyncio as aioredis
 import structlog
@@ -123,6 +124,13 @@ def create_app(settings: config_module.Settings | None = None) -> fastapi.FastAP
 
     # Register API routes
     application.include_router(api_v1_module.router)
+    if not settings.dev_seed_enabled:
+        # The route 404s when disabled; keep it out of the spec too.
+        for route in application.routes:
+            if isinstance(route, fastapi.routing.APIRoute) and route.path == (
+                "/api/v1/admin/seed"
+            ):
+                route.include_in_schema = False
 
     # Register UI routes
     application.include_router(ui_account_module.router)

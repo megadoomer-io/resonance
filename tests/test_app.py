@@ -79,6 +79,22 @@ class TestDocsGating:
             assert (await c.get("/openapi.json")).status_code == 200
 
 
+class TestSeedRouteSchema:
+    """The dev seed endpoint only appears in the spec when it's enabled."""
+
+    async def test_hidden_from_openapi_when_disabled(self) -> None:
+        async with _client(config_module.Settings(debug=True)) as c:
+            paths = (await c.get("/openapi.json")).json()["paths"]
+        assert "/api/v1/admin/seed" not in paths
+        assert "/api/v1/admin/stats" in paths
+
+    async def test_listed_in_openapi_when_enabled(self) -> None:
+        settings = config_module.Settings(debug=True, dev_seed_enabled=True)
+        async with _client(settings) as c:
+            paths = (await c.get("/openapi.json")).json()["paths"]
+        assert "/api/v1/admin/seed" in paths
+
+
 class TestPlaygroundGating:
     """The dev component playground is not exposed in production (#141, #11)."""
 
