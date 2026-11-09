@@ -210,6 +210,47 @@ class TestSyncCalendarFeedSongkick:
             assert connection.last_synced_at is not None
 
     @pytest.mark.anyio()
+    async def test_fetches_all_feeds_before_writing(self) -> None:
+        """No transaction is open across a feed fetch; writes land in one (#199)."""
+        connection = _make_connection()
+        task = _make_task(user_id=connection.user_id)
+        session = AsyncMock()
+        _setup_session_queries(session, task, connection)
+        events: list[str] = []
+        session.commit.side_effect = lambda: events.append("commit")
+
+        async def _fetch(url: str) -> str:
+            events.append("fetch")
+            return _SAMPLE_ICAL
+
+        async def _process(*_: object) -> concert_worker.EventProcessingResult:
+            events.append("write")
+            return concert_worker.EventProcessingResult()
+
+        with (
+            patch(
+                "resonance.concerts.worker.url_safety_module.fetch_feed",
+                side_effect=_fetch,
+            ),
+            patch.object(
+                concert_worker, "_process_parsed_events", side_effect=_process
+            ),
+        ):
+            await concert_worker.sync_calendar_feed(
+                _make_ctx(session), str(connection.id), str(task.id)
+            )
+
+        first_fetch = events.index("fetch")
+        assert events[first_fetch - 1 :] == [
+            "commit",
+            "fetch",
+            "fetch",
+            "write",
+            "write",
+            "commit",
+        ]
+
+    @pytest.mark.anyio()
     async def test_songkick_no_external_user_id_fails(self) -> None:
         """Fails when Songkick connection has no external_user_id."""
         connection = _make_connection(external_user_id=None)

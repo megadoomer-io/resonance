@@ -61,8 +61,14 @@ async def import_artist_by_mbid(
     Dedups by MBID first: if an artist with this MBID already exists it is
     returned without a MusicBrainz call. Otherwise the MBID is resolved via the
     connector (``get_artist_by_mbid``), an Artist is created with canonical
-    ``service_links``, flushed so it gets an ID, and returned. The caller owns
-    the surrounding transaction (this does not commit).
+    ``service_links`` and returned.
+
+    **This commits the caller's session**, including any writes the caller has
+    pending: once before the MusicBrainz call (so no transaction is held across
+    it, #199) and once after the insert or the re-check that finds a concurrent
+    import. Flush or commit your own work first, and don't call this mid-way
+    through a change that must stay atomic. The insert runs in a savepoint, so a
+    failed insert rolls back only the savepoint.
 
     Args:
         session: Async DB session.
@@ -78,10 +84,17 @@ async def import_artist_by_mbid(
     if existing is not None:
         return existing
 
+    await session.commit()
     data = await connector.get_artist_by_mbid(mbid)
     if data is None:
         logger.warning("artist_import_mbid_unresolved", mbid=mbid)
         return None
+
+    # Another writer may have imported it while we were fetching.
+    existing = await find_local_artist_by_mbid(session, mbid)
+    if existing is not None:
+        await session.commit()
+        return existing
 
     artist = music_models.Artist(
         name=data["name"],
@@ -92,8 +105,9 @@ async def import_artist_by_mbid(
         end_year=data.get("end_year"),
         service_links={"musicbrainz": {"id": mbid}},
     )
-    session.add(artist)
-    await session.flush()
+    async with session.begin_nested():
+        session.add(artist)
+    await session.commit()
     logger.info(
         "artist_imported_by_mbid",
         mbid=mbid,

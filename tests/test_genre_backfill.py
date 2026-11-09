@@ -16,6 +16,24 @@ import resonance.services.artist_tags as artist_tags_module
 import resonance.sync.backfill as backfill_module
 
 
+def _inserted_tags(stmt: sa.Insert) -> list[music_module.ArtistTag]:
+    """The ArtistTag rows a core multi-row INSERT would write."""
+    params = stmt.compile().params
+    rows: list[music_module.ArtistTag] = []
+    i = 0
+    while f"tag_m{i}" in params:
+        rows.append(
+            music_module.ArtistTag(
+                artist_id=params[f"artist_id_m{i}"],
+                tag=params[f"tag_m{i}"],
+                genre_mbid=params[f"genre_mbid_m{i}"],
+                count=params[f"count_m{i}"],
+            )
+        )
+        i += 1
+    return rows
+
+
 def _settings() -> config_module.Settings:
     return config_module.Settings(mbid_mapper_batch_size=50)
 
@@ -50,6 +68,9 @@ class _RoutingSession:
     async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
         if isinstance(stmt, sa.Delete):
             self.deletes += 1
+            return SimpleNamespace()
+        if isinstance(stmt, sa.Insert):
+            self.added.extend(_inserted_tags(stmt))
             return SimpleNamespace()
         # Treat everything else as the SELECT.
         batch = self._batches.pop(0) if self._batches else []
@@ -201,6 +222,8 @@ class _SimpleSession:
     async def execute(self, stmt: Any, *a: Any, **k: Any) -> Any:
         if isinstance(stmt, sa.Delete):
             self.deletes += 1
+        elif isinstance(stmt, sa.Insert):
+            self.added.extend(_inserted_tags(stmt))
         return SimpleNamespace()
 
     def add(self, obj: Any) -> None:

@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import arq.jobs as arq_jobs
 import pytest
+import sqlalchemy.dialects.postgresql as postgresql
 
 import resonance.config as config_module
 import resonance.connectors.base as base_module
 import resonance.generators.pool as pool_module
 import resonance.models.generator as generator_models
 import resonance.models.task as task_module
-import resonance.models.taste as taste_models
 import resonance.models.user as user_models
 import resonance.services.artist_tags as artist_tags_module
 import resonance.sync.base as sync_base
@@ -4452,11 +4452,11 @@ class TestFetchSimilarWithStore:
 
         connector.get_similar_artists.assert_awaited_once()
         assert out == [{"name": "Elder", "mbid": "m1"}, {"name": "", "mbid": "skip"}]
-        added = [c.args[0] for c in session.add.call_args_list]
-        assert len(added) == 1  # only the named neighbor recorded
-        assert isinstance(added[0], taste_models.ArtistSimilarity)
-        assert added[0].neighbor_name == "Elder"
-        assert added[0].rank == 0
+        insert = session.execute.await_args_list[-1].args[0]
+        params = insert.compile(dialect=postgresql.dialect()).params
+        assert params["neighbor_name_m0"] == "Elder"  # only the named neighbor
+        assert params["rank_m0"] == 0
+        assert "neighbor_name_m1" not in params
 
     @pytest.mark.asyncio
     async def test_stale_edges_trigger_refetch(self) -> None:
@@ -4478,6 +4478,31 @@ class TestFetchSimilarWithStore:
 
         connector.get_similar_artists.assert_awaited_once()
         assert out == [{"name": "Fresh", "mbid": "m2"}]
+
+    @pytest.mark.asyncio
+    async def test_commits_around_the_live_fetch(self) -> None:
+        """No transaction is open across the connector call (#199)."""
+        now = datetime.datetime.now(datetime.UTC)
+        events: list[str] = []
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+        session.commit.side_effect = lambda: events.append("commit")
+        connector = AsyncMock()
+        connector.service_type = types_module.ServiceType.LISTENBRAINZ
+
+        async def _fetch(*_: Any, **__: Any) -> list[dict[str, Any]]:
+            events.append("fetch")
+            return [{"name": "Elder", "mbid": "m1"}]
+
+        connector.get_similar_artists.side_effect = _fetch
+
+        await worker_module._fetch_similar_with_store(
+            session, connector, _artist_ns(), limit=30, now=now
+        )
+
+        assert events == ["commit", "fetch", "commit"]
 
 
 class TestCollectRelated:
@@ -4810,9 +4835,16 @@ class TestEnrichRelatedArtists:
             artists_res,
             _genre_pairs_res([]),
         ]
-        # Commits in order: phase-0 RUNNING, phase-1 edges, phase-2 attempt 0
-        # (conflict), phase-2 attempt 1 (succeeds after reload + merge).
-        session.commit.side_effect = [None, None, orm_exc.StaleDataError("x"), None]
+        # Phase 1 commits freely; the first phase-2 commit (the one carrying the
+        # COMPLETED task) conflicts, the retry after reload + merge succeeds.
+        conflicted: list[bool] = []
+
+        async def _commit() -> None:
+            if task.status == types_module.SyncStatus.COMPLETED and not conflicted:
+                conflicted.append(True)
+                raise orm_exc.StaleDataError("x")
+
+        session.commit.side_effect = _commit
 
         async def _refresh(obj: Any) -> None:
             # Simulate the concurrent editor: a manual artist was added and the
@@ -4859,6 +4891,101 @@ class TestEnrichRelatedArtists:
         assert by_id[editor_id] is None  # concurrent edit NOT clobbered
         assert by_id[new_id] == "lineup"  # enrichment applied
         session.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("n", "message"),
+        [
+            (
+                5,
+                "found 1 of 5 (neighbors exhausted; "
+                "1 dropped as excluded during the run)",
+            ),
+            (2, "found 1 of 2 (1 dropped as excluded during the run)"),
+        ],
+    )
+    async def test_exclude_added_mid_run_is_not_applied(
+        self, n: int, message: str
+    ) -> None:
+        """An artist the user excludes while phase 1 runs is dropped on merge (#199)."""
+        import sqlalchemy.orm.exc as orm_exc
+
+        core_id = uuid.uuid4()
+        kept, excluded = uuid.uuid4(), uuid.uuid4()
+        profile = generator_models.GeneratorProfile(
+            user_id=uuid.uuid4(),
+            name="P",
+            generator_type=types_module.GeneratorType.CONCERT_PREP,
+            input_references=pool_module.serialize_input_references(
+                [pool_module.ArtistSource(artist_id=core_id)]
+            ),
+        )
+        task = _enrich_task(
+            {"profile_id": str(uuid.uuid4()), "seed_artist_ids": "lineup", "n": n}
+        )
+        session = AsyncMock()
+        task_res = MagicMock()
+        task_res.scalar_one_or_none.return_value = task
+        profile_res = MagicMock()
+        profile_res.scalar_one_or_none.return_value = profile
+        artists_res = MagicMock()
+        artists_res.scalars.return_value.all.return_value = [
+            _artist_ns("Core", id=core_id)
+        ]
+        session.execute.side_effect = [
+            task_res,
+            profile_res,
+            artists_res,
+            _genre_pairs_res([]),
+        ]
+        conflicted: list[bool] = []
+
+        async def _commit() -> None:
+            if task.status == types_module.SyncStatus.COMPLETED and not conflicted:
+                conflicted.append(True)
+                raise orm_exc.StaleDataError("x")
+
+        session.commit.side_effect = _commit
+
+        async def _refresh(obj: Any) -> None:
+            if obj is profile:  # the editor excluded one discovery meanwhile
+                profile.input_references = pool_module.serialize_input_references(
+                    [pool_module.ArtistSource(artist_id=core_id)],
+                    exclude_ids=[excluded],
+                )
+
+        session.refresh = AsyncMock(side_effect=_refresh)
+
+        with (
+            patch.object(
+                worker_module,
+                "resolve_pool",
+                AsyncMock(
+                    return_value=[
+                        pool_module.ResolvedArtist(
+                            artist_id=core_id, via=pool_module.PoolProvenance.ARTIST
+                        )
+                    ]
+                ),
+            ),
+            patch.object(
+                worker_module,
+                "_collect_related",
+                AsyncMock(return_value=[kept, excluded]),
+            ),
+        ):
+            await worker_module.enrich_related_artists(
+                _enrich_ctx(session), str(task.id or uuid.uuid4())
+            )
+
+        assert task.status == types_module.SyncStatus.COMPLETED
+        lineup = set(pool_module.scope_artist_ids(profile.input_references, "lineup"))
+        assert lineup == {kept}
+        assert task.result["found"] == 1
+        assert task.result["dropped_excluded"] == 1
+        # Phase 1 found 2; the user then excluded 1 of them.
+        assert task.result["message"] == message
+        assert pool_module.extract_excludes(profile.input_references) == {excluded}
 
     @pytest.mark.asyncio
     async def test_top_up_fetches_only_the_difference_and_appends(self) -> None:

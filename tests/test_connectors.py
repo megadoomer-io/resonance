@@ -285,21 +285,57 @@ class TestRequest429Cap:
         with pytest.raises(base_module.RateLimitExceededError) as exc_info:
             await connector._request("GET", "https://api.example.com/test")
 
-        # Each 5xx response resets the transient counter, so its backoff stays
-        # 2s; the budget is what ends the loop.
-        assert clock.sleeps == [100.0, 2.0, 2.0, 2.0]
+        # Consecutive 5xx back off exponentially; the budget ends the loop.
+        assert clock.sleeps == [100.0, 2.0, 4.0]
         assert exc_info.value.retry_after == 100.0
 
     async def test_transient_backoff_without_429_stops_at_budget(
         self, clock: _FakeClock
     ) -> None:
         connector = self._connector(_responses(*[(503, None)] * 10))
-        connector._RATE_LIMIT_BUDGET = 5.0
+        connector._RATE_LIMIT_BUDGET = 10.0
 
         with pytest.raises(httpx.HTTPStatusError):
             await connector._request("GET", "https://api.example.com/test")
 
-        assert clock.sleeps == [2.0, 2.0]
+        assert clock.sleeps == [2.0, 4.0]  # 8s more would end past 10s
+
+    async def test_consecutive_5xx_stop_after_max_transient_retries(
+        self, clock: _FakeClock
+    ) -> None:
+        """A steady 500 raises after 5 retries, not when the budget runs out."""
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(500)
+
+        connector = FakeConnector()
+        connector._budget = ratelimit_module.RateLimitBudget(default_interval=0.0)
+        connector._http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        connector._RATE_LIMIT_BUDGET = 1e9
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector._request("GET", "https://api.example.com/test")
+
+        assert calls == 6  # first try + 5 retries
+        assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 32.0]
+
+    async def test_5xx_count_resets_after_a_non_5xx_response(
+        self, clock: _FakeClock
+    ) -> None:
+        connector = self._connector(
+            _responses(*[(503, None)] * 4, (429, "1"), *[(503, None)] * 4, (200, None))
+        )
+        connector._RATE_LIMIT_BUDGET = 1e9
+
+        response = await connector._request("GET", "https://api.example.com/test")
+
+        assert response.status_code == 200
+        assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 1.0, 2.0, 4.0, 8.0, 16.0]
 
     async def test_transient_exception_backoff_stops_at_budget(
         self, clock: _FakeClock
