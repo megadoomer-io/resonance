@@ -75,6 +75,10 @@ class Settings(pydantic_settings.BaseSettings):
     # audit-logged regardless.
     admin_assume_user_enabled: bool = True
 
+    # Admin scenario seeding for local dev environments
+    # (POST /api/v1/admin/seed). Off by default so prod never exposes it.
+    dev_seed_enabled: bool = False
+
     # Reaper handling of RUNNING tasks whose row lease expired (#183): "log"
     # records the decision only (rollout soak); "active" recovers the row.
     task_lease_recovery: typing.Literal["log", "active"] = "log"

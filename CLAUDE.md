@@ -19,6 +19,7 @@ Personal media discovery platform — aggregates music data from external servic
 - [Admin Guide](docs/admin-guide.md) — admin panel, CLI tool, dedup operations
 - [Self-Hosting](docs/self-hosting.md) — setup and deployment
 - [Spotify API Constraints](docs/spotify-api-constraints.md) — dev mode limitations
+- [Dev Environments](docs/dev-environments.md) — named local environments, any git ref, API seeding
 
 ## Local Development
 
@@ -33,6 +34,13 @@ make dev-migrate  # Run alembic upgrade head
 ```
 
 Requires Docker (on macOS: Colima or Docker Desktop).
+
+Add `ENV=<name>` for a separate, disposable environment that can run several
+git refs against one database (`dev-app`, `dev-env`, `dev-status`), seeded via
+`resonance-api seed`: see [docs/dev-environments.md](docs/dev-environments.md).
+
+Local Docker volumes only ever hold dev or test data, so an unused one is safe
+to delete without asking (see "Leftover Docker volumes" in that doc).
 
 ## Development Commands
 
@@ -165,6 +173,7 @@ uv run resonance-api playlist exports <playlist-id>                 # In-flight 
 uv run resonance-api playlist export <playlist-id> <task-id>        # Phase, N of M, matched/skipped, stalled
 uv run resonance-api playlist export-retry <playlist-id> <task-id>  # Retry a failed or stalled export
 uv run resonance-api import concert_archives --file <path> [--export-date YYYY-MM-DD] [--wait]
+uv run resonance-api seed <file|->              # Seed a scenario (DEV_SEED_ENABLED only)
 uv run resonance-api api [METHOD] PATH [-d DATA] [-H HDR]  # Raw API request
 uv run resonance-api set-role <user_id> <role>  # Set role — direct DB
 
@@ -256,6 +265,7 @@ App config is loaded via Pydantic `Settings`. Key variables:
 - `ADMIN_API_TOKEN` — Bearer token for admin API access (CLI and programmatic use)
 - `TASK_LEASE_RECOVERY`: `log` (default) or `active`: whether the reaper only records RUNNING tasks whose row lease expired, or recovers and redelivers them (#183).
 - `WORKER_IDLE_TX_TIMEOUT_SECONDS`: default 1800. Worker connections only: Postgres ends a worker session left idle inside a transaction this long (#197).
+- `DEV_SEED_ENABLED`: default false. Enables `POST /api/v1/admin/seed` (404 otherwise); `make dev-app` sets it. Never set in prod.
 - `ADMIN_ASSUME_USER_ENABLED` — when true (default), the admin token may assume a user identity on user-scoped endpoints via the `X-Assume-User` header or `?as_user=` query param (agent-first live testing, #135). Every assumption is audit-logged. Set false to disable.
 - `DEX_CLIENT_ID`, `DEX_CLIENT_SECRET` — Dex OIDC credentials (for GitHub login via Dex broker)
 - `DEX_ISSUER_URL` — Dex issuer URL (e.g., `https://dex.megadoomer.io`). When empty, the GitHub connector is not registered and the login button does not appear.

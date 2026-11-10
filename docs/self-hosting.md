@@ -179,6 +179,9 @@ uv run python -m resonance.worker
 
 The app will be available at `http://localhost:8000`.
 
+To test changes against throwaway databases, or several git refs side by side,
+see [Dev Environments](dev-environments.md).
+
 ### Option B: Docker
 
 Build and run the container:
