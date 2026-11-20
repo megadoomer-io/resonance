@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18
+    image: postgres:19
     ports:
       - "${RESONANCE_PG_PORT:-5432}:5432"
     environment:
